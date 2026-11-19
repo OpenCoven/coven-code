@@ -77,7 +77,7 @@ Clear the current conversation history and start a fresh session. The session fi
 ### /exit
 **Aliases:** `quit`, `q`
 
-Exit the Coven Code REPL, like pressing `Ctrl+D` twice on an empty prompt. Finished turns are already saved. Typed while a turn runs, `/exit` waits for the turn to end, like any queued message. Quitting with `Ctrl+D` while a turn is still running stops it and saves it with your prompt and what it delivered so far. If it has not stopped within 2 seconds, for example while a tool ignores the stop, only your prompt from that turn is saved. With `COVEN_CODE_UI=next`, it then says the turn stopped, names each tool with no reported result, noting any last shown waiting for its turn or awaiting approval, and says what those did is unknown, names any finished tool whose result is not in the saved session, and gives the command to resume the session when the save succeeded. Quitting while auto-compaction runs waits up to 2 seconds for it, in both renderers. If it finishes in time, the compacted conversation is saved; otherwise the conversation is saved as it was before. In Next, quitting then prints only the command to resume, or that the session was not saved. Classic prints nothing after it exits, whether or not the save succeeded.
+Exit the Coven Code REPL, like pressing `Ctrl+D` twice on an empty prompt. Finished turns are already saved. Typed while a turn runs, `/exit` waits for the turn to end, like any queued message. Quitting with `Ctrl+D` while a turn is still running stops it and saves it with your prompt and what it delivered so far. If it has not stopped within 2 seconds, for example while a tool ignores the stop, only your prompt from that turn is saved. With `COVEN_CODE_UI=next`, it then says the turn stopped, names each tool with no reported result, noting any last shown waiting for its turn or awaiting approval, and says what those did is unknown, names any finished tool whose result is not in the saved session, and gives the command to resume the session when the save succeeded. Quitting while auto-compaction runs waits up to 2 seconds for it, in both renderers. If it finishes in time, the compacted conversation is saved; otherwise the conversation is saved as it was before. In Next, quitting then prints only the command to resume, or that the session was not saved. If the save at exit fails, both renderers print one line to stderr once the terminal is restored: `Session not saved; any earlier saved copy lacks this turn.` after a turn, or `Session not saved.` after auto-compaction. Classic prints nothing else after it exits.
 
 ```
 /exit
@@ -282,6 +282,8 @@ Common keys:
 | `autoApprove` | Auto-approve tool calls |
 
 Subcommands: `/config keybindings`, `/config theme [name]`, `/config output-style [style]`, `/config import`, `/config advisor [model|off]`, `/config color`, `/config vim`, `/config voice`, `/config statusline`, `/config terminal-setup` — each documented below or under [Display & Terminal](#display--terminal). Use `/splash` for the empty-session welcome panel.
+
+Under the Next renderer, `/config appearance` (also `/settings appearance`) lists, previews, saves, reverts and resets how Next draws. See [Next Appearance](configuration.md#next-appearance).
 
 `/config import` imports user-level Claude Code configuration (`CLAUDE.md`, `settings.json`) from `~/.claude` via an interactive dialog with preview and confirmation. It replaces the former `/import-config` command.
 

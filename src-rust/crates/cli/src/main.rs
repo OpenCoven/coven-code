@@ -2311,6 +2311,29 @@ fn settle_queued_permission(
     }
 }
 
+/// Opens the panel for a queued request that still needs an answer, and
+/// keeps the request waiting for it. Next guards every panel against stray
+/// keys (#411). Classic guards a follow-up, a panel opened within
+/// `PERMISSION_ARM_DELAY` of another one in the same turn closing, so a
+/// decision key doubled or repeated for the closed panel cannot decide this
+/// one (#411 decision 17). Any other Classic panel, including a turn's
+/// first, takes keys at once, as before. The rule is
+/// time-based: a writer whose request is queued only once the call before it
+/// has run for longer than the delay opens as a first panel would.
+fn open_permission_panel(
+    app: &mut claurst_tui::app::App,
+    pending_permissions: &mut claurst_tools::PendingPermissionStore,
+    pending: claurst_tools::PendingPermissionRequest,
+    follow_up: bool,
+) {
+    let request = permission_request_from_core(&pending);
+    let guard = follow_up || app.renderer == claurst_tui::application::UiRenderer::Next;
+    app.permission_request = Some(if guard { request.guarded() } else { request });
+    pending_permissions
+        .waiting
+        .insert(pending.tool_use_id.clone(), pending);
+}
+
 fn handle_bridge_permission_response(
     dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -2700,6 +2723,45 @@ async fn stop_turn_for_exit(
     messages.lock().await.clone()
 }
 
+/// What quitting mid-turn prints once the terminal is restored: lines for
+/// stdout, then at most one warning for stderr. Only Next reports on the turn
+/// and says how to resume it (#408). Both renderers warn when the save failed
+/// (decision 6 on #496): the in-app warning is gone with the terminal, and an
+/// earlier save on disk would lack this turn. Stopping compaction leaves the
+/// copy saved when the last turn ended complete.
+fn exit_output(
+    renderer: claurst_tui::application::UiRenderer,
+    exit_report: &claurst_tui::next::TurnExitReport,
+    saved: bool,
+    session: &claurst_core::history::ConversationSession,
+) -> (Vec<String>, Option<&'static str>) {
+    let next = renderer == claurst_tui::application::UiRenderer::Next;
+    let mut lines = if next {
+        exit_report.lines(&session.messages)
+    } else {
+        Vec::new()
+    };
+    let warning = if saved {
+        None
+    } else if exit_report.is_turn() {
+        Some("Session not saved; any earlier saved copy lacks this turn.")
+    } else {
+        Some("Session not saved.")
+    };
+    if next && saved && !session.messages.is_empty() {
+        let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
+        lines.push(format!(
+            "Pick it up with: {}",
+            resume_command(
+                &session.id,
+                &claurst_core::config::Settings::config_dir(),
+                standalone.as_deref(),
+            )
+        ));
+    }
+    (lines, warning)
+}
+
 /// Quitting mid-turn, in either renderer (#408): cancel the turn, wait up to
 /// `TURN_EXIT_WAIT` for it to stop, and bring `session` up to date with what
 /// it delivered, removing a goal continuation's synthetic prompt if no request
@@ -2757,11 +2819,84 @@ fn adopt_in_app_rewind(
     }
 }
 
+/// Idle auto-compaction's worker (decision 4, #406). It honours the turn's
+/// token: a cancel seen before the summary returns leaves `messages` exactly
+/// as it was and reports `Cancelled`. Once the summary is in hand it is
+/// applied and reported as finished, so a cancel that arrives after that
+/// does not undo it.
+async fn compact_idle_conversation(
+    client: &claurst_api::AnthropicClient,
+    messages: &MessagesArc,
+    model: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> claurst_query::QueryOutcome {
+    let original = messages.lock().await.clone();
+    let compacted = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return claurst_query::QueryOutcome::Cancelled,
+        result = claurst_query::compact_conversation(client, &original, model) => result,
+    };
+    match compacted {
+        Ok(compacted) => {
+            let message = compacted
+                .first()
+                .cloned()
+                .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
+            *messages.lock().await = compacted;
+            claurst_query::QueryOutcome::EndTurn {
+                message,
+                usage: claurst_core::types::UsageInfo::default(),
+            }
+        }
+        Err(err) => claurst_query::QueryOutcome::Error(err),
+    }
+}
+
+/// Report how an idle auto-compaction ended (decision 4, #406).
+///
+/// - Finished: the compaction stands, so a cancel requested while it ran is
+///   settled here without saying "Cancelled.".
+/// - Cancelled: the conversation was left as it was. Auto-compaction stays
+///   off for the session, as after a failure, so it does not start again at
+///   once on the same history, and the status says both.
+/// - Failed (or the worker panicked): auto-compaction is turned off for the
+///   session and the status says so.
+fn finish_idle_compaction(
+    app: &mut claurst_tui::App,
+    outcome: Option<&claurst_query::QueryOutcome>,
+) {
+    app.auto_compact_running = false;
+    match outcome {
+        Some(claurst_query::QueryOutcome::EndTurn { .. }) => {
+            // Settles a pending cancel now, so the loop's later settle finds
+            // nothing to report. A compaction has no tool rows, so the row
+            // bookkeeping in the settle does nothing here.
+            app.settle_cancellation();
+            // After auto-compact the context was summarised — reset usage.
+            app.context_used_tokens = 0;
+            app.status_message = Some("Auto-compact complete.".to_string());
+        }
+        Some(claurst_query::QueryOutcome::Cancelled) => {
+            app.settle_cancellation();
+            app.auto_compact_enabled = false;
+            app.status_message =
+                Some("Cancelled. Auto-compact is off for this session.".to_string());
+        }
+        _ => {
+            app.auto_compact_enabled = false;
+            app.status_message =
+                Some("Auto-compact failed and was disabled for this session.".to_string());
+        }
+    }
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
+/// While it waits, the turn's own bounded buffer fills and the query loop
+/// waits too (#408 D2).
 async fn forward_scoped_events(
-    mut turn_rx: tokio::sync::mpsc::UnboundedReceiver<claurst_query::QueryEvent>,
+    mut turn_rx: tokio::sync::mpsc::Receiver<claurst_query::QueryEvent>,
     events: tokio::sync::mpsc::Sender<claurst_tui::application::ScopedQueryEvent>,
     generation: claurst_tui::application::SessionGeneration,
 ) {
@@ -2817,17 +2952,20 @@ impl InteractiveQuery {
             let mut msgs = messages.lock().await.clone();
             // The query loop owns `turn_tx` and drops it when it returns, which
             // ends the forwarder; joining both keeps the worker's lifetime
-            // covering delivery of every event it produced.
-            let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+            // covering delivery of every event it produced. The buffer is
+            // bounded: when it is full the query loop waits for the
+            // forwarder instead of growing it.
+            let (turn_tx, turn_rx) =
+                tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
             let forward = forward_scoped_events(turn_rx, self.events, self.generation);
-            let run = claurst_query::run_query_loop(
+            let run = claurst_query::run_query_loop_with_events(
                 self.client.as_ref(),
                 &mut msgs,
                 self.tools.as_slice(),
                 &self.context,
                 &self.config,
                 self.tracker,
-                Some(turn_tx),
+                Some(turn_tx.into()),
                 self.cancel,
                 None,
             );
@@ -3101,6 +3239,130 @@ fn spawn_memory_read() -> std::sync::mpsc::Receiver<claurst_tui::application::me
     receiver
 }
 
+/// This process's registrations in the Coven daemon ledger: opt-in and best
+/// effort, so a dead or absent daemon never affects the session.
+#[derive(Default)]
+struct LedgerRegistrations {
+    /// Every session a registration was sent for, accepted or not; each is
+    /// marked complete at exit, whichever session is bound by then.
+    sent: Vec<String>,
+    /// The latest registration's answer, until it arrives.
+    answer: Option<tokio::sync::oneshot::Receiver<claurst_tui::application::RegistrationAnswer>>,
+}
+
+/// How long the exit waits for a registration still in flight before it
+/// sends the completions. Best effort: it covers the health read that
+/// precedes the registration request (2 s at most), not a daemon that is
+/// also slow to take the request itself.
+const LEDGER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl LedgerRegistrations {
+    /// Send a registration for session `id` off the UI thread and show it
+    /// as waiting for its answer. `register` is the blocking daemon call.
+    fn register(
+        &mut self,
+        app: &mut claurst_tui::App,
+        id: &str,
+        register: impl FnOnce() -> Result<Option<claurst_core::coven_daemon::DaemonInstance>, String>
+            + Send
+            + 'static,
+    ) {
+        use claurst_tui::application::SessionOwnership;
+
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let _ = answer_tx.send(register().into());
+        });
+        self.answer = Some(answer_rx);
+        if !self.sent.iter().any(|sent| sent == id) {
+            self.sent.push(id.to_string());
+        }
+        let session_id = id.to_string();
+        app.ownership = if app.ownership.registration_is_unknown() {
+            SessionOwnership::LedgerRenewing { session_id }
+        } else {
+            SessionOwnership::LedgerPending { session_id }
+        };
+    }
+
+    /// A session start after the first. Policy B (#412): a registration
+    /// that became unknown, because another daemon instance answered or the
+    /// one that took it was never identified, is sent again here for the
+    /// session now bound. The loop calls this where `/session resume` binds
+    /// a session, the only place a running process binds one.
+    fn session_started(
+        &mut self,
+        app: &mut claurst_tui::App,
+        id: &str,
+        register: impl FnOnce() -> Result<Option<claurst_core::coven_daemon::DaemonInstance>, String>
+            + Send
+            + 'static,
+    ) {
+        if app.ownership.registration_is_unknown() {
+            self.register(app, id, register);
+        }
+    }
+
+    /// Apply the latest registration's answer once it has arrived.
+    fn settle(&mut self, app: &mut claurst_tui::App, now: std::time::Instant) {
+        use claurst_tui::application::RegistrationAnswer;
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let Some(answer) = &mut self.answer else {
+            return;
+        };
+        let answer = match answer.try_recv() {
+            Ok(answer) => answer,
+            // The registration task ended without answering.
+            Err(TryRecvError::Closed) => RegistrationAnswer::Failed,
+            Err(TryRecvError::Empty) => return,
+        };
+        self.answer = None;
+        app.ownership.settle_registration(answer, now);
+    }
+
+    /// At exit: mark every session a registration was sent for complete.
+    /// A registration still in flight gets up to `wait` to finish first;
+    /// if it has not, the completions go out anyway and one may reach the
+    /// daemon ahead of its registration. The completions run side by side,
+    /// so a daemon that accepts and never answers delays the exit by one
+    /// request timeout, however many ids there are. `complete` is the
+    /// blocking daemon call.
+    async fn complete_all(
+        self,
+        wait: std::time::Duration,
+        complete: impl Fn(&str) + Send + Sync + 'static,
+    ) {
+        if let Some(answer) = self.answer {
+            let _ = tokio::time::timeout(wait, answer).await;
+        }
+        let complete = Arc::new(complete);
+        let completions: Vec<_> = self
+            .sent
+            .into_iter()
+            .map(|id| {
+                let complete = Arc::clone(&complete);
+                tokio::task::spawn_blocking(move || complete(&id))
+            })
+            .collect();
+        for completion in completions {
+            let _ = completion.await;
+        }
+    }
+}
+
+/// The blocking ledger registration of `session`, run under `root`.
+fn ledger_registration(
+    session: &claurst_core::history::ConversationSession,
+    root: &std::path::Path,
+) -> impl FnOnce() -> Result<Option<claurst_core::coven_daemon::DaemonInstance>, String> + Send + 'static
+{
+    let id = session.id.clone();
+    let root = root.to_path_buf();
+    let title = session.title.clone().unwrap_or_default();
+    move || claurst_core::coven_ledger::notify_session_start(&id, &root, &title)
+}
+
 /// How often an open Work page re-reads the session goal from SQLite.
 const WORK_GOAL_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -3226,6 +3488,39 @@ fn suspend_job(
         Some(3),
     );
     Ok(())
+}
+
+/// `/config appearance` under Next. Everything but `save` stays in memory.
+async fn run_next_appearance_command(
+    app: &mut claurst_tui::App,
+    args: &str,
+    working_dir: &std::path::Path,
+) {
+    use claurst_tui::next::appearance::{
+        parse_appearance_command, run_appearance_command, AppearanceCommand,
+    };
+    let reply = match parse_appearance_command(args) {
+        Err(reason) => reason,
+        Ok(command) => {
+            let save_failure = (command == AppearanceCommand::Save
+                && !app.next_shell.appearance_edits.is_empty())
+            .then(|| Settings::save_appearance_edits(&app.next_shell.appearance_edits).err())
+            .flatten()
+            .map(|error| format!("{error:#}"));
+            let saved = Settings::load_hierarchical(working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            run_appearance_command(
+                app,
+                command,
+                &saved,
+                save_failure,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+                crossterm::terminal::size().unwrap_or((80, 24)),
+            )
+        }
+    };
+    app.push_message(claurst_core::types::Message::assistant(reply));
 }
 
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
@@ -3408,17 +3703,19 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
-    // Classic drops the Next-only defaults, so upgrading an older file must
-    // keep a binding in every context when only they use its chord.
-    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
-        &Settings::config_dir(),
-        claurst_tui::next::NEXT_ONLY_ACTIONS,
-    );
+    // The bindings App::new loaded and resolves keys with.
+    let user_keybindings = app.user_keybindings.clone();
     app.select_renderer(renderer);
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
             std::env::var(name).ok()
         });
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        app.next_shell.apply_layout(
+            settings.next_appearance.layout,
+            crossterm::terminal::size().unwrap_or((80, 24)),
+        );
+    }
     // Next shows the chord that works now; say once which bindings changed.
     if renderer == claurst_tui::application::UiRenderer::Next {
         for notice in claurst_tui::next::key_conflict_notices(&user_keybindings) {
@@ -3426,28 +3723,6 @@ async fn run_interactive(
                 .push(claurst_tui::NotificationKind::Info, notice, Some(10));
         }
     }
-
-    // Register this session in the Coven daemon ledger (best-effort, opt-in).
-    // The id is captured here so that a mid-run /resume (which rebinds session.id)
-    // does not leave this registration uncompleted — the exit hook uses this local
-    // rather than session.id, which may have changed to a different session by then.
-    let (ledger_tx, mut ledger_rx) = tokio::sync::oneshot::channel::<bool>();
-    let ledger_session_id: Option<String> = if settings.daemon_ledger {
-        let id = session.id.clone();
-        let root = tool_ctx.working_dir.clone();
-        let title = session.title.clone().unwrap_or_default();
-        let id_for_task = id.clone();
-        tokio::task::spawn_blocking(move || {
-            let accepted =
-                claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title)
-                    .is_ok();
-            let _ = ledger_tx.send(accepted);
-        });
-        Some(id)
-    } else {
-        drop(ledger_tx);
-        None
-    };
 
     // Background: refresh the model registry from models.dev.
     // The fetched JSON is saved as a cache file; the App will reload it from
@@ -3472,12 +3747,17 @@ async fn run_interactive(
     if app.renderer == claurst_tui::application::UiRenderer::Next {
         app.session_title = session.title.clone();
     }
-    app.ownership = match &ledger_session_id {
-        Some(id) => claurst_tui::application::SessionOwnership::LedgerPending {
-            session_id: id.clone(),
-        },
-        None => claurst_tui::application::SessionOwnership::EngineLocal,
-    };
+    // Register this session in the Coven daemon ledger (best-effort, opt-in).
+    // A mid-run /resume rebinds session.id; the ids registered here are kept
+    // so the exit hook completes each of them.
+    let mut ledger = LedgerRegistrations::default();
+    if settings.daemon_ledger {
+        ledger.register(
+            &mut app,
+            &session.id,
+            ledger_registration(&session, &tool_ctx.working_dir),
+        );
+    }
     if let Some(log) = &diagnostic_log {
         app.diagnostic_log_path = log.path().map(std::path::Path::to_path_buf);
         app.diagnostic_buffer = log.take_snapshot();
@@ -3738,6 +4018,10 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
+    let mut settings_screen_was_open = false;
+    // When the loop last saw a permission panel open, or closed one; cleared
+    // when a turn ends. See `open_permission_panel`.
+    let mut panel_last_open: Option<std::time::Instant> = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -3796,6 +4080,21 @@ async fn run_interactive(
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
         }
+        // `/settings` writes reduceMotion; Next draws the new value when it closes.
+        if renderer == claurst_tui::application::UiRenderer::Next
+            && settings_screen_was_open
+            && !app.settings_screen.visible
+        {
+            let saved = Settings::load_hierarchical(&tool_ctx.working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            claurst_tui::next::appearance::apply_presentation(
+                &mut app,
+                &saved,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+            );
+        }
+        settings_screen_was_open = app.settings_screen.visible;
 
         // Opt-in trace timing separates widget/layout work from completed draw
         // (including backend diff and terminal writes). No content is recorded.
@@ -3829,28 +4128,11 @@ async fn run_interactive(
             );
         }
         app.settle_scroll_anchor();
+        ledger.settle(&mut app, std::time::Instant::now());
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
         // unless an auto-submit (queued message) is pending — in which case
         // synthesize an Enter event to dequeue and submit it.
-        if let claurst_tui::application::SessionOwnership::LedgerPending { session_id } =
-            &app.ownership
-        {
-            let outcome = match ledger_rx.try_recv() {
-                Ok(accepted) => Some(accepted),
-                // The registration task ended without answering.
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some(false),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-            };
-            if let Some(accepted) = outcome {
-                let session_id = session_id.clone();
-                app.ownership = if accepted {
-                    claurst_tui::application::SessionOwnership::LedgerRegistered { session_id }
-                } else {
-                    claurst_tui::application::SessionOwnership::LedgerFailed { session_id }
-                };
-            }
-        }
         // A session chosen in the browser resumes through `/session resume`, exactly
         // as if typed, once no turn is running. If that did not switch
         // sessions, the current one gets its draft back.
@@ -4020,6 +4302,15 @@ async fn run_interactive(
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(&cmd_name, &cmd_args, &mut cmd_ctx) {
                                 app.show_command_error(error);
                                 continue;
+                            }
+                            if renderer == claurst_tui::application::UiRenderer::Next {
+                                if let Some(args) =
+                                    claurst_tui::next::appearance::appearance_args(&cmd_name, &cmd_args)
+                                {
+                                    run_next_appearance_command(&mut app, args, &tool_ctx.working_dir)
+                                        .await;
+                                    continue;
+                                }
                             }
                             let canonical_path = claurst_commands::canonical_catalog_path(&cmd_name, &cmd_args)
                                 .or_else(|| app.canonical_command_path(&cmd_name, &cmd_args));
@@ -4226,6 +4517,11 @@ async fn run_interactive(
                                     app.attach_turn_diff_state(
                                         tool_ctx.file_history.clone(),
                                         tool_ctx.current_turn.clone(),
+                                    );
+                                    ledger.session_started(
+                                        &mut app,
+                                        &session.id,
+                                        ledger_registration(&session, &tool_ctx.working_dir),
                                     );
                                     let title = session
                                         .title
@@ -4871,6 +5167,7 @@ async fn run_interactive(
                                 None
                             };
                             app.permission_request = None;
+                            panel_last_open = Some(std::time::Instant::now());
 
                             if let Some(prefix) = bash_prefix {
                                 app.bash_prefix_allowlist.insert(prefix);
@@ -4992,14 +5289,22 @@ async fn run_interactive(
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
-                Event::Resize(_, _) => {
-                    // Terminal resize - will be handled on next draw
+                // The next draw lays out for the new size; Next's layout
+                // setting decides first whether the inspector fits.
+                Event::Resize(width, height)
+                    if app.renderer == claurst_tui::application::UiRenderer::Next =>
+                {
+                    app.next_shell.follow_layout((width, height));
                 }
                 _ => {}
             }
         }
 
         if app.permission_request.is_none() {
+            // A panel opening within the arming delay of the last one closing
+            // is a follow-up: a key meant for the closed panel can still come.
+            let follow_up = panel_last_open
+                .is_some_and(|seen| seen.elapsed() < claurst_tui::dialogs::PERMISSION_ARM_DELAY);
             loop {
                 let next_pending = pending_permissions.lock().queue.pop_front();
                 let Some(pending) = next_pending else {
@@ -5034,26 +5339,20 @@ async fn run_interactive(
 
                 match reevaluated {
                     Some(claurst_core::permissions::PermissionDecision::Ask { .. }) | None => {
-                        let tool_use_id = pending.tool_use_id.clone();
-                        let request = permission_request_from_core(&pending);
-                        // Next guards approvals against stray keys (#411);
-                        // Classic keeps its existing dialog behavior.
-                        app.permission_request = Some(
-                            if app.renderer == claurst_tui::application::UiRenderer::Next {
-                                request.guarded()
-                            } else {
-                                request
-                            },
+                        open_permission_panel(
+                            &mut app,
+                            &mut pending_permissions.lock(),
+                            pending,
+                            follow_up,
                         );
-                        pending_permissions
-                            .lock()
-                            .waiting
-                            .insert(tool_use_id, pending);
                         break;
                     }
                     Some(decision) => settle_queued_permission(&mut app, pending, decision),
                 }
             }
+        }
+        if app.permission_request.is_some() {
+            panel_last_open = Some(std::time::Instant::now());
         }
         app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
@@ -5207,31 +5506,13 @@ async fn run_interactive(
             goal_turn = None;
 
             let handle = tokio::spawn(async move {
-                if ct.is_cancelled() {
-                    return QueryOutcome::Cancelled;
-                }
-
-                let msgs = msgs_arc_clone.lock().await.clone();
-                match claurst_query::compact_conversation(
+                compact_idle_conversation(
                     client_clone.as_ref(),
-                    &msgs,
+                    &msgs_arc_clone,
                     &compact_model,
+                    &ct,
                 )
                 .await
-                {
-                    Ok(compacted) => {
-                        let message = compacted
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
-                        *msgs_arc_clone.lock().await = compacted;
-                        QueryOutcome::EndTurn {
-                            message,
-                            usage: claurst_core::types::UsageInfo::default(),
-                        }
-                    }
-                    Err(err) => QueryOutcome::Error(err),
-                }
             });
             current_query = Some((handle, msgs_arc));
         }
@@ -5358,6 +5639,7 @@ async fn run_interactive(
                         );
                         if let Some((call_id, allowed)) = decided {
                             app.record_permission_decision(&call_id, allowed);
+                            panel_last_open = Some(std::time::Instant::now());
                         }
                     }
                     Ok(TuiBridgeEvent::SessionNameUpdate { title }) => {
@@ -5868,6 +6150,9 @@ async fn run_interactive(
         // Sync messages from a task seen finished before the drain above.
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
+                // The next turn's first panel is not a follow-up of this
+                // turn's last one, however soon it opens.
+                panel_last_open = None;
                 // Get the outcome and handle errors
                 let query_outcome = handle.await;
                 match &query_outcome {
@@ -5921,7 +6206,6 @@ async fn run_interactive(
                 };
                 let completed_end_turn = matches!(&query_outcome, Ok(QueryOutcome::EndTurn { .. }));
                 let was_auto_compact = app.auto_compact_running;
-                let auto_compact_succeeded = completed_end_turn;
                 // Sync the updated conversation back to our local vector
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
@@ -5939,17 +6223,7 @@ async fn run_interactive(
                     app.pending_auto_submit = true;
                 }
                 if app.auto_compact_running {
-                    app.auto_compact_running = false;
-                    if !auto_compact_succeeded {
-                        app.auto_compact_enabled = false;
-                        app.status_message = Some(
-                            "Auto-compact failed and was disabled for this session.".to_string(),
-                        );
-                    } else {
-                        // After auto-compact the context was summarised — reset usage.
-                        app.context_used_tokens = 0;
-                        app.status_message = Some("Auto-compact complete.".to_string());
-                    }
+                    finish_idle_compaction(&mut app, query_outcome.as_ref().ok());
                 }
 
                 rollback_unattempted_turn(
@@ -6203,28 +6477,12 @@ async fn run_interactive(
         .await;
         let saved =
             persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
-        if app.renderer == claurst_tui::application::UiRenderer::Next {
-            for line in exit_report.lines(&session.messages) {
-                println!("{line}");
-            }
-            // The in-app warning is gone once the terminal is restored, and an
-            // earlier save on disk would lack this turn. Stopping compaction
-            // leaves the copy saved when the last turn ended complete.
-            if !saved && exit_report.is_turn() {
-                eprintln!("Session not saved; any earlier saved copy lacks this turn.");
-            } else if !saved {
-                eprintln!("Session not saved.");
-            } else if !session.messages.is_empty() {
-                let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
-                println!(
-                    "Pick it up with: {}",
-                    resume_command(
-                        &session.id,
-                        &claurst_core::config::Settings::config_dir(),
-                        standalone.as_deref(),
-                    )
-                );
-            }
+        let (lines, warning) = exit_output(app.renderer, &exit_report, saved, &session);
+        for line in lines {
+            println!("{line}");
+        }
+        if let Some(warning) = warning {
+            eprintln!("{warning}");
         }
     }
     if let Some(mut runtime) = bridge_runtime.take() {
@@ -6234,12 +6492,15 @@ async fn run_interactive(
         }
     }
 
-    // Mark the session complete in the Coven daemon ledger (best-effort, opt-in).
-    // Use the id captured at registration time, not session.id, which may have been
-    // rebound by a mid-run /resume to a completely different session.
-    if let Some(id) = &ledger_session_id {
-        claurst_core::coven_ledger::notify_session_complete(id, Some(0));
-    }
+    // Mark every session this process sent a registration for complete in the
+    // Coven daemon ledger (best-effort, opt-in). The ids were captured at
+    // registration time: session.id may have been rebound by a mid-run
+    // /resume to a completely different session.
+    ledger
+        .complete_all(LEDGER_EXIT_WAIT, |id| {
+            claurst_core::coven_ledger::notify_session_complete(id, Some(0));
+        })
+        .await;
 
     terminal_result?;
     Ok(())
@@ -6914,13 +7175,14 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_forwarder_delivers_every_event_in_order_under_backpressure() {
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, mut receiver) = tokio::sync::mpsc::channel(1);
         let mut scope = claurst_tui::application::SessionScope::default();
         let generation = scope.advance();
         for n in 0..200 {
             turn_tx
-                .send(claurst_query::QueryEvent::Status(format!("event {n}")))
+                .try_send(claurst_query::QueryEvent::Status(format!("event {n}")))
                 .unwrap();
         }
         drop(turn_tx);
@@ -6942,11 +7204,12 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_forwarder_stops_when_the_interactive_loop_is_gone() {
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
         turn_tx
-            .send(claurst_query::QueryEvent::Status("orphan".into()))
+            .try_send(claurst_query::QueryEvent::Status("orphan".into()))
             .unwrap();
         // The sender stays alive: the forwarder must end on the closed queue,
         // not wait for the turn to finish.
@@ -6968,11 +7231,12 @@ mod tests {
         // settle its cancel. A worker finishes only once its forwarder has
         // queued everything, so after a pass that saw it finished nothing of
         // its turn can arrive any more.
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, mut queue) = tokio::sync::mpsc::channel(1);
         for n in 0..3 {
             turn_tx
-                .send(claurst_query::QueryEvent::Status(format!("backlog {n}")))
+                .try_send(claurst_query::QueryEvent::Status(format!("backlog {n}")))
                 .unwrap();
         }
         drop(turn_tx);
@@ -6999,24 +7263,57 @@ mod tests {
 
     #[tokio::test]
     async fn quitting_frees_a_turn_blocked_on_the_full_queue_and_keeps_its_messages() {
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        // The producer stands in for the query loop: it sends more than the
+        // per-turn buffer and the queue hold, so it ends up waiting on a full
+        // per-turn buffer (#408 D2) behind a forwarder waiting on the queue.
+        const BACKLOG: usize = claurst_tui::application::QUERY_PRODUCER_CAPACITY + 16;
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, queue) = tokio::sync::mpsc::channel(1);
-        for _ in 0..3 {
-            turn_tx
-                .send(claurst_query::QueryEvent::Status("backlog".into()))
-                .unwrap();
-        }
-        drop(turn_tx);
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let producer_sent = sent.clone();
+        let producer = async move {
+            let sink = claurst_query::QueryEventSink::from(turn_tx);
+            for _ in 0..BACKLOG {
+                if sink
+                    .emit(claurst_query::QueryEvent::Status("backlog".into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                producer_sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
         let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let worker_messages = messages.clone();
         let handle = tokio::spawn(async move {
-            forward_scoped_events(turn_rx, events, Default::default()).await;
+            tokio::join!(
+                producer,
+                forward_scoped_events(turn_rx, events, Default::default())
+            );
             *worker_messages.lock().await =
                 vec![claurst_core::types::Message::user("kept".to_string())];
             claurst_query::QueryOutcome::Cancelled
         });
-        // Let the forwarder fill the queue and block on it.
-        tokio::task::yield_now().await;
+        // Let the producer fill both buffers and block.
+        let filled = async {
+            while sent.load(std::sync::atomic::Ordering::SeqCst)
+                < claurst_tui::application::QUERY_PRODUCER_CAPACITY
+            {
+                tokio::task::yield_now().await;
+            }
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), filled)
+            .await
+            .expect("the producer fills the per-turn buffer");
+        assert!(
+            sent.load(std::sync::atomic::Ordering::SeqCst) < BACKLOG,
+            "the producer waits on the full per-turn buffer"
+        );
 
         let wait = std::time::Duration::from_secs(30);
         let kept = tokio::time::timeout(
@@ -7026,6 +7323,50 @@ mod tests {
         .await
         .expect("a closed queue must free the worker, not run out the wait");
         assert_eq!(kept.len(), 1);
+    }
+
+    /// Decision 6 on #496: when the save at exit fails, Classic prints the
+    /// one-line warning Next prints, and nothing else. The save fails for a
+    /// session id the store refuses as a file name, so no directory is
+    /// touched.
+    #[tokio::test]
+    async fn quitting_after_a_failed_save_warns_in_both_renderers() {
+        use claurst_tui::application::UiRenderer;
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        session.id = "not/a/file/name".into();
+        session
+            .messages
+            .push(claurst_core::types::Message::user("the prompt".to_string()));
+        let saved =
+            save_session_with_warning(&session, &mut app.notifications, "transcript update").await;
+        assert!(!saved, "the save fails");
+
+        let turn = claurst_tui::next::TurnExitReport::capture(&app);
+        let compaction = claurst_tui::next::TurnExitReport::default();
+        let after_turn = Some("Session not saved; any earlier saved copy lacks this turn.");
+        let (lines, warning) = exit_output(UiRenderer::Classic, &turn, saved, &session);
+        assert_eq!((lines, warning), (Vec::new(), after_turn));
+        let (lines, warning) = exit_output(UiRenderer::Classic, &compaction, saved, &session);
+        assert_eq!((lines, warning), (Vec::new(), Some("Session not saved.")));
+
+        // Next prints the same warning after its report, and no way back.
+        let (lines, warning) = exit_output(UiRenderer::Next, &turn, saved, &session);
+        assert_eq!(warning, after_turn);
+        assert!(lines[0].starts_with("Quit during a turn."), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.starts_with("Pick it up with")));
+
+        // A save that succeeds prints nothing in Classic; Next gives the way
+        // back.
+        assert_eq!(
+            exit_output(UiRenderer::Classic, &turn, true, &session),
+            (Vec::new(), None)
+        );
+        let (lines, warning) = exit_output(UiRenderer::Next, &turn, true, &session);
+        assert_eq!(warning, None);
+        assert!(lines
+            .last()
+            .is_some_and(|line| line.starts_with("Pick it up with")));
     }
 
     /// #408: quitting during a turn stops it and keeps the prompt and the
@@ -7123,10 +7464,200 @@ mod tests {
         assert_eq!(session.messages.len(), 1, "the prompt is kept");
     }
 
-    /// #408: a worker that does not watch the token, as auto-compaction does
-    /// not, is waited for. If it finishes within `TURN_EXIT_WAIT`, the
-    /// conversation it wrote is what is kept. This models the compaction
-    /// worker's shape, not `compact_conversation` itself.
+    /// A Messages API stand-in for idle compaction. With `reply`, it answers
+    /// every request with a one-line summary; without, it holds each request
+    /// open and never answers. Reports each request it has read in full.
+    async fn compaction_fixture(
+        reply: bool,
+    ) -> (
+        Arc<claurst_api::AnthropicClient>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen, requests) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert!(n > 0, "fixture connection closed before request");
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|length| length.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let _ = seen.send(());
+                if !reply {
+                    held.push(socket);
+                    continue;
+                }
+                let body = "event: message_start\ndata: {\"message\":{\"id\":\"summary\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n\
+                    event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                    event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"The summary.\"}}\n\n\
+                    event: content_block_stop\ndata: {\"index\":0}\n\n\
+                    event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n\
+                    event: message_stop\ndata: {}\n\n";
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "fake-local-key".into(),
+            api_base: format!("http://{address}"),
+            max_retries: 0,
+            request_timeout: std::time::Duration::from_secs(30),
+            ..Default::default()
+        })
+        .unwrap();
+        (Arc::new(client), requests, server)
+    }
+
+    /// Enough history for `compact_conversation` to summarise a head.
+    fn compactable_history() -> Vec<claurst_core::types::Message> {
+        (0..16)
+            .map(|n| {
+                if n % 2 == 0 {
+                    claurst_core::types::Message::user(format!("question {n}"))
+                } else {
+                    claurst_core::types::Message::assistant(format!("answer {n}"))
+                }
+            })
+            .collect()
+    }
+
+    /// An App whose idle auto-compaction is running and whose user has asked
+    /// to cancel it; the loop has cancelled the token.
+    fn app_cancelling_idle_compaction() -> claurst_tui::App {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        app.context_used_tokens = 9_000;
+        app.cancellation = claurst_tui::application::TurnCancellation::AwaitingRuntime;
+        app
+    }
+
+    /// Decision 4 (#406): a cancel during idle auto-compaction stops it. The
+    /// conversation is exactly what it was, and the status says it was
+    /// cancelled and that auto-compaction is now off.
+    #[tokio::test]
+    async fn idle_compaction_cancelled_mid_summary_leaves_history_and_says_cancelled() {
+        let (client, mut requests, server) = compaction_fixture(false).await;
+        let history = compactable_history();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let worker = {
+            let (messages, cancel) = (messages.clone(), cancel.clone());
+            tokio::spawn(async move {
+                compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await
+            })
+        };
+        // The summary request is in flight and will never be answered.
+        tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+            .await
+            .expect("the summary request reaches the fixture");
+        cancel.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .expect("a cancel stops the compaction instead of waiting for the summary")
+            .unwrap();
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::Cancelled),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&*messages.lock().await).unwrap(),
+            serde_json::to_value(&history).unwrap(),
+            "no half-applied compaction"
+        );
+
+        let mut app = app_cancelling_idle_compaction();
+        finish_idle_compaction(&mut app, Some(&outcome));
+        app.settle_cancellation();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Cancelled. Auto-compact is off for this session.")
+        );
+        assert_eq!(
+            app.cancellation,
+            claurst_tui::application::TurnCancellation::Idle
+        );
+        assert_eq!(app.context_used_tokens, 9_000, "nothing was summarised");
+        assert!(
+            !app.auto_compact_enabled,
+            "it does not start again at once on the same history"
+        );
+        server.abort();
+    }
+
+    /// Decision 4 (#406): a cancel that arrives once the compaction has
+    /// finished keeps the compacted conversation, and the status does not
+    /// call the compaction cancelled.
+    #[tokio::test]
+    async fn idle_compaction_finished_before_the_cancel_keeps_its_result_and_status() {
+        let (client, _requests, server) = compaction_fixture(true).await;
+        let history = compactable_history();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        cancel.cancel();
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        let compacted = messages.lock().await.clone();
+        assert!(compacted.len() < history.len(), "the summary was applied");
+        assert!(compacted
+            .iter()
+            .any(|message| message.get_all_text().contains("The summary.")));
+
+        let mut app = app_cancelling_idle_compaction();
+        finish_idle_compaction(&mut app, Some(&outcome));
+        // The loop settles once no worker is left running.
+        app.settle_cancellation();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Auto-compact complete.")
+        );
+        assert_eq!(
+            app.cancellation,
+            claurst_tui::application::TurnCancellation::Idle
+        );
+        assert_eq!(app.context_used_tokens, 0);
+        assert!(app.auto_compact_enabled);
+        server.abort();
+    }
+
+    /// #408: a worker that does not watch the token (a tool or approval that
+    /// ignores it) is waited for. If it finishes within `TURN_EXIT_WAIT`, the
+    /// conversation it wrote is what is kept. Idle auto-compaction watches the
+    /// token since decision 4; see the `idle_compaction_*` tests.
     #[tokio::test]
     async fn quitting_keeps_what_a_worker_that_ignores_the_stop_wrote_if_it_finishes_in_time() {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
@@ -7337,6 +7868,54 @@ mod tests {
             },
             rx,
         )
+    }
+
+    /// Decision 17 of #411: Classic guards a follow-up panel the way Next
+    /// guards every panel, and leaves its first panel as it was.
+    #[test]
+    fn classic_guards_only_a_follow_up_panel_and_next_guards_every_panel() {
+        use claurst_tui::application::UiRenderer;
+        use claurst_tui::dialogs::{handle_permission_key_at, PERMISSION_ARM_DELAY};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        for (renderer, follow_up, guarded) in [
+            (UiRenderer::Classic, false, false),
+            (UiRenderer::Classic, true, true),
+            (UiRenderer::Next, false, true),
+            (UiRenderer::Next, true, true),
+        ] {
+            let tag = format!("{renderer:?}, follow-up: {follow_up}");
+            let mut app = claurst_tui::App::new(
+                claurst_core::config::Config::default(),
+                claurst_core::cost::CostTracker::new(),
+            );
+            app.renderer = renderer;
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            let (pending, _decision) = bridge_permission_fixture("perm-follow-up");
+            open_permission_panel(&mut app, &mut store, pending, follow_up);
+            assert!(store.waiting.contains_key("perm-follow-up"), "{tag}");
+            let Some(panel) = app.permission_request.as_mut() else {
+                panic!("{tag}: no panel opened");
+            };
+            assert_eq!(panel.arming, guarded, "{tag}");
+            let focused = panel.options[panel.selected_option].key;
+            assert_eq!(focused, if guarded { 'n' } else { 'y' }, "{tag}");
+
+            // A y that reaches the panel as it opens decides it only when
+            // the panel is not guarded.
+            let opened = panel.quiet_since;
+            assert_eq!(
+                handle_permission_key_at(panel, y, opened),
+                !guarded,
+                "{tag}"
+            );
+            if guarded {
+                // A y after a quiet gap still allows it.
+                let armed = opened + PERMISSION_ARM_DELAY;
+                assert!(handle_permission_key_at(panel, y, armed), "{tag}");
+                assert_eq!(panel.options[panel.selected_option].key, 'y', "{tag}");
+            }
+        }
     }
 
     #[test]
@@ -8495,6 +9074,302 @@ mod tests {
         let mut again_rx = Some(again_rx);
         refresh_memory_snapshot(&mut app, true, &mut poll, || again_rx.take().unwrap());
         assert!(poll.in_flight.is_some(), "re-read after the interval");
+    }
+
+    fn ledger_test_instance(pid: u32) -> claurst_core::coven_daemon::DaemonInstance {
+        claurst_core::coven_daemon::DaemonInstance {
+            pid: Some(pid),
+            started_at: Some(format!("2026-11-18T05:00:{:02}Z", pid % 60)),
+            api_version: "coven.daemon.v1".to_string(),
+            coven_version: "0.5.0".to_string(),
+            socket_file: Some((1, u64::from(pid))),
+        }
+    }
+
+    /// Run the loop's ledger step until the pending registration is answered.
+    async fn settle_ledger(ledger: &mut LedgerRegistrations, app: &mut claurst_tui::app::App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ledger.answer.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the registration never answered"
+            );
+            ledger.settle(app, std::time::Instant::now());
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// #412, policy B: a session start sends a registration again only when
+    /// the earlier one is unknown, and then once, for the session it binds.
+    /// The loop's own ledger steps (settling an answer, comparing a probe)
+    /// send nothing. That no other part of the loop registers is checked on
+    /// the real binary by the tmux case `33_daemon_restart_unknown.sh`.
+    #[tokio::test]
+    async fn a_session_start_registers_again_only_when_the_registration_is_unknown() {
+        use claurst_core::coven_daemon::DaemonSighting;
+        use claurst_tui::application::SessionOwnership;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut ledger = LedgerRegistrations::default();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let accepted_by = |pid: u32| {
+            let sent = Arc::clone(&sent);
+            move || {
+                sent.fetch_add(1, Ordering::AcqRel);
+                Ok(Some(ledger_test_instance(pid)))
+            }
+        };
+        let unknown = SessionOwnership::LedgerUnknown {
+            session_id: "session-a".to_string(),
+        };
+
+        // Launch: session A registers with daemon 100.
+        ledger.register(&mut app, "session-a", accepted_by(100));
+        assert_eq!(
+            app.ownership,
+            SessionOwnership::LedgerPending {
+                session_id: "session-a".to_string()
+            }
+        );
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(
+            matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, instance, .. }
+                if session_id == "session-a" && instance == &ledger_test_instance(100)),
+            "{:?}",
+            app.ownership
+        );
+        assert_eq!(sent.load(Ordering::Acquire), 1);
+
+        // The same daemon keeps answering: a session start sends nothing.
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        app.ownership
+            .observe_daemon(&DaemonSighting::Instance(ledger_test_instance(100)), later);
+        let registered = app.ownership.clone();
+        ledger.session_started(&mut app, "session-a", accepted_by(100));
+        assert_eq!(app.ownership, registered);
+        assert_eq!(sent.load(Ordering::Acquire), 1);
+
+        // The daemon is restarted: daemon 200 answers the probe.
+        let restarted = DaemonSighting::Instance(ledger_test_instance(200));
+        app.ownership.observe_daemon(&restarted, later);
+        assert_eq!(app.ownership, unknown);
+
+        // The loop's ledger steps between session starts: probes keep
+        // landing, and the daemon goes away and comes back. They send
+        // nothing.
+        for sighting in [
+            &restarted,
+            &DaemonSighting::Gone,
+            &DaemonSighting::Unidentified,
+            &restarted,
+        ] {
+            for _ in 0..10 {
+                ledger.settle(&mut app, std::time::Instant::now());
+                app.ownership.observe_daemon(sighting, later);
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(app.ownership, unknown);
+        assert!(ledger.answer.is_none(), "a registration is in flight");
+        assert_eq!(
+            sent.load(Ordering::Acquire),
+            1,
+            "a ledger step registered again"
+        );
+
+        // The next session start registers the session it binds, once. Until
+        // the answer arrives the indicator still reads unknown.
+        ledger.session_started(&mut app, "session-b", accepted_by(200));
+        assert_eq!(
+            app.ownership,
+            SessionOwnership::LedgerRenewing {
+                session_id: "session-b".to_string()
+            }
+        );
+        assert_eq!(
+            app.ownership.daemon_presence(true),
+            claurst_tui::application::DaemonPresence::Unknown
+        );
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(
+            matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, instance, .. }
+                if session_id == "session-b" && instance == &ledger_test_instance(200)),
+            "{:?}",
+            app.ownership
+        );
+        assert_eq!(sent.load(Ordering::Acquire), 2);
+        // Both are completed at exit.
+        assert_eq!(ledger.sent, ["session-a", "session-b"]);
+
+        // Registered with the daemon answering now: later probes agree.
+        app.ownership.observe_daemon(
+            &restarted,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        assert!(!app.ownership.registration_is_unknown());
+    }
+
+    /// A first registration that is refused, or whose task died, is shown as
+    /// failed and is not retried at a session start: policy B registers
+    /// again only what a daemon accepted and can no longer be tied to.
+    #[tokio::test]
+    async fn a_failed_registration_is_not_retried_at_a_session_start() {
+        use claurst_tui::application::SessionOwnership;
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let failed = SessionOwnership::LedgerFailed {
+            session_id: "session-a".to_string(),
+        };
+        for register in [
+            Box::new(|| Err("Coven daemon offline".to_string()))
+                as Box<dyn FnOnce() -> Result<_, String> + Send>,
+            Box::new(|| panic!("the registration task died")),
+        ] {
+            let mut ledger = LedgerRegistrations::default();
+            ledger.register(&mut app, "session-a", register);
+            settle_ledger(&mut ledger, &mut app).await;
+            assert_eq!(app.ownership, failed);
+            ledger.session_started(&mut app, "session-b", || panic!("retried"));
+            assert_eq!(app.ownership, failed);
+            assert_eq!(ledger.sent, ["session-a"]);
+        }
+
+        // Accepted by a daemon that could not be named: unknown at once,
+        // and so registered again at the next session start.
+        let mut ledger = LedgerRegistrations::default();
+        ledger.register(&mut app, "session-a", || Ok(None));
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(app.ownership.registration_is_unknown());
+        ledger.session_started(&mut app, "session-b", || Ok(Some(ledger_test_instance(7))));
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(
+            matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, .. }
+                if session_id == "session-b"),
+            "{:?}",
+            app.ownership
+        );
+    }
+
+    /// A registration sent again that is refused, lost or accepted by a
+    /// daemon that cannot be named leaves the state unknown, not failed and
+    /// not online, so the session start after it tries again.
+    #[tokio::test]
+    async fn a_registration_sent_again_that_fails_stays_unknown_and_is_tried_again() {
+        use claurst_tui::application::{DaemonPresence, SessionOwnership};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        for lost in [
+            Box::new(|| Err("Coven daemon offline".to_string()))
+                as Box<dyn FnOnce() -> Result<_, String> + Send>,
+            Box::new(|| panic!("the registration task died")),
+            Box::new(|| Ok(None)),
+        ] {
+            let mut ledger = LedgerRegistrations::default();
+            app.ownership = SessionOwnership::LedgerUnknown {
+                session_id: "session-a".to_string(),
+            };
+            ledger.session_started(&mut app, "session-b", lost);
+            assert_eq!(app.ownership.daemon_presence(true), DaemonPresence::Unknown);
+            settle_ledger(&mut ledger, &mut app).await;
+            assert_eq!(
+                app.ownership,
+                SessionOwnership::LedgerUnknown {
+                    session_id: "session-b".to_string()
+                }
+            );
+            assert_eq!(app.ownership.daemon_presence(true), DaemonPresence::Unknown);
+
+            ledger.session_started(&mut app, "session-c", || Ok(Some(ledger_test_instance(9))));
+            settle_ledger(&mut ledger, &mut app).await;
+            assert!(
+                matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, .. }
+                    if session_id == "session-c"),
+                "{:?}",
+                app.ownership
+            );
+            assert_eq!(ledger.sent, ["session-b", "session-c"]);
+        }
+    }
+
+    /// At exit a registration still in flight finishes before its
+    /// completion is sent, every id sent is completed once, and a
+    /// registration that never answers holds the exit only for the wait.
+    #[tokio::test]
+    async fn exit_completes_every_id_after_a_registration_in_flight() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let completing = |log: &Arc<Mutex<Vec<String>>>| {
+            let log = Arc::clone(log);
+            move |id: &str| log.lock().unwrap().push(format!("complete {id}"))
+        };
+
+        // Session A registered and went unknown; session B's registration
+        // is still in flight when the process exits.
+        let mut ledger = LedgerRegistrations::default();
+        ledger.register(&mut app, "session-a", || Ok(None));
+        settle_ledger(&mut ledger, &mut app).await;
+        {
+            let log = Arc::clone(&log);
+            ledger.session_started(&mut app, "session-b", move || {
+                std::thread::sleep(Duration::from_millis(300));
+                log.lock().unwrap().push("registered session-b".to_string());
+                Ok(Some(ledger_test_instance(7)))
+            });
+        }
+        assert!(ledger.answer.is_some());
+        ledger
+            .complete_all(Duration::from_secs(10), completing(&log))
+            .await;
+        let mut seen = log.lock().unwrap().clone();
+        assert_eq!(
+            seen.first().map(String::as_str),
+            Some("registered session-b")
+        );
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                "complete session-a",
+                "complete session-b",
+                "registered session-b"
+            ]
+        );
+
+        // A registration that does not answer within the wait: the
+        // completion is sent anyway.
+        log.lock().unwrap().clear();
+        let mut ledger = LedgerRegistrations::default();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        ledger.register(&mut app, "session-a", move || {
+            let _ = held.recv();
+            Err("no answer".to_string())
+        });
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            ledger.complete_all(Duration::from_millis(100), completing(&log)),
+        )
+        .await
+        .expect("the exit waited for a registration that never answers");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(*log.lock().unwrap(), ["complete session-a"]);
+        drop(release);
     }
 
     #[test]

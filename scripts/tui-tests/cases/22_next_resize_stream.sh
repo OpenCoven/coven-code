@@ -103,10 +103,13 @@ tc_next_resize_stream() {
       sleep 0.1; waited=$((waited + 1))
     done
     assert_eq "$(_resize_saved_count "$scratch/home")" "$count" "every delta reached the saved turn"
-    # The stream was held through the sizes, over 6 s, at a line every 0.2 s.
+    # The stream was held open through the sizes, over 6 s: the fake schedules a
+    # held line every 0.2 s from the start of the reply until the release, and
+    # sends the ones that fell due while the engine was still reading the burst
+    # once it has read it, so the count measures how long the stream was held.
     local held; held="$(_resize_saved_count "$scratch/home" 'held line')"
-    if [ "$held" -ge 20 ]; then _pass "text kept arriving while the stream was held ($held held lines)"
-    else _fail "text kept arriving while the stream was held" "$held held lines saved"; fi
+    if [ "$held" -ge 20 ]; then _pass "the stream was held open through the sizes ($held held lines)"
+    else _fail "the stream was held open through the sizes" "$held held lines saved"; fi
   fi
   tui_stop
 
