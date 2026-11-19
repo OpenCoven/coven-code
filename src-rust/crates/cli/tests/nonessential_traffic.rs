@@ -37,6 +37,9 @@ fn refresh_models(url: &str, extra: &[(&str, &str)]) -> String {
         .env_remove("COVEN_CODE_DISABLE_MODELS_FETCH")
         .env_remove("COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         .env_remove("MODELS_DEV_URL")
+        // Reach the local server directly, not through a proxy.
+        .env("NO_PROXY", "*")
+        .env("no_proxy", "*")
         .env("COVEN_CODE_MODELS_URL", url)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())

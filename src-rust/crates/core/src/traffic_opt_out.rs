@@ -5,8 +5,8 @@
 
 use std::ffi::OsString;
 
-/// Turns off the requests of every other variable in this module, and the
-/// official MCP registry lookup.
+/// Turns off the requests of every other variable in this module. The
+/// official MCP registry prefetch also reads it, but nothing calls that yet.
 pub const DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str = "COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
 
 /// Turns off the release check an interactive session makes at startup.
