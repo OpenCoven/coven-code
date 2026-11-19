@@ -51,7 +51,9 @@ impl SqliteSessionStore {
 
     /// Index a session's messages for search, one row per message.
     ///
-    /// A message with a uuid is stored under it. A message without one (most
+    /// A message with a uuid is stored under it. That id is unique across the
+    /// whole index, so a message copied with its uuid into another session (a
+    /// branch) stays indexed under the session that stored it first. A message without one (most
     /// user messages, tool results included) is stored under an id derived
     /// from the session, its role, the SHA-256 of its text and how many earlier
     /// uuid-less messages in the session have the same role and text. Saving
@@ -61,7 +63,8 @@ impl SqliteSessionStore {
     ///
     /// The id follows the text, not the position. After a compaction or a
     /// rewind, a message whose role and text match one already indexed maps
-    /// onto that row and adds nothing; search still finds the session. A
+    /// onto that row and adds nothing; search still finds the session. Rows
+    /// are never removed here, so text later rewound away stays findable. A
     /// message with no text, such as a tool result, is indexed with empty
     /// content, as an assistant message holding only a tool call already is.
     ///
@@ -395,7 +398,7 @@ mod tests {
                 is_error: None,
             }])
         };
-        let messages = vec![
+        let messages = [
             Message::user("hello"),
             answer,
             tool_result(),
