@@ -96,7 +96,7 @@ pub use config::{
     builtin_managed_agent_presets, default_agents, strip_jsonc_comments, substitute_env_vars,
     AgentDefinition, BudgetSplitPolicy, CommandTemplate, Config, FormatterConfig,
     ManagedAgentConfig, ManagedAgentPreset, McpServerConfig, OutputFormat, PermissionMode,
-    ProviderConfig, Settings, SkillsConfig, Theme,
+    ProviderConfig, RestoredPermissionMode, Settings, SkillsConfig, Theme,
 };
 pub use error::{ClaudeError, Result};
 pub use import_config::{
@@ -1059,6 +1059,41 @@ pub mod config {
         AcceptEdits,
         BypassPermissions,
         Plan,
+    }
+
+    /// The mode a session takes from a saved permission mode, and what to say
+    /// about it once.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RestoredPermissionMode {
+        pub mode: PermissionMode,
+        /// Set when the saved mode decided `mode` or was refused. Short enough
+        /// for the one-row notification both renderers draw.
+        pub notice: Option<&'static str>,
+    }
+
+    impl PermissionMode {
+        /// The mode a session runs in when `self` is the saved mode and nothing
+        /// explicit (such as `--permission-mode`) chose one. A saved
+        /// `acceptEdits` or `plan` applies. A saved `bypassPermissions` is
+        /// never restored: the session runs in `default` and says so, so a
+        /// settings file cannot turn approvals off unseen. Every place that
+        /// applies a saved mode (an interactive start, `/import-config`, ACP)
+        /// goes through this one rule.
+        pub fn restored_from_settings(&self) -> RestoredPermissionMode {
+            let (mode, notice) = match self {
+                PermissionMode::Default => (PermissionMode::Default, None),
+                PermissionMode::AcceptEdits => (
+                    PermissionMode::AcceptEdits,
+                    Some("Saved accept-edits mode restored"),
+                ),
+                PermissionMode::Plan => (PermissionMode::Plan, Some("Saved plan mode restored")),
+                PermissionMode::BypassPermissions => (
+                    PermissionMode::Default,
+                    Some("Saved bypass mode not restored"),
+                ),
+            };
+            RestoredPermissionMode { mode, notice }
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]

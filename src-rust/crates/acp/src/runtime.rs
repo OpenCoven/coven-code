@@ -120,3 +120,92 @@ async fn build_mcp_manager(config: &Config) -> Option<Arc<claurst_mcp::McpManage
     mgr.clone().spawn_notification_poll_loop(None);
     Some(mgr)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AgentRuntime;
+    use claurst_core::PermissionMode;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const ROOT_ENV: &str = "ACP_SAVED_PERMISSION_MODE_FIXTURE_ROOT";
+    const COMPLETE: &str = "acp-saved-permission-mode-fixture-complete";
+
+    /// Builds the ACP runtime over each saved mode. Only the parent below may
+    /// run this: it rewrites the settings file of the engine home the
+    /// environment names.
+    #[test]
+    #[ignore = "run by isolated parent with temporary engine home"]
+    fn saved_permission_mode_child() {
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("run through the parent test"));
+        assert_eq!(
+            std::env::var_os("COVEN_CODE_HOME").as_deref(),
+            Some(root.as_os_str())
+        );
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut failures = Vec::new();
+        for (saved, expected) in [
+            ("default", PermissionMode::Default),
+            ("acceptEdits", PermissionMode::AcceptEdits),
+            // Plan needs the interactive plan approval ACP does not have.
+            ("plan", PermissionMode::Default),
+            // ACP has no explicit opt-in, so a saved bypass never applies.
+            ("bypassPermissions", PermissionMode::Default),
+        ] {
+            // A provider other than Anthropic keeps the build off credentials.
+            std::fs::write(
+                root.join("settings.json"),
+                format!(r#"{{"config":{{"provider":"codex","permission_mode":"{saved}"}}}}"#),
+            )
+            .unwrap();
+            let runtime = tokio
+                .block_on(AgentRuntime::build(root.clone()))
+                .unwrap_or_else(|error| panic!("saved {saved}: {error:#}"));
+            // The mode each turn and the keyless child get, and the mode
+            // tool approvals are checked in.
+            let turn = runtime.config.permission_mode.clone();
+            let approvals = runtime.permission_manager.lock().unwrap().mode.clone();
+            if turn != expected || approvals != expected {
+                failures.push(format!(
+                    "saved {saved}: turn {turn:?}, approvals {approvals:?}, expected {expected:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        println!("{COMPLETE}");
+    }
+
+    #[test]
+    fn acp_never_restores_a_saved_bypass_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::tests::saved_permission_mode_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("HOME", &root_path)
+            .env("USERPROFILE", &root_path)
+            .env("COVEN_HOME", root_path.join("coven"))
+            .env("COVEN_CAVE_HOME", root_path.join("cave"))
+            .env("COVEN_CODE_HOME", &root_path)
+            .env("XDG_CONFIG_HOME", &root_path)
+            .env("XDG_CACHE_HOME", &root_path)
+            .env(ROOT_ENV, &root_path)
+            .current_dir(&root_path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(COMPLETE),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

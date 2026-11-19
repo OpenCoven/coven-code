@@ -824,6 +824,10 @@ pub struct App {
     // ---- Visual mode indicators -------------------------------------------
     /// Plan mode — input border turns blue, [PLAN] shown in status bar.
     pub plan_mode: bool,
+    /// Whether the session's permission mode was chosen at launch
+    /// (`--permission-mode`, `--dangerously-skip-permissions`). A reload of
+    /// the saved settings then keeps the session's mode, as a start does.
+    pub permission_mode_from_launch: bool,
     /// "While you were away" summary text shown on the welcome screen.
     pub away_summary: Option<String>,
     /// When streaming stalled (used to turn the spinner red after 3 s).
@@ -1404,6 +1408,7 @@ impl App {
             file_history: None,
             current_turn: None,
             plan_mode: false,
+            permission_mode_from_launch: false,
             away_summary: None,
             stall_start: None,
             settings_screen: SettingsScreen::new(),

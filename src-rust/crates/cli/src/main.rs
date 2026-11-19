@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use clap::{ArgAction, Parser, ValueEnum};
 use claurst_core::types::ToolDefinition;
 use claurst_core::{
-    config::{Config, PermissionMode, Settings},
+    config::{Config, PermissionMode, RestoredPermissionMode, Settings},
     constants::APP_VERSION,
     context::ContextBuilder,
     cost::CostTracker,
@@ -354,17 +354,6 @@ impl From<CliPermissionMode> for PermissionMode {
     }
 }
 
-/// The permission mode a start runs in, and what an interactive session
-/// should say about the saved mode.
-#[derive(Debug, PartialEq, Eq)]
-struct StartupPermissionMode {
-    mode: PermissionMode,
-    /// What to show once when the saved mode decided `mode` or was refused,
-    /// short enough for the one-row notification both renderers draw. Always
-    /// `None` for a headless run, which prints nothing extra.
-    notice: Option<&'static str>,
-}
-
 /// Decide the permission mode for a start without
 /// `--dangerously-skip-permissions`.
 ///
@@ -373,34 +362,24 @@ struct StartupPermissionMode {
 /// `/config set permission-mode` lasts across restarts. Two limits keep a
 /// settings file from loosening approvals unseen: a saved bypass mode is
 /// never restored, and a headless run, which has nowhere to say what it
-/// restored, keeps `default`.
+/// restored, keeps `default`. The notice is always `None` for a headless
+/// run, which prints nothing extra.
 fn permission_mode_for_invocation(
     flag: Option<CliPermissionMode>,
     saved: &PermissionMode,
     has_github_context: bool,
     is_headless: bool,
-) -> StartupPermissionMode {
-    let (mode, notice) = if has_github_context {
-        (PermissionMode::BypassPermissions, None)
+) -> RestoredPermissionMode {
+    let mode = if has_github_context {
+        PermissionMode::BypassPermissions
     } else if let Some(flag) = flag {
-        (flag.into(), None)
+        flag.into()
     } else if is_headless {
-        (PermissionMode::Default, None)
+        PermissionMode::Default
     } else {
-        match saved {
-            PermissionMode::Default => (PermissionMode::Default, None),
-            PermissionMode::AcceptEdits => (
-                PermissionMode::AcceptEdits,
-                Some("Saved accept-edits mode restored"),
-            ),
-            PermissionMode::Plan => (PermissionMode::Plan, Some("Saved plan mode restored")),
-            PermissionMode::BypassPermissions => (
-                PermissionMode::Default,
-                Some("Saved bypass mode not restored"),
-            ),
-        }
+        return saved.restored_from_settings();
     };
-    StartupPermissionMode { mode, notice }
+    RestoredPermissionMode { mode, notice: None }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -7969,8 +7948,8 @@ mod tests {
         PermissionMode::Plan,
     ];
 
-    fn startup_mode(mode: PermissionMode) -> StartupPermissionMode {
-        StartupPermissionMode { mode, notice: None }
+    fn startup_mode(mode: PermissionMode) -> RestoredPermissionMode {
+        RestoredPermissionMode { mode, notice: None }
     }
 
     /// Classic and Next each draw a notification on one row of a 52-column
