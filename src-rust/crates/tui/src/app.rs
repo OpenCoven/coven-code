@@ -2092,6 +2092,10 @@ impl App {
         if now.saturating_duration_since(self.daemon_last_checked) >= DAEMON_STATUS_REFRESH {
             self.daemon_last_checked = now;
             self.daemon_online = crate::coven_status::daemon_looks_online();
+            // The ledger registration follows the instance that took it (#412).
+            if let Some((sighting, seen_at)) = crate::coven_status::last_daemon_sighting() {
+                self.ownership.observe_daemon(&sighting, seen_at);
+            }
         }
     }
 
@@ -9343,6 +9347,136 @@ mod tests {
             app.refresh_daemon_status(now);
             assert!(!app.daemon_online, "daemon_online came back with no socket");
         }
+    }
+
+    /// #412, policy B: the same refresh compares the last probe with the
+    /// daemon instance that took the ledger registration. The same instance
+    /// keeps it; another process answering on the socket makes it unknown,
+    /// while the daemon still reads as online.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_refresh_makes_the_registration_unknown_after_a_restart() {
+        use crate::application::{DaemonPresence, SessionOwnership};
+        use claurst_core::coven_daemon::DaemonSighting;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        // A fake daemon whose health names `pid`; it answers until stopped.
+        fn daemon(
+            socket: &std::path::Path,
+            pid: u32,
+        ) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+            let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind socket");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let stop = Arc::new(AtomicBool::new(false));
+            let health = format!(
+                r#"{{"ok":true,"apiVersion":"coven.daemon.v1","covenVersion":"0.5.0","daemon":{{"pid":{pid},"startedAt":"2026-11-18T05:00:00Z"}}}}"#
+            );
+            let thread = {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let Ok((mut stream, _)) = listener.accept() else {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        };
+                        // Accepted streams inherit O_NONBLOCK on macOS.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 256];
+                        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => request.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        let _ =
+                            stream.write_all(format!("HTTP/1.0 200 OK\r\n\r\n{health}").as_bytes());
+                    }
+                })
+            };
+            (stop, thread)
+        }
+
+        // Run the loop's refresh, one interval per call, until a probe that
+        // began after `after` has landed and been compared.
+        fn refresh_past(app: &mut App, now: &mut Instant, after: Instant) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                *now += DAEMON_STATUS_REFRESH;
+                app.refresh_daemon_status(*now);
+                let landed = crate::coven_status::last_daemon_sighting()
+                    .is_some_and(|(_, began_at)| began_at >= after);
+                if landed {
+                    *now += DAEMON_STATUS_REFRESH;
+                    app.refresh_daemon_status(*now);
+                    return;
+                }
+                assert!(Instant::now() < deadline, "no probe landed");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+        let socket = coven_home.join("coven.sock");
+
+        let (stop, first) = daemon(&socket, 100);
+        crate::coven_status::forget_daemon_probe();
+        let mut app = make_app();
+        let mut now = app.daemon_last_checked;
+        refresh_past(&mut app, &mut now, Instant::now());
+        let Some((DaemonSighting::Instance(instance), _)) =
+            crate::coven_status::last_daemon_sighting()
+        else {
+            panic!("the probe did not identify the fake daemon");
+        };
+        assert_eq!(instance.pid, Some(100));
+
+        // The session registered with that instance.
+        let registered = SessionOwnership::LedgerRegistered {
+            session_id: "session-a".to_string(),
+            instance,
+            since: Instant::now(),
+        };
+        app.ownership = registered.clone();
+        crate::coven_status::forget_daemon_probe();
+        refresh_past(&mut app, &mut now, Instant::now());
+        assert_eq!(app.ownership, registered, "the same instance keeps it");
+        assert_eq!(
+            app.ownership.daemon_presence(app.daemon_online),
+            DaemonPresence::Online
+        );
+
+        // The daemon is replaced by another process on the same path.
+        stop.store(true, Ordering::Release);
+        first.join().expect("first fake daemon");
+        std::fs::remove_file(&socket).expect("remove socket");
+        let (stop, second) = daemon(&socket, 101);
+        crate::coven_status::forget_daemon_probe();
+        refresh_past(&mut app, &mut now, Instant::now());
+        assert_eq!(
+            app.ownership,
+            SessionOwnership::LedgerUnknown {
+                session_id: "session-a".to_string()
+            }
+        );
+        assert!(app.daemon_online, "the new daemon answers");
+        assert_eq!(
+            app.ownership.daemon_presence(app.daemon_online),
+            DaemonPresence::Unknown
+        );
+
+        stop.store(true, Ordering::Release);
+        second.join().expect("second fake daemon");
     }
 
     #[test]

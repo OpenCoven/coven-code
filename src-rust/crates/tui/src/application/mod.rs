@@ -15,6 +15,7 @@ pub mod research;
 pub mod view;
 pub mod work;
 
+use claurst_core::coven_daemon::{DaemonInstance, DaemonSighting};
 use claurst_query::QueryEvent;
 
 /// Environment variable that selects the interactive renderer.
@@ -75,12 +76,20 @@ pub struct ScopedQueryEvent {
 ///
 /// Each worker's forwarder waits for space instead of dropping, so semantic
 /// observations (tool results, errors, turn completion, durable messages)
-/// are never discarded under pressure. The query loop itself still emits
-/// into an unbounded per-turn buffer (`run_query_loop` takes an
-/// `UnboundedSender`), so a stalled interactive loop backs up into that
-/// buffer, not into this queue; bounding the producer needs a query-crate
-/// API change.
+/// are never discarded under pressure. A full queue stops the forwarder,
+/// which fills the worker's per-turn buffer
+/// ([`QUERY_PRODUCER_CAPACITY`]), which pauses the query loop itself.
 pub const QUERY_EVENT_QUEUE_CAPACITY: usize = 1024;
+
+/// Capacity of one turn's buffer between the query loop and its forwarder.
+///
+/// The query loop waits for space here rather than dropping or growing, so a
+/// stalled interactive loop pauses the turn: about this many events plus
+/// [`QUERY_EVENT_QUEUE_CAPACITY`] are held for it (plus the one event the
+/// forwarder holds and one per concurrent tool call waiting to send). 256 matches the API
+/// client's own stream channel, which feeds most of these events one for one,
+/// so a full upstream stream fits without the loop waiting in normal use.
+pub const QUERY_PRODUCER_CAPACITY: usize = 256;
 
 /// An external effect requested by a presentation reducer step.
 ///
@@ -129,10 +138,60 @@ pub enum SessionOwnership {
     EngineLocal,
     /// Registration of `session_id` was sent; no answer yet.
     LedgerPending { session_id: String },
-    /// The daemon accepted the registration of `session_id`.
-    LedgerRegistered { session_id: String },
+    /// Registration of `session_id` was sent again at a session start,
+    /// because the earlier one was unknown; no answer yet. Until a named
+    /// instance accepts it, the daemon indicator still reads unknown.
+    LedgerRenewing { session_id: String },
+    /// The daemon `instance` accepted the registration of `session_id`.
+    /// A sighting taken before `since` says nothing about it.
+    LedgerRegistered {
+        session_id: String,
+        instance: DaemonInstance,
+        since: std::time::Instant,
+    },
     /// The registration of `session_id` failed or no daemon was reachable.
     LedgerFailed { session_id: String },
+    /// A daemon accepted the registration of `session_id`, but it is not
+    /// known to be the one answering now: another instance has answered
+    /// since, or the one that accepted it was never identified. It stays
+    /// unknown until a session start registers again; nothing is resent
+    /// before that.
+    LedgerUnknown { session_id: String },
+}
+
+/// The daemon's answer to a ledger registration (see
+/// `claurst_core::coven_ledger::notify_session_start`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationAnswer {
+    /// Accepted, and this instance answered before and after it.
+    Held(DaemonInstance),
+    /// Accepted, but no single instance can be named for it.
+    Unnamed,
+    /// Refused, or no daemon answered.
+    Failed,
+}
+
+impl From<Result<Option<DaemonInstance>, String>> for RegistrationAnswer {
+    fn from(result: Result<Option<DaemonInstance>, String>) -> Self {
+        match result {
+            Ok(Some(instance)) => RegistrationAnswer::Held(instance),
+            Ok(None) => RegistrationAnswer::Unnamed,
+            Err(_) => RegistrationAnswer::Failed,
+        }
+    }
+}
+
+/// How the daemon indicator reads: the welcome line and Classic's footer.
+/// It is about this process's registration, whichever session is bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonPresence {
+    /// No daemon answers.
+    Offline,
+    /// A daemon answers, and nothing this session holds contradicts it.
+    Online,
+    /// A daemon answers, but not one known to hold the registration this
+    /// process sent.
+    Unknown,
 }
 
 impl SessionOwnership {
@@ -145,13 +204,21 @@ impl SessionOwnership {
                 "engine-local, registering",
                 "runs in this process; ledger registration has not answered yet",
             ),
-            SessionOwnership::LedgerRegistered { session_id } if applies(session_id) => (
+            SessionOwnership::LedgerRenewing { session_id } if applies(session_id) => (
+                "engine-local, registering",
+                "runs in this process; the ledger registration was sent again and has not answered yet",
+            ),
+            SessionOwnership::LedgerRegistered { session_id, .. } if applies(session_id) => (
                 "engine-local, ledger-registered",
                 "runs and is enforced in this process; the daemon records it but does not control it",
             ),
             SessionOwnership::LedgerFailed { session_id } if applies(session_id) => (
                 "engine-local, ledger unavailable",
                 "runs in this process; ledger registration failed, so the daemon does not know this session",
+            ),
+            SessionOwnership::LedgerUnknown { session_id } if applies(session_id) => (
+                "engine-local, ledger unknown",
+                "runs in this process; the daemon restarted or is unidentified, so its record is unknown until the next session start",
             ),
             SessionOwnership::EngineLocal => (
                 "engine-local",
@@ -161,6 +228,77 @@ impl SessionOwnership {
                 "engine-local",
                 "runs in this process; the ledger registration was for a different session",
             ),
+        }
+    }
+
+    /// Record the daemon's answer to a registration that was waiting for
+    /// one. A first registration that fails is failed, as before. One sent
+    /// again after the earlier one became unknown goes back to unknown when
+    /// it fails, so the next session start tries again.
+    pub fn settle_registration(&mut self, answer: RegistrationAnswer, now: std::time::Instant) {
+        let (session_id, renewing) = match std::mem::take(self) {
+            SessionOwnership::LedgerPending { session_id } => (session_id, false),
+            SessionOwnership::LedgerRenewing { session_id } => (session_id, true),
+            settled => {
+                *self = settled;
+                return;
+            }
+        };
+        *self = match answer {
+            RegistrationAnswer::Held(instance) => SessionOwnership::LedgerRegistered {
+                session_id,
+                instance,
+                since: now,
+            },
+            RegistrationAnswer::Unnamed => SessionOwnership::LedgerUnknown { session_id },
+            RegistrationAnswer::Failed if renewing => {
+                SessionOwnership::LedgerUnknown { session_id }
+            }
+            RegistrationAnswer::Failed => SessionOwnership::LedgerFailed { session_id },
+        };
+    }
+
+    /// Compare what a probe that began at `seen_at` found with the instance
+    /// that holds the registration. A different instance makes the registration
+    /// unknown, and it stays so. A daemon that is gone or did not identify
+    /// itself changes nothing: only a named, different instance does.
+    pub fn observe_daemon(&mut self, sighting: &DaemonSighting, seen_at: std::time::Instant) {
+        let SessionOwnership::LedgerRegistered {
+            instance, since, ..
+        } = &*self
+        else {
+            return;
+        };
+        let replaced = matches!(sighting, DaemonSighting::Instance(seen) if seen != instance);
+        if !replaced || seen_at < *since {
+            return;
+        }
+        if let SessionOwnership::LedgerRegistered { session_id, .. } = std::mem::take(self) {
+            *self = SessionOwnership::LedgerUnknown { session_id };
+        }
+    }
+
+    /// Whether a session start should register again: only after the
+    /// registration became unknown. Nothing registers between session
+    /// starts.
+    pub fn registration_is_unknown(&self) -> bool {
+        matches!(self, SessionOwnership::LedgerUnknown { .. })
+    }
+
+    /// The daemon indicator, given whether a daemon answers at all. It
+    /// reads unknown from the moment the registration does until a named
+    /// instance has accepted a new one: sending it again is not enough.
+    pub fn daemon_presence(&self, online: bool) -> DaemonPresence {
+        let unknown = matches!(
+            self,
+            SessionOwnership::LedgerUnknown { .. } | SessionOwnership::LedgerRenewing { .. }
+        );
+        if !online {
+            DaemonPresence::Offline
+        } else if unknown {
+            DaemonPresence::Unknown
+        } else {
+            DaemonPresence::Online
         }
     }
 }
@@ -294,6 +432,263 @@ mod tests {
             },
         );
         assert_eq!(app.streaming_text, "fresh");
+    }
+
+    fn instance(pid: u32, started_at: &str) -> DaemonInstance {
+        DaemonInstance {
+            pid: Some(pid),
+            started_at: Some(started_at.to_string()),
+            api_version: "coven.daemon.v1".to_string(),
+            coven_version: "0.5.0".to_string(),
+            socket_file: Some((1, u64::from(pid))),
+        }
+    }
+
+    fn registered(now: std::time::Instant) -> SessionOwnership {
+        let mut ownership = SessionOwnership::LedgerPending {
+            session_id: "session-a".to_string(),
+        };
+        ownership.settle_registration(RegistrationAnswer::Held(instance(100, "05:00:00Z")), now);
+        ownership
+    }
+
+    fn unknown() -> SessionOwnership {
+        SessionOwnership::LedgerUnknown {
+            session_id: "session-a".to_string(),
+        }
+    }
+
+    /// #412, policy B: the registration follows the daemon instance that
+    /// took it.
+    #[test]
+    fn the_same_instance_keeps_the_registration() {
+        let start = std::time::Instant::now();
+        let later = start + std::time::Duration::from_secs(10);
+        let mut ownership = registered(start);
+        let before = ownership.clone();
+        ownership.observe_daemon(&DaemonSighting::Instance(instance(100, "05:00:00Z")), later);
+        assert_eq!(ownership, before);
+        assert_eq!(ownership.daemon_presence(true), DaemonPresence::Online);
+        assert!(!ownership.registration_is_unknown());
+    }
+
+    #[test]
+    fn a_changed_instance_makes_the_registration_unknown_and_it_stays_unknown() {
+        let start = std::time::Instant::now();
+        let later = start + std::time::Duration::from_secs(10);
+        for changed in [
+            instance(101, "05:00:00Z"),
+            instance(100, "05:00:09Z"),
+            DaemonInstance {
+                socket_file: Some((1, 999)),
+                ..instance(100, "05:00:00Z")
+            },
+            DaemonInstance {
+                coven_version: "0.5.1".to_string(),
+                ..instance(100, "05:00:00Z")
+            },
+        ] {
+            let mut ownership = registered(start);
+            ownership.observe_daemon(&DaemonSighting::Instance(changed.clone()), later);
+            assert_eq!(ownership, unknown(), "{changed:?}");
+            assert_eq!(ownership.daemon_presence(true), DaemonPresence::Unknown);
+            assert_eq!(ownership.daemon_presence(false), DaemonPresence::Offline);
+            assert_eq!(
+                ownership.describe(Some("session-a")).0,
+                "engine-local, ledger unknown"
+            );
+
+            // Nothing a later probe finds settles it, not even the first
+            // instance again: only a session start registers again.
+            for sighting in [
+                DaemonSighting::Instance(instance(100, "05:00:00Z")),
+                DaemonSighting::Instance(changed.clone()),
+                DaemonSighting::Unidentified,
+                DaemonSighting::Gone,
+            ] {
+                ownership.observe_daemon(&sighting, later);
+                assert_eq!(ownership, unknown(), "{sighting:?}");
+            }
+            assert!(ownership.registration_is_unknown());
+        }
+    }
+
+    #[test]
+    fn a_daemon_that_is_gone_and_back_as_the_same_instance_keeps_the_registration() {
+        let start = std::time::Instant::now();
+        let later = start + std::time::Duration::from_secs(10);
+        let mut ownership = registered(start);
+        let before = ownership.clone();
+
+        // Gone: the registration is neither confirmed nor contradicted, and
+        // the indicator reads offline while nothing answers.
+        ownership.observe_daemon(&DaemonSighting::Gone, later);
+        assert_eq!(ownership, before);
+        assert_eq!(ownership.daemon_presence(false), DaemonPresence::Offline);
+
+        // Busy, or answering without naming itself: no evidence either way.
+        ownership.observe_daemon(&DaemonSighting::Unidentified, later);
+        assert_eq!(ownership, before);
+
+        // Back, and the same process: still registered.
+        ownership.observe_daemon(&DaemonSighting::Instance(instance(100, "05:00:00Z")), later);
+        assert_eq!(ownership, before);
+        assert_eq!(ownership.daemon_presence(true), DaemonPresence::Online);
+
+        // Back as another process: unknown.
+        ownership.observe_daemon(&DaemonSighting::Gone, later);
+        ownership.observe_daemon(&DaemonSighting::Instance(instance(200, "05:01:00Z")), later);
+        assert_eq!(ownership, unknown());
+    }
+
+    #[test]
+    fn a_session_that_never_registered_is_not_changed_by_any_sighting() {
+        let now = std::time::Instant::now();
+        for start in [
+            SessionOwnership::EngineLocal,
+            SessionOwnership::LedgerPending {
+                session_id: "session-a".to_string(),
+            },
+            SessionOwnership::LedgerFailed {
+                session_id: "session-a".to_string(),
+            },
+        ] {
+            let mut ownership = start.clone();
+            for sighting in [
+                DaemonSighting::Instance(instance(100, "05:00:00Z")),
+                DaemonSighting::Instance(instance(200, "05:01:00Z")),
+                DaemonSighting::Unidentified,
+                DaemonSighting::Gone,
+            ] {
+                ownership.observe_daemon(&sighting, now);
+                assert_eq!(ownership, start, "{sighting:?}");
+            }
+            assert!(!ownership.registration_is_unknown(), "{start:?}");
+            assert_eq!(ownership.daemon_presence(true), DaemonPresence::Online);
+            assert_eq!(ownership.daemon_presence(false), DaemonPresence::Offline);
+        }
+    }
+
+    /// A probe that began before the registration was recorded may show
+    /// the daemon from before a restart; it must not contradict a
+    /// registration the restarted daemon took.
+    #[test]
+    fn a_sighting_older_than_the_registration_is_ignored() {
+        let start = std::time::Instant::now();
+        let registered_at = start + std::time::Duration::from_secs(5);
+        let mut ownership = registered(registered_at);
+        let before = ownership.clone();
+        let other = DaemonSighting::Instance(instance(50, "04:00:00Z"));
+        ownership.observe_daemon(&other, start);
+        assert_eq!(ownership, before);
+        ownership.observe_daemon(&other, registered_at);
+        assert_eq!(ownership, unknown());
+    }
+
+    #[test]
+    fn a_registration_answer_settles_only_a_pending_registration() {
+        let now = std::time::Instant::now();
+        let pending = || SessionOwnership::LedgerPending {
+            session_id: "session-a".to_string(),
+        };
+
+        let mut ownership = pending();
+        ownership.settle_registration(RegistrationAnswer::Failed, now);
+        assert_eq!(
+            ownership,
+            SessionOwnership::LedgerFailed {
+                session_id: "session-a".to_string()
+            }
+        );
+
+        let mut ownership = pending();
+        ownership.settle_registration(RegistrationAnswer::Held(instance(100, "05:00:00Z")), now);
+        assert_eq!(ownership, registered(now));
+
+        // Accepted, but by no instance that can be named: unknown at once.
+        let mut ownership = pending();
+        ownership.settle_registration(RegistrationAnswer::Unnamed, now);
+        assert_eq!(ownership, unknown());
+
+        // A late or repeated answer changes no state that is not waiting
+        // for one.
+        for settled in [
+            SessionOwnership::EngineLocal,
+            registered(now),
+            unknown(),
+            SessionOwnership::LedgerFailed {
+                session_id: "session-a".to_string(),
+            },
+        ] {
+            let mut ownership = settled.clone();
+            ownership
+                .settle_registration(RegistrationAnswer::Held(instance(300, "06:00:00Z")), now);
+            assert_eq!(ownership, settled);
+            ownership.settle_registration(RegistrationAnswer::Failed, now);
+            assert_eq!(ownership, settled);
+        }
+    }
+
+    /// A registration sent again after the earlier one became unknown keeps
+    /// the indicator at unknown until a named instance accepts it, and goes
+    /// back to unknown, not to failed, when it is refused or lost.
+    #[test]
+    fn a_registration_sent_again_reads_unknown_until_an_instance_accepts_it() {
+        let now = std::time::Instant::now();
+        let renewing = || SessionOwnership::LedgerRenewing {
+            session_id: "session-a".to_string(),
+        };
+        assert_eq!(renewing().daemon_presence(true), DaemonPresence::Unknown);
+        assert_eq!(renewing().daemon_presence(false), DaemonPresence::Offline);
+        assert!(!renewing().registration_is_unknown(), "it is already sent");
+        assert_eq!(
+            renewing().describe(Some("session-a")).0,
+            "engine-local, registering"
+        );
+
+        // No probe settles it: only the answer does.
+        let mut ownership = renewing();
+        ownership.observe_daemon(&DaemonSighting::Instance(instance(200, "05:01:00Z")), now);
+        assert_eq!(ownership, renewing());
+
+        let mut ownership = renewing();
+        ownership.settle_registration(RegistrationAnswer::Held(instance(100, "05:00:00Z")), now);
+        assert_eq!(ownership, registered(now));
+        assert_eq!(ownership.daemon_presence(true), DaemonPresence::Online);
+
+        for lost in [RegistrationAnswer::Failed, RegistrationAnswer::Unnamed] {
+            let mut ownership = renewing();
+            ownership.settle_registration(lost.clone(), now);
+            assert_eq!(ownership, unknown(), "{lost:?}");
+            assert!(ownership.registration_is_unknown());
+            assert_eq!(ownership.daemon_presence(true), DaemonPresence::Unknown);
+        }
+    }
+
+    /// The label is about the bound session; the indicator is about the
+    /// registration this process sent, whichever session is bound.
+    #[test]
+    fn an_unknown_registration_for_another_session_still_reads_unknown_in_the_indicator() {
+        let ownership = unknown();
+        assert_eq!(ownership.describe(Some("session-b")).0, "engine-local");
+        assert_eq!(ownership.daemon_presence(true), DaemonPresence::Unknown);
+    }
+
+    #[test]
+    fn registration_answers_come_from_the_ledger_call() {
+        let held = instance(100, "05:00:00Z");
+        assert_eq!(
+            RegistrationAnswer::from(Ok(Some(held.clone()))),
+            RegistrationAnswer::Held(held)
+        );
+        assert_eq!(
+            RegistrationAnswer::from(Ok(None)),
+            RegistrationAnswer::Unnamed
+        );
+        assert_eq!(
+            RegistrationAnswer::from(Err("Coven daemon offline".to_string())),
+            RegistrationAnswer::Failed
+        );
     }
 
     #[test]
