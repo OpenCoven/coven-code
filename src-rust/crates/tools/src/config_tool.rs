@@ -62,7 +62,7 @@ impl Tool for ConfigTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let params: ConfigInput = match serde_json::from_value(input) {
             Ok(p) => p,
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
@@ -164,6 +164,25 @@ impl Tool for ConfigTool {
                                 "Unknown permission_mode '{}'. Use: default | accept_edits | bypass_permissions | plan",
                                 s
                             ))
+                        }
+                    };
+                    // An interactive session starts in the saved mode, so
+                    // changing it decides how later sessions approve tools.
+                    // That needs the same approval as any other write.
+                    if let Err(e) = ctx.check_permission(
+                        self.name(),
+                        &format!("Set the saved permission mode to {s}"),
+                        false,
+                    ) {
+                        return ToolResult::error(e.to_string());
+                    }
+                    // The approval can wait on the user for any length of
+                    // time, and "always allow" saves a rule while it does:
+                    // change the file as it is now, not as it was before.
+                    settings = match claurst_core::config::Settings::load().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return ToolResult::error(format!("Failed to load settings: {}", e))
                         }
                     };
                     settings.config.permission_mode = mode;
