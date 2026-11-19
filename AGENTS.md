@@ -30,7 +30,7 @@ Agent-facing rules for working on Coven Code. `CLAUDE.md` points here; there is 
 
 ## Commands
 
-Run from `src-rust/` unless noted, with the toolchain CI pins (see Parallel Worktrees).
+Run from `src-rust/` unless noted, using the toolchain CI pins (`rustup run 1.100.0 cargo ...`; see Parallel Worktrees).
 
 - After Rust changes (not docs): `cargo check --workspace` — fix every error and warning before committing.
 - Clippy: `cargo clippy --workspace --all-targets -- -D warnings`. Fix lints; do not `#[allow(...)]` without justification.
@@ -49,21 +49,22 @@ The ratatui frontend is sensitive to terminal size and key encoding. For repeata
 # Build a debug binary once
 cargo build
 
-# 80×24 session on a tmux server of your own (see Parallel Worktrees)
-sock=coven-code-$$
-tmux -L "$sock" new-session -d -s test -x 80 -y 24
-tmux -L "$sock" send-keys -t test "./target/debug/coven-code" Enter
+# 80×24 session on a tmux server of your own (see Parallel Worktrees). Pick one
+# socket name, such as coven-code-<worktree>, and repeat it in every command: a
+# shell variable does not survive between separate agent shell calls.
+tmux -L coven-code-mywt new-session -d -s test -x 80 -y 24
+tmux -L coven-code-mywt send-keys -t test "./target/debug/coven-code" Enter
 
 # Give it time to redraw, then capture
-sleep 2 && tmux -L "$sock" capture-pane -t test -p
+sleep 2 && tmux -L coven-code-mywt capture-pane -t test -p
 
 # Drive input
-tmux -L "$sock" send-keys -t test "your prompt here" Enter
-tmux -L "$sock" send-keys -t test Escape
-tmux -L "$sock" send-keys -t test C-o   # ctrl+o
+tmux -L coven-code-mywt send-keys -t test "your prompt here" Enter
+tmux -L coven-code-mywt send-keys -t test Escape
+tmux -L coven-code-mywt send-keys -t test C-o   # ctrl+o
 
 # Cleanup: only your own server
-tmux -L "$sock" kill-server
+tmux -L coven-code-mywt kill-server
 ```
 
 On Windows hosts, prefer `cargo run -- --print "..."` against the headless path. The Windows console has known quirks with the kitty keyboard protocol — see `crates/tui` for the push/pop workaround.
@@ -167,15 +168,15 @@ git add docs/providers.md
 git commit -m "feat(api): add foo provider"
 
 # 4. Bring in main by merging (never rebase), then push
-git fetch origin && git merge origin/main
-git push origin HEAD
+git fetch origin && git merge --no-edit origin/main
+git push -u origin HEAD
 ```
 
 ### If Merge Conflicts Occur
 
 - Resolve conflicts in YOUR files only.
 - If a conflict touches a file you didn't modify, run `git merge --abort` and ask the user.
-- Never rebase a branch that has been pushed, and never force-push.
+- Never rebase onto `main`; merge `origin/main` instead. Never force-push.
 
 ### Contributor Attribution
 
@@ -194,13 +195,13 @@ Co-authored-by: Name <ID+username@users.noreply.github.com>
 
 Several agents share one host and one clone. Give each change its own worktree, build directory and processes.
 
-- One worktree per change, under `.claude/worktrees/`, from `origin/main`: `git fetch origin && git worktree add --no-track -b <branch> .claude/worktrees/<name> origin/main`. Never edit the main checkout; another session may have it on its own branch with staged files.
+- One worktree per change, under `.claude/worktrees/`, from `origin/main`. From the clone's top-level directory: `git fetch origin && git worktree add --no-track -b <branch> .claude/worktrees/<name> origin/main`. Never edit the main checkout; another session may have it on its own branch with staged files.
 - One `CARGO_TARGET_DIR` per worktree; never share one. Cargo's fingerprints for workspace path crates do not include the worktree path, so a shared target directory reuses units another branch built, judged by mtime, and you test code that is not in your tree. Each worktree's default `src-rust/target` is separate; a `CARGO_TARGET_DIR` exported globally is how one gets shared by accident.
 - On a shared host set `CARGO_BUILD_JOBS` (for example `4`) and check `uptime` before a build. When the load is high, run the gates on hosted CI instead (below).
-- Toolchain: CI pins `dtolnay/rust-toolchain@1.100.0` in `.github/workflows/rust-ci.yml` (there is no `rust-toolchain` file). Run `rustup run 1.100.0 cargo <command>` from `src-rust/` (install it once with `rustup toolchain install 1.100.0 -c clippy -c rustfmt`), and follow the pin when it changes. With a scratch `HOME`, also set `RUSTUP_HOME` and `CARGO_HOME` to your real ones, or rustup cannot find the toolchain.
-- The binary walks up from its working directory and uses the first `.coven-code/settings.json` (or `.jsonc`) it finds (`Settings::find_project_settings`). It skips only its own config home's `settings.json`, and `COVEN_CODE_HOME`, `COVEN_HOME` or `COVEN_PARENT` override that home. A scratch `HOME` with a working directory inside your real home therefore still picks up your real `~/.coven-code/settings.json`. For manual runs, use a scratch `HOME`, unset those three variables, and work from a directory outside `$HOME`.
-- `scripts/tui-tests/run.sh` does this itself: it makes a scratch directory under `TMPDIR`, unsets those variables, gives cases 01-07 a scratch `HOME` and working directory (the other cases make theirs under a `TMPDIR` inside it), and refuses to start (exit `2`) when that directory is inside your home or below a `.coven-code` directory. If it refuses, set `TMPDIR` to a directory outside your home. See `scripts/tui-tests/README.md`.
-- Kill only process IDs you started and recorded (`$!`, a pid file, a tmux server on a socket you named with `-L`). Never `pkill -f`, `killall` or `tmux kill-server` by pattern or on the default socket; that kills other agents' tmux servers and builds.
+- Toolchain: CI pins `dtolnay/rust-toolchain@1.100.0` in `rust-ci.yml`, `tui-tests.yml` and `release-build.yml` under `.github/workflows/` (there is no `rust-toolchain` file). Run `rustup run 1.100.0 cargo <command>` from `src-rust/` (install it once with `rustup toolchain install 1.100.0 -c clippy -c rustfmt`), and follow the pin when it changes. With a scratch `HOME`, also set `RUSTUP_HOME` and `CARGO_HOME` to your real ones, or rustup cannot find the toolchain.
+- The binary walks up from its working directory and uses the first `.coven-code/settings.json` (or `.jsonc`) it finds (`Settings::find_project_settings`). It skips only its own config home's `settings.json`, and `COVEN_CODE_HOME`, `COVEN_HOME` or `COVEN_PARENT` override that home. A scratch `HOME` with a working directory inside your real home therefore still picks up your real `~/.coven-code/settings.json`. For manual runs, use a scratch `HOME`, unset those three variables, and work from a directory outside your real home with no `.coven-code` above it.
+- `scripts/tui-tests/run.sh` does this itself: it makes a scratch directory under `TMPDIR`, unsets those variables, gives cases 01-07 a scratch `HOME` and working directory (the other cases make theirs under a `TMPDIR` inside it, except on macOS, where a bare `mktemp -d` ignores `TMPDIR`), and refuses to start (exit `2`) when that directory is inside your home or a directory above it holds a `.coven-code`. If it refuses, set `TMPDIR` to a directory outside your home. See `scripts/tui-tests/README.md`.
+- Kill only process IDs you started and recorded (`$!`, a pid file, a tmux server on a socket you named with `-L`). Never `pkill -f` or `killall` by pattern, and never run `tmux kill-server` or `kill-session` without `-L <your socket>`; that kills other agents' tmux servers and builds.
 - Never edit a shell script while it runs. Bash reads a script as it goes, so the running copy executes your edit. Run long scripts from a copy you leave alone.
 
 ### Reading Hosted Checks
@@ -214,13 +215,13 @@ Several agents share one host and one clone. Give each change its own worktree, 
 | `src-rust/**` | Rust CI (8 check runs) and TUI Tests (2); also Version stamp tests for the workspace `Cargo.toml`/`Cargo.lock`, Viewer tests for `crates/core/src/share_export/**`, Version stamp tests and Release candidate for `crates/acp/registry-template/agent.json` |
 | `scripts/tui-tests/**` | TUI Tests |
 | `install.sh`, `install.ps1`, `scripts/*checksums*`, `scripts/package-release.py`, `patch-release.yml`, `release.yml`, `release-build.yml` | Rust CI, plus the installer or release test workflows that name those files |
-| `.github/workflows/<name>.yml` | that workflow, plus any other whose `paths` names the file |
-| files under `npm/`, `session/**`, `marketplace/**` | the npm, Viewer or Marketplace tests that name those files |
+| `.github/workflows/<name>.yml` | that workflow if it has a `pull_request` trigger, plus any other whose `paths` names the file |
+| files under `npm/`, `session/**`, `marketplace/**` | the npm, Viewer or Marketplace tests whose `paths` name them (`npm/package.json` also runs Version stamp tests) |
 | `README.md`, `docs/index.md`, `docs/installation.md` | Version stamp tests |
-| any other `scripts/` file | the workflows whose `paths` name it (several `scripts/*.py` trigger Rust CI); check with `grep -l <file> .github/workflows/*.yml` |
+| any other `scripts/` file | the workflows whose `paths` name it (several `scripts/*.py` trigger Rust CI); check with `grep -l <file> .github/workflows/*.yml`, and the glob entries such as `scripts/*checksums*` |
 | other docs, `AGENTS.md`, `CLAUDE.md` | none |
 
-- Every PR also gets CodeQL code scanning (four `Analyze (...)` jobs and `CodeQL`) and a Vercel status. A `src-rust/` PR therefore shows 15 check runs. Recount from the workflow files when they change.
+- Every PR also gets CodeQL code scanning (four `Analyze (...)` jobs and `CodeQL`) and a Vercel status. A `src-rust/` PR therefore shows at least 15 check runs, plus the Vercel status. Recount from the workflow files when they change.
 - Rust CI and TUI Tests also run on `workflow_dispatch`, so `gh workflow run rust-ci.yml --ref <branch>` (or `tui-tests.yml`) runs them on a pushed branch without a PR. Use that for hosted fail-first evidence, or when the local host is too loaded to build.
 
 ## User Override
