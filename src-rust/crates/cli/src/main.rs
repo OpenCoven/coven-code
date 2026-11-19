@@ -2297,6 +2297,29 @@ fn settle_queued_permission(
     }
 }
 
+/// Opens the panel for a queued request that still needs an answer, and
+/// keeps the request waiting for it. Next guards every panel against stray
+/// keys (#411). Classic guards a follow-up, a panel opened within
+/// `PERMISSION_ARM_DELAY` of another one in the same turn closing, so a
+/// decision key doubled or repeated for the closed panel cannot decide this
+/// one (#411 decision 17). Any other Classic panel, including a turn's
+/// first, takes keys at once, as before. The rule is
+/// time-based: a writer whose request is queued only once the call before it
+/// has run for longer than the delay opens as a first panel would.
+fn open_permission_panel(
+    app: &mut claurst_tui::app::App,
+    pending_permissions: &mut claurst_tools::PendingPermissionStore,
+    pending: claurst_tools::PendingPermissionRequest,
+    follow_up: bool,
+) {
+    let request = permission_request_from_core(&pending);
+    let guard = follow_up || app.renderer == claurst_tui::application::UiRenderer::Next;
+    app.permission_request = Some(if guard { request.guarded() } else { request });
+    pending_permissions
+        .waiting
+        .insert(pending.tool_use_id.clone(), pending);
+}
+
 fn handle_bridge_permission_response(
     dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -2686,6 +2709,45 @@ async fn stop_turn_for_exit(
     messages.lock().await.clone()
 }
 
+/// What quitting mid-turn prints once the terminal is restored: lines for
+/// stdout, then at most one warning for stderr. Only Next reports on the turn
+/// and says how to resume it (#408). Both renderers warn when the save failed
+/// (decision 6 on #496): the in-app warning is gone with the terminal, and an
+/// earlier save on disk would lack this turn. Stopping compaction leaves the
+/// copy saved when the last turn ended complete.
+fn exit_output(
+    renderer: claurst_tui::application::UiRenderer,
+    exit_report: &claurst_tui::next::TurnExitReport,
+    saved: bool,
+    session: &claurst_core::history::ConversationSession,
+) -> (Vec<String>, Option<&'static str>) {
+    let next = renderer == claurst_tui::application::UiRenderer::Next;
+    let mut lines = if next {
+        exit_report.lines(&session.messages)
+    } else {
+        Vec::new()
+    };
+    let warning = if saved {
+        None
+    } else if exit_report.is_turn() {
+        Some("Session not saved; any earlier saved copy lacks this turn.")
+    } else {
+        Some("Session not saved.")
+    };
+    if next && saved && !session.messages.is_empty() {
+        let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
+        lines.push(format!(
+            "Pick it up with: {}",
+            resume_command(
+                &session.id,
+                &claurst_core::config::Settings::config_dir(),
+                standalone.as_deref(),
+            )
+        ));
+    }
+    (lines, warning)
+}
+
 /// Quitting mid-turn, in either renderer (#408): cancel the turn, wait up to
 /// `TURN_EXIT_WAIT` for it to stop, and bring `session` up to date with what
 /// it delivered, removing a goal continuation's synthetic prompt if no request
@@ -2740,6 +2802,77 @@ fn adopt_in_app_rewind(
         messages.truncate(kept);
         session.messages = messages.clone();
         session.updated_at = chrono::Utc::now();
+    }
+}
+
+/// Idle auto-compaction's worker (decision 4, #406). It honours the turn's
+/// token: a cancel seen before the summary returns leaves `messages` exactly
+/// as it was and reports `Cancelled`. Once the summary is in hand it is
+/// applied and reported as finished, so a cancel that arrives after that
+/// does not undo it.
+async fn compact_idle_conversation(
+    client: &claurst_api::AnthropicClient,
+    messages: &MessagesArc,
+    model: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> claurst_query::QueryOutcome {
+    let original = messages.lock().await.clone();
+    let compacted = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return claurst_query::QueryOutcome::Cancelled,
+        result = claurst_query::compact_conversation(client, &original, model) => result,
+    };
+    match compacted {
+        Ok(compacted) => {
+            let message = compacted
+                .first()
+                .cloned()
+                .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
+            *messages.lock().await = compacted;
+            claurst_query::QueryOutcome::EndTurn {
+                message,
+                usage: claurst_core::types::UsageInfo::default(),
+            }
+        }
+        Err(err) => claurst_query::QueryOutcome::Error(err),
+    }
+}
+
+/// Report how an idle auto-compaction ended (decision 4, #406).
+///
+/// - Finished: the compaction stands, so a cancel requested while it ran is
+///   settled here without saying "Cancelled.".
+/// - Cancelled: the conversation was left as it was. Auto-compaction stays
+///   off for the session, as after a failure, so it does not start again at
+///   once on the same history, and the status says both.
+/// - Failed (or the worker panicked): auto-compaction is turned off for the
+///   session and the status says so.
+fn finish_idle_compaction(
+    app: &mut claurst_tui::App,
+    outcome: Option<&claurst_query::QueryOutcome>,
+) {
+    app.auto_compact_running = false;
+    match outcome {
+        Some(claurst_query::QueryOutcome::EndTurn { .. }) => {
+            // Settles a pending cancel now, so the loop's later settle finds
+            // nothing to report. A compaction has no tool rows, so the row
+            // bookkeeping in the settle does nothing here.
+            app.settle_cancellation();
+            // After auto-compact the context was summarised — reset usage.
+            app.context_used_tokens = 0;
+            app.status_message = Some("Auto-compact complete.".to_string());
+        }
+        Some(claurst_query::QueryOutcome::Cancelled) => {
+            app.settle_cancellation();
+            app.auto_compact_enabled = false;
+            app.status_message =
+                Some("Cancelled. Auto-compact is off for this session.".to_string());
+        }
+        _ => {
+            app.auto_compact_enabled = false;
+            app.status_message =
+                Some("Auto-compact failed and was disabled for this session.".to_string());
+        }
     }
 }
 
@@ -3343,6 +3476,39 @@ fn suspend_job(
     Ok(())
 }
 
+/// `/config appearance` under Next. Everything but `save` stays in memory.
+async fn run_next_appearance_command(
+    app: &mut claurst_tui::App,
+    args: &str,
+    working_dir: &std::path::Path,
+) {
+    use claurst_tui::next::appearance::{
+        parse_appearance_command, run_appearance_command, AppearanceCommand,
+    };
+    let reply = match parse_appearance_command(args) {
+        Err(reason) => reason,
+        Ok(command) => {
+            let save_failure = (command == AppearanceCommand::Save
+                && !app.next_shell.appearance_edits.is_empty())
+            .then(|| Settings::save_appearance_edits(&app.next_shell.appearance_edits).err())
+            .flatten()
+            .map(|error| format!("{error:#}"));
+            let saved = Settings::load_hierarchical(working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            run_appearance_command(
+                app,
+                command,
+                &saved,
+                save_failure,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+                crossterm::terminal::size().unwrap_or((80, 24)),
+            )
+        }
+    };
+    app.push_message(claurst_core::types::Message::assistant(reply));
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -3525,17 +3691,19 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
-    // Classic drops the Next-only defaults, so upgrading an older file must
-    // keep a binding in every context when only they use its chord.
-    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
-        &Settings::config_dir(),
-        claurst_tui::next::NEXT_ONLY_ACTIONS,
-    );
+    // The bindings App::new loaded and resolves keys with.
+    let user_keybindings = app.user_keybindings.clone();
     app.select_renderer(renderer);
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
             std::env::var(name).ok()
         });
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        app.next_shell.apply_layout(
+            settings.next_appearance.layout,
+            crossterm::terminal::size().unwrap_or((80, 24)),
+        );
+    }
     // Next shows the chord that works now; say once which bindings changed.
     if renderer == claurst_tui::application::UiRenderer::Next {
         for notice in claurst_tui::next::key_conflict_notices(&user_keybindings) {
@@ -3838,6 +4006,10 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
+    let mut settings_screen_was_open = false;
+    // When the loop last saw a permission panel open, or closed one; cleared
+    // when a turn ends. See `open_permission_panel`.
+    let mut panel_last_open: Option<std::time::Instant> = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -3896,6 +4068,21 @@ async fn run_interactive(
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
         }
+        // `/settings` writes reduceMotion; Next draws the new value when it closes.
+        if renderer == claurst_tui::application::UiRenderer::Next
+            && settings_screen_was_open
+            && !app.settings_screen.visible
+        {
+            let saved = Settings::load_hierarchical(&tool_ctx.working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            claurst_tui::next::appearance::apply_presentation(
+                &mut app,
+                &saved,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+            );
+        }
+        settings_screen_was_open = app.settings_screen.visible;
 
         // Opt-in trace timing separates widget/layout work from completed draw
         // (including backend diff and terminal writes). No content is recorded.
@@ -4103,6 +4290,15 @@ async fn run_interactive(
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(&cmd_name, &cmd_args, &mut cmd_ctx) {
                                 app.show_command_error(error);
                                 continue;
+                            }
+                            if renderer == claurst_tui::application::UiRenderer::Next {
+                                if let Some(args) =
+                                    claurst_tui::next::appearance::appearance_args(&cmd_name, &cmd_args)
+                                {
+                                    run_next_appearance_command(&mut app, args, &tool_ctx.working_dir)
+                                        .await;
+                                    continue;
+                                }
                             }
                             let canonical_path = claurst_commands::canonical_catalog_path(&cmd_name, &cmd_args)
                                 .or_else(|| app.canonical_command_path(&cmd_name, &cmd_args));
@@ -4959,6 +5155,7 @@ async fn run_interactive(
                                 None
                             };
                             app.permission_request = None;
+                            panel_last_open = Some(std::time::Instant::now());
 
                             if let Some(prefix) = bash_prefix {
                                 app.bash_prefix_allowlist.insert(prefix);
@@ -5080,14 +5277,22 @@ async fn run_interactive(
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
-                Event::Resize(_, _) => {
-                    // Terminal resize - will be handled on next draw
+                // The next draw lays out for the new size; Next's layout
+                // setting decides first whether the inspector fits.
+                Event::Resize(width, height)
+                    if app.renderer == claurst_tui::application::UiRenderer::Next =>
+                {
+                    app.next_shell.follow_layout((width, height));
                 }
                 _ => {}
             }
         }
 
         if app.permission_request.is_none() {
+            // A panel opening within the arming delay of the last one closing
+            // is a follow-up: a key meant for the closed panel can still come.
+            let follow_up = panel_last_open
+                .is_some_and(|seen| seen.elapsed() < claurst_tui::dialogs::PERMISSION_ARM_DELAY);
             loop {
                 let next_pending = pending_permissions.lock().queue.pop_front();
                 let Some(pending) = next_pending else {
@@ -5122,26 +5327,20 @@ async fn run_interactive(
 
                 match reevaluated {
                     Some(claurst_core::permissions::PermissionDecision::Ask { .. }) | None => {
-                        let tool_use_id = pending.tool_use_id.clone();
-                        let request = permission_request_from_core(&pending);
-                        // Next guards approvals against stray keys (#411);
-                        // Classic keeps its existing dialog behavior.
-                        app.permission_request = Some(
-                            if app.renderer == claurst_tui::application::UiRenderer::Next {
-                                request.guarded()
-                            } else {
-                                request
-                            },
+                        open_permission_panel(
+                            &mut app,
+                            &mut pending_permissions.lock(),
+                            pending,
+                            follow_up,
                         );
-                        pending_permissions
-                            .lock()
-                            .waiting
-                            .insert(tool_use_id, pending);
                         break;
                     }
                     Some(decision) => settle_queued_permission(&mut app, pending, decision),
                 }
             }
+        }
+        if app.permission_request.is_some() {
+            panel_last_open = Some(std::time::Instant::now());
         }
         app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
@@ -5295,31 +5494,13 @@ async fn run_interactive(
             goal_turn = None;
 
             let handle = tokio::spawn(async move {
-                if ct.is_cancelled() {
-                    return QueryOutcome::Cancelled;
-                }
-
-                let msgs = msgs_arc_clone.lock().await.clone();
-                match claurst_query::compact_conversation(
+                compact_idle_conversation(
                     client_clone.as_ref(),
-                    &msgs,
+                    &msgs_arc_clone,
                     &compact_model,
+                    &ct,
                 )
                 .await
-                {
-                    Ok(compacted) => {
-                        let message = compacted
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
-                        *msgs_arc_clone.lock().await = compacted;
-                        QueryOutcome::EndTurn {
-                            message,
-                            usage: claurst_core::types::UsageInfo::default(),
-                        }
-                    }
-                    Err(err) => QueryOutcome::Error(err),
-                }
             });
             current_query = Some((handle, msgs_arc));
         }
@@ -5446,6 +5627,7 @@ async fn run_interactive(
                         );
                         if let Some((call_id, allowed)) = decided {
                             app.record_permission_decision(&call_id, allowed);
+                            panel_last_open = Some(std::time::Instant::now());
                         }
                     }
                     Ok(TuiBridgeEvent::SessionNameUpdate { title }) => {
@@ -5956,6 +6138,9 @@ async fn run_interactive(
         // Sync messages from a task seen finished before the drain above.
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
+                // The next turn's first panel is not a follow-up of this
+                // turn's last one, however soon it opens.
+                panel_last_open = None;
                 // Get the outcome and handle errors
                 let query_outcome = handle.await;
                 match &query_outcome {
@@ -6009,7 +6194,6 @@ async fn run_interactive(
                 };
                 let completed_end_turn = matches!(&query_outcome, Ok(QueryOutcome::EndTurn { .. }));
                 let was_auto_compact = app.auto_compact_running;
-                let auto_compact_succeeded = completed_end_turn;
                 // Sync the updated conversation back to our local vector
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
@@ -6027,17 +6211,7 @@ async fn run_interactive(
                     app.pending_auto_submit = true;
                 }
                 if app.auto_compact_running {
-                    app.auto_compact_running = false;
-                    if !auto_compact_succeeded {
-                        app.auto_compact_enabled = false;
-                        app.status_message = Some(
-                            "Auto-compact failed and was disabled for this session.".to_string(),
-                        );
-                    } else {
-                        // After auto-compact the context was summarised — reset usage.
-                        app.context_used_tokens = 0;
-                        app.status_message = Some("Auto-compact complete.".to_string());
-                    }
+                    finish_idle_compaction(&mut app, query_outcome.as_ref().ok());
                 }
 
                 rollback_unattempted_turn(
@@ -6291,28 +6465,12 @@ async fn run_interactive(
         .await;
         let saved =
             persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
-        if app.renderer == claurst_tui::application::UiRenderer::Next {
-            for line in exit_report.lines(&session.messages) {
-                println!("{line}");
-            }
-            // The in-app warning is gone once the terminal is restored, and an
-            // earlier save on disk would lack this turn. Stopping compaction
-            // leaves the copy saved when the last turn ended complete.
-            if !saved && exit_report.is_turn() {
-                eprintln!("Session not saved; any earlier saved copy lacks this turn.");
-            } else if !saved {
-                eprintln!("Session not saved.");
-            } else if !session.messages.is_empty() {
-                let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
-                println!(
-                    "Pick it up with: {}",
-                    resume_command(
-                        &session.id,
-                        &claurst_core::config::Settings::config_dir(),
-                        standalone.as_deref(),
-                    )
-                );
-            }
+        let (lines, warning) = exit_output(app.renderer, &exit_report, saved, &session);
+        for line in lines {
+            println!("{line}");
+        }
+        if let Some(warning) = warning {
+            eprintln!("{warning}");
         }
     }
     if let Some(mut runtime) = bridge_runtime.take() {
@@ -7155,6 +7313,50 @@ mod tests {
         assert_eq!(kept.len(), 1);
     }
 
+    /// Decision 6 on #496: when the save at exit fails, Classic prints the
+    /// one-line warning Next prints, and nothing else. The save fails for a
+    /// session id the store refuses as a file name, so no directory is
+    /// touched.
+    #[tokio::test]
+    async fn quitting_after_a_failed_save_warns_in_both_renderers() {
+        use claurst_tui::application::UiRenderer;
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        session.id = "not/a/file/name".into();
+        session
+            .messages
+            .push(claurst_core::types::Message::user("the prompt".to_string()));
+        let saved =
+            save_session_with_warning(&session, &mut app.notifications, "transcript update").await;
+        assert!(!saved, "the save fails");
+
+        let turn = claurst_tui::next::TurnExitReport::capture(&app);
+        let compaction = claurst_tui::next::TurnExitReport::default();
+        let after_turn = Some("Session not saved; any earlier saved copy lacks this turn.");
+        let (lines, warning) = exit_output(UiRenderer::Classic, &turn, saved, &session);
+        assert_eq!((lines, warning), (Vec::new(), after_turn));
+        let (lines, warning) = exit_output(UiRenderer::Classic, &compaction, saved, &session);
+        assert_eq!((lines, warning), (Vec::new(), Some("Session not saved.")));
+
+        // Next prints the same warning after its report, and no way back.
+        let (lines, warning) = exit_output(UiRenderer::Next, &turn, saved, &session);
+        assert_eq!(warning, after_turn);
+        assert!(lines[0].starts_with("Quit during a turn."), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.starts_with("Pick it up with")));
+
+        // A save that succeeds prints nothing in Classic; Next gives the way
+        // back.
+        assert_eq!(
+            exit_output(UiRenderer::Classic, &turn, true, &session),
+            (Vec::new(), None)
+        );
+        let (lines, warning) = exit_output(UiRenderer::Next, &turn, true, &session);
+        assert_eq!(warning, None);
+        assert!(lines
+            .last()
+            .is_some_and(|line| line.starts_with("Pick it up with")));
+    }
+
     /// #408: quitting during a turn stops it and keeps the prompt and the
     /// output it delivered. The exit block calls `stop_turn_and_keep_it` in
     /// either renderer, and it does not read the renderer; case 27 checks
@@ -7250,10 +7452,200 @@ mod tests {
         assert_eq!(session.messages.len(), 1, "the prompt is kept");
     }
 
-    /// #408: a worker that does not watch the token, as auto-compaction does
-    /// not, is waited for. If it finishes within `TURN_EXIT_WAIT`, the
-    /// conversation it wrote is what is kept. This models the compaction
-    /// worker's shape, not `compact_conversation` itself.
+    /// A Messages API stand-in for idle compaction. With `reply`, it answers
+    /// every request with a one-line summary; without, it holds each request
+    /// open and never answers. Reports each request it has read in full.
+    async fn compaction_fixture(
+        reply: bool,
+    ) -> (
+        Arc<claurst_api::AnthropicClient>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen, requests) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert!(n > 0, "fixture connection closed before request");
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|length| length.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let _ = seen.send(());
+                if !reply {
+                    held.push(socket);
+                    continue;
+                }
+                let body = "event: message_start\ndata: {\"message\":{\"id\":\"summary\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n\
+                    event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                    event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"The summary.\"}}\n\n\
+                    event: content_block_stop\ndata: {\"index\":0}\n\n\
+                    event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n\
+                    event: message_stop\ndata: {}\n\n";
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "fake-local-key".into(),
+            api_base: format!("http://{address}"),
+            max_retries: 0,
+            request_timeout: std::time::Duration::from_secs(30),
+            ..Default::default()
+        })
+        .unwrap();
+        (Arc::new(client), requests, server)
+    }
+
+    /// Enough history for `compact_conversation` to summarise a head.
+    fn compactable_history() -> Vec<claurst_core::types::Message> {
+        (0..16)
+            .map(|n| {
+                if n % 2 == 0 {
+                    claurst_core::types::Message::user(format!("question {n}"))
+                } else {
+                    claurst_core::types::Message::assistant(format!("answer {n}"))
+                }
+            })
+            .collect()
+    }
+
+    /// An App whose idle auto-compaction is running and whose user has asked
+    /// to cancel it; the loop has cancelled the token.
+    fn app_cancelling_idle_compaction() -> claurst_tui::App {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        app.context_used_tokens = 9_000;
+        app.cancellation = claurst_tui::application::TurnCancellation::AwaitingRuntime;
+        app
+    }
+
+    /// Decision 4 (#406): a cancel during idle auto-compaction stops it. The
+    /// conversation is exactly what it was, and the status says it was
+    /// cancelled and that auto-compaction is now off.
+    #[tokio::test]
+    async fn idle_compaction_cancelled_mid_summary_leaves_history_and_says_cancelled() {
+        let (client, mut requests, server) = compaction_fixture(false).await;
+        let history = compactable_history();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let worker = {
+            let (messages, cancel) = (messages.clone(), cancel.clone());
+            tokio::spawn(async move {
+                compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await
+            })
+        };
+        // The summary request is in flight and will never be answered.
+        tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+            .await
+            .expect("the summary request reaches the fixture");
+        cancel.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .expect("a cancel stops the compaction instead of waiting for the summary")
+            .unwrap();
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::Cancelled),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&*messages.lock().await).unwrap(),
+            serde_json::to_value(&history).unwrap(),
+            "no half-applied compaction"
+        );
+
+        let mut app = app_cancelling_idle_compaction();
+        finish_idle_compaction(&mut app, Some(&outcome));
+        app.settle_cancellation();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Cancelled. Auto-compact is off for this session.")
+        );
+        assert_eq!(
+            app.cancellation,
+            claurst_tui::application::TurnCancellation::Idle
+        );
+        assert_eq!(app.context_used_tokens, 9_000, "nothing was summarised");
+        assert!(
+            !app.auto_compact_enabled,
+            "it does not start again at once on the same history"
+        );
+        server.abort();
+    }
+
+    /// Decision 4 (#406): a cancel that arrives once the compaction has
+    /// finished keeps the compacted conversation, and the status does not
+    /// call the compaction cancelled.
+    #[tokio::test]
+    async fn idle_compaction_finished_before_the_cancel_keeps_its_result_and_status() {
+        let (client, _requests, server) = compaction_fixture(true).await;
+        let history = compactable_history();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        cancel.cancel();
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        let compacted = messages.lock().await.clone();
+        assert!(compacted.len() < history.len(), "the summary was applied");
+        assert!(compacted
+            .iter()
+            .any(|message| message.get_all_text().contains("The summary.")));
+
+        let mut app = app_cancelling_idle_compaction();
+        finish_idle_compaction(&mut app, Some(&outcome));
+        // The loop settles once no worker is left running.
+        app.settle_cancellation();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Auto-compact complete.")
+        );
+        assert_eq!(
+            app.cancellation,
+            claurst_tui::application::TurnCancellation::Idle
+        );
+        assert_eq!(app.context_used_tokens, 0);
+        assert!(app.auto_compact_enabled);
+        server.abort();
+    }
+
+    /// #408: a worker that does not watch the token (a tool or approval that
+    /// ignores it) is waited for. If it finishes within `TURN_EXIT_WAIT`, the
+    /// conversation it wrote is what is kept. Idle auto-compaction watches the
+    /// token since decision 4; see the `idle_compaction_*` tests.
     #[tokio::test]
     async fn quitting_keeps_what_a_worker_that_ignores_the_stop_wrote_if_it_finishes_in_time() {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
@@ -7464,6 +7856,54 @@ mod tests {
             },
             rx,
         )
+    }
+
+    /// Decision 17 of #411: Classic guards a follow-up panel the way Next
+    /// guards every panel, and leaves its first panel as it was.
+    #[test]
+    fn classic_guards_only_a_follow_up_panel_and_next_guards_every_panel() {
+        use claurst_tui::application::UiRenderer;
+        use claurst_tui::dialogs::{handle_permission_key_at, PERMISSION_ARM_DELAY};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        for (renderer, follow_up, guarded) in [
+            (UiRenderer::Classic, false, false),
+            (UiRenderer::Classic, true, true),
+            (UiRenderer::Next, false, true),
+            (UiRenderer::Next, true, true),
+        ] {
+            let tag = format!("{renderer:?}, follow-up: {follow_up}");
+            let mut app = claurst_tui::App::new(
+                claurst_core::config::Config::default(),
+                claurst_core::cost::CostTracker::new(),
+            );
+            app.renderer = renderer;
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            let (pending, _decision) = bridge_permission_fixture("perm-follow-up");
+            open_permission_panel(&mut app, &mut store, pending, follow_up);
+            assert!(store.waiting.contains_key("perm-follow-up"), "{tag}");
+            let Some(panel) = app.permission_request.as_mut() else {
+                panic!("{tag}: no panel opened");
+            };
+            assert_eq!(panel.arming, guarded, "{tag}");
+            let focused = panel.options[panel.selected_option].key;
+            assert_eq!(focused, if guarded { 'n' } else { 'y' }, "{tag}");
+
+            // A y that reaches the panel as it opens decides it only when
+            // the panel is not guarded.
+            let opened = panel.quiet_since;
+            assert_eq!(
+                handle_permission_key_at(panel, y, opened),
+                !guarded,
+                "{tag}"
+            );
+            if guarded {
+                // A y after a quiet gap still allows it.
+                let armed = opened + PERMISSION_ARM_DELAY;
+                assert!(handle_permission_key_at(panel, y, armed), "{tag}");
+                assert_eq!(panel.options[panel.selected_option].key, 'y', "{tag}");
+            }
+        }
     }
 
     #[test]
