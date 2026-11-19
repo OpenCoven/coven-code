@@ -8616,15 +8616,13 @@ fn open_file_externally(
     #[cfg(target_os = "windows")]
     {
         let system_root = windows_system_root();
-        let mut command = tokio::process::Command::new(
+        let mut command = tokio::process::Command::from(claurst_core::shell::start(
             std::path::Path::new(&system_root)
                 .join("System32")
                 .join("cmd.exe"),
-        );
-        let quoted_path = quote_windows_cmd_path(path);
+            path,
+        )?);
         command
-            .args(["/C", "start", ""])
-            .arg(quoted_path)
             .env_clear()
             .env("SystemRoot", &system_root)
             .env("WINDIR", &system_root);
@@ -8647,14 +8645,6 @@ fn open_file_externally(
             "No suitable editor found",
         ))
     }
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn quote_windows_cmd_path(path: &std::path::Path) -> std::ffi::OsString {
-    let mut quoted = std::ffi::OsString::from("\"");
-    quoted.push(path.as_os_str());
-    quoted.push("\"");
-    quoted
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -9612,16 +9602,6 @@ role = "Research"
         assert_eq!(
             app.config.permission_mode,
             claurst_core::config::PermissionMode::AcceptEdits
-        );
-    }
-
-    #[test]
-    fn windows_cmd_path_is_passed_as_quoted_argument() {
-        let path = std::path::Path::new(r"C:\temp\safe & literal.txt");
-
-        assert_eq!(
-            quote_windows_cmd_path(path).to_string_lossy(),
-            r#""C:\temp\safe & literal.txt""#
         );
     }
 

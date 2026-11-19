@@ -60,3 +60,18 @@ fn shell_command_passes_quotes_as_written() {
         assert_eq!(String::from_utf8_lossy(&output.stdout), printed, "{line}");
     }
 }
+
+/// `start` gets its target inside quotes, as written, and a target that
+/// would end those quotes is refused. What `start` then opens is covered by
+/// the callers' tests, in claurst-tui and claurst-mcp.
+#[test]
+fn shell_start_quotes_its_target() {
+    let shell = claurst_core::shell::start("cmd", r"C:\temp\safe & literal.txt").unwrap();
+    assert_eq!(shell.get_program(), "cmd");
+    assert_eq!(
+        shell.get_args().collect::<Vec<_>>(),
+        [r#"/C "start "" "C:\temp\safe & literal.txt"""#]
+    );
+    let error = claurst_core::shell::start("cmd", r#"x" & echo injected & ""#).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
