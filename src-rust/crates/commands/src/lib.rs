@@ -14260,6 +14260,56 @@ mod tests {
         }
     }
 
+    /// #580: the three daemon listings return to the event loop at once. A
+    /// daemon that accepts every connection and never answers used to hold
+    /// each of them for the whole request timeout, with nothing drawn or
+    /// read meanwhile.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn the_daemon_listings_do_not_wait_for_the_daemon() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let coven_home = guard.coven_home().to_path_buf();
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            "[[familiar]]\nid = \"wisp\"\n",
+        )
+        .unwrap();
+        // Accepts every connection and holds it open, silent.
+        let listener =
+            std::os::unix::net::UnixListener::bind(coven_home.join("coven.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let silent = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut held = Vec::new();
+                while !stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => held.push(stream),
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            })
+        };
+
+        for input in ["/coven sessions", "/coven familiars", "/familiar list"] {
+            let mut ctx = make_ctx();
+            let started = std::time::Instant::now();
+            let result = execute_command(input, &mut ctx).await;
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "{input} held the event loop for {elapsed:?}: {result:?}"
+            );
+        }
+        stop.store(true, Ordering::Release);
+        silent.join().unwrap();
+    }
+
     /// `/coven status` and `/status doctor` count only live sessions as
     /// active (#528). The fake daemon lists one running, one idle, one
     /// completed, one failed and one archived running session: two are live.

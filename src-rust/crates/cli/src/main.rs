@@ -9308,6 +9308,86 @@ mod tests {
         drop(release);
     }
 
+    /// #580: a completion the daemon never answers holds the exit only for
+    /// a short, fixed time.
+    #[tokio::test]
+    async fn exit_waits_a_bounded_time_for_an_unanswered_completion() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut ledger = LedgerRegistrations::default();
+        ledger.register(&mut app, "session-a", || Ok(None));
+        settle_ledger(&mut ledger, &mut app).await;
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Mutex::new(held);
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            ledger.complete_all(Duration::from_millis(100), move |_| {
+                let _ = held.lock().unwrap().recv();
+            }),
+        )
+        .await
+        .expect("the exit waited for a completion that never answers");
+        let elapsed = started.elapsed();
+        drop(release);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the exit waited {elapsed:?} for the completion"
+        );
+    }
+
+    /// #580: neither a registration still in flight nor a completion the
+    /// daemon never answers keeps the runtime, and so the process, alive
+    /// once the exit has stopped waiting for them.
+    #[test]
+    fn daemon_ledger_calls_do_not_hold_the_runtime_at_exit() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let (release_registration, registration) = std::sync::mpsc::channel::<()>();
+        let (release_completion, completion) = std::sync::mpsc::channel::<()>();
+        let completion = Mutex::new(completion);
+        runtime.block_on(async {
+            let mut ledger = LedgerRegistrations::default();
+            ledger.register(&mut app, "session-a", move || {
+                let _ = registration.recv_timeout(Duration::from_secs(8));
+                Err("no answer".to_string())
+            });
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                ledger.complete_all(Duration::from_millis(100), move |_| {
+                    let _ = completion
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(8));
+                }),
+            )
+            .await;
+        });
+        let started = Instant::now();
+        drop(runtime);
+        let elapsed = started.elapsed();
+        drop((release_registration, release_completion));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the runtime waited {elapsed:?} for daemon calls at exit"
+        );
+    }
+
     #[test]
     fn closing_the_memory_page_drops_the_snapshot_and_a_late_answer() {
         use claurst_tui::application::memory::MemorySnapshot;

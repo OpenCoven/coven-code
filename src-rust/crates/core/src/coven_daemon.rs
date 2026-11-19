@@ -1914,6 +1914,83 @@ mod tests {
         );
     }
 
+    /// #580: one deadline covers a whole request. A peer that sends a byte
+    /// every second never lets a single read time out, so it must not be
+    /// able to hold the request past the request timeout.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_to_a_trickling_daemon_ends_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            // One byte a second for 15 s, or until the client hangs up.
+            for _ in 0..15 {
+                if stream.write_all(b"H").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let started = std::time::Instant::now();
+        let result = client.health();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(result.is_err(), "a trickled answer never completes");
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "the request took {elapsed:?} against its 5 s deadline"
+        );
+    }
+
+    /// #580: the connect has a deadline too. On Linux a connect to a socket
+    /// whose listen queue is full waits for room; macOS refuses it at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_connect_to_a_full_listen_queue_ends_at_its_deadline() {
+        use socket2::{Domain, SockAddr, Socket, Type};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let address = SockAddr::unix(&sock).unwrap();
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        listener.bind(&address).unwrap();
+        // Room for at most one waiting connection, and nothing accepts.
+        listener.listen(0).unwrap();
+        let mut waiting = Vec::new();
+        for _ in 0..64 {
+            let filler = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+            filler.set_nonblocking(true).unwrap();
+            if filler.connect(&address).is_err() {
+                break;
+            }
+            waiting.push(filler);
+        }
+
+        let client = DaemonClient { sock_path: sock };
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = client.health();
+            let _ = done.send((result.is_err(), started.elapsed()));
+        });
+        let (failed, elapsed) = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the request was still connecting after 10 s");
+        assert!(failed, "nothing accepted the connection");
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "the request took {elapsed:?} against its 5 s deadline"
+        );
+        drop((listener, waiting));
+    }
+
     /// A daemon that answers in full and then keeps the connection open is
     /// still identified, once the budget ends.
     #[cfg(unix)]
