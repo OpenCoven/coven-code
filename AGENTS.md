@@ -30,7 +30,7 @@ Agent-facing rules for working on Coven Code. `CLAUDE.md` points here; there is 
 
 ## Commands
 
-Run from `src-rust/` unless noted.
+Run from `src-rust/` unless noted, with the toolchain CI pins (see Parallel Worktrees).
 
 - After Rust changes (not docs): `cargo check --workspace` — fix every error and warning before committing.
 - Clippy: `cargo clippy --workspace --all-targets -- -D warnings`. Fix lints; do not `#[allow(...)]` without justification.
@@ -49,20 +49,21 @@ The ratatui frontend is sensitive to terminal size and key encoding. For repeata
 # Build a debug binary once
 cargo build
 
-# 80×24 session
-tmux new-session -d -s coven-code-test -x 80 -y 24
-tmux send-keys -t coven-code-test "./target/debug/coven-code" Enter
+# 80×24 session on a tmux server of your own (see Parallel Worktrees)
+sock=coven-code-$$
+tmux -L "$sock" new-session -d -s test -x 80 -y 24
+tmux -L "$sock" send-keys -t test "./target/debug/coven-code" Enter
 
 # Give it time to redraw, then capture
-sleep 2 && tmux capture-pane -t coven-code-test -p
+sleep 2 && tmux -L "$sock" capture-pane -t test -p
 
 # Drive input
-tmux send-keys -t coven-code-test "your prompt here" Enter
-tmux send-keys -t coven-code-test Escape
-tmux send-keys -t coven-code-test C-o   # ctrl+o
+tmux -L "$sock" send-keys -t test "your prompt here" Enter
+tmux -L "$sock" send-keys -t test Escape
+tmux -L "$sock" send-keys -t test C-o   # ctrl+o
 
-# Cleanup
-tmux kill-session -t coven-code-test
+# Cleanup: only your own server
+tmux -L "$sock" kill-server
 ```
 
 On Windows hosts, prefer `cargo run -- --print "..."` against the headless path. The Windows console has known quirks with the kitty keyboard protocol — see `crates/tui` for the push/pop workaround.
@@ -127,7 +128,7 @@ Coven Code uses a **single workspace version** stamped across every surface (Car
 
 ## **CRITICAL** Git Rules for Parallel Agents
 
-This repo runs parallel agents in worktrees under `.claude/worktrees/`. Multiple agents may be modifying different files in the same checkout simultaneously. You MUST follow these rules:
+This repo runs parallel agents in worktrees under `.claude/worktrees/` (see Parallel Worktrees). Several agents work in the same clone at once, and a checkout may still be shared, so you MUST follow these rules:
 
 ### Committing
 
@@ -149,7 +150,7 @@ These can destroy other agents' work:
 - `git stash` — stashes ALL changes including other agents' work
 - `git add -A` / `git add .` — stages other agents' uncommitted work
 - `git commit --no-verify` — bypasses required checks; never allowed
-- `git rebase` of a branch that has been pushed — rewrites history other agents and reviewers have fetched
+- `git rebase` onto `main` — merge `origin/main` instead; rebasing a pushed branch rewrites history other agents and reviewers have fetched
 - Force-push (`--force`, `--force-with-lease`) to any branch — never allowed; the patch-release workflow is the only thing that may force-move tags, and it does so via the workflow runner, not from your shell
 
 ### Safe Workflow
@@ -196,9 +197,9 @@ Several agents share one host and one clone. Give each change its own worktree, 
 - One worktree per change, under `.claude/worktrees/`, from `origin/main`: `git fetch origin && git worktree add --no-track -b <branch> .claude/worktrees/<name> origin/main`. Never edit the main checkout; another session may have it on its own branch with staged files.
 - One `CARGO_TARGET_DIR` per worktree; never share one. Cargo's fingerprints for workspace path crates do not include the worktree path, so a shared target directory reuses units another branch built, judged by mtime, and you test code that is not in your tree. Each worktree's default `src-rust/target` is separate; a `CARGO_TARGET_DIR` exported globally is how one gets shared by accident.
 - On a shared host set `CARGO_BUILD_JOBS` (for example `4`) and check `uptime` before a build. When the load is high, run the gates on hosted CI instead (below).
-- Toolchain: CI pins `dtolnay/rust-toolchain@1.100.0` in `.github/workflows/rust-ci.yml` (there is no `rust-toolchain` file). Run `rustup run 1.100.0 cargo <command>` from `src-rust/`, and follow the pin when it changes. With a scratch `HOME`, also set `RUSTUP_HOME` and `CARGO_HOME` to your real ones, or rustup cannot find the toolchain.
-- The binary reads `.coven-code/settings.json` from every directory above its working directory (`Settings::find_project_settings`), skipping only the file of its own `HOME`. A scratch `HOME` with a working directory inside your real home therefore still loads your real `~/.coven-code/settings.json`. For manual runs, use a scratch `HOME` and a working directory outside `$HOME`.
-- `scripts/tui-tests/run.sh` does this itself: it makes a scratch directory under `TMPDIR`, starts the cases with a scratch `HOME` from a scratch working directory, and refuses to start (exit `2`) when that directory is inside your home or below a `.coven-code` directory. If it refuses, set `TMPDIR` to a directory outside your home. See `scripts/tui-tests/README.md`.
+- Toolchain: CI pins `dtolnay/rust-toolchain@1.100.0` in `.github/workflows/rust-ci.yml` (there is no `rust-toolchain` file). Run `rustup run 1.100.0 cargo <command>` from `src-rust/` (install it once with `rustup toolchain install 1.100.0 -c clippy -c rustfmt`), and follow the pin when it changes. With a scratch `HOME`, also set `RUSTUP_HOME` and `CARGO_HOME` to your real ones, or rustup cannot find the toolchain.
+- The binary walks up from its working directory and uses the first `.coven-code/settings.json` (or `.jsonc`) it finds (`Settings::find_project_settings`). It skips only its own config home's `settings.json`, and `COVEN_CODE_HOME`, `COVEN_HOME` or `COVEN_PARENT` override that home. A scratch `HOME` with a working directory inside your real home therefore still picks up your real `~/.coven-code/settings.json`. For manual runs, use a scratch `HOME`, unset those three variables, and work from a directory outside `$HOME`.
+- `scripts/tui-tests/run.sh` does this itself: it makes a scratch directory under `TMPDIR`, unsets those variables, gives cases 01-07 a scratch `HOME` and working directory (the other cases make theirs under a `TMPDIR` inside it), and refuses to start (exit `2`) when that directory is inside your home or below a `.coven-code` directory. If it refuses, set `TMPDIR` to a directory outside your home. See `scripts/tui-tests/README.md`.
 - Kill only process IDs you started and recorded (`$!`, a pid file, a tmux server on a socket you named with `-L`). Never `pkill -f`, `killall` or `tmux kill-server` by pattern or on the default socket; that kills other agents' tmux servers and builds.
 - Never edit a shell script while it runs. Bash reads a script as it goes, so the running copy executes your edit. Run long scripts from a copy you leave alone.
 
@@ -210,12 +211,13 @@ Several agents share one host and one clone. Give each change its own worktree, 
 
 | A PR that touches | Runs |
 | --- | --- |
-| `src-rust/**` | Rust CI (8 jobs) and TUI Tests (2); also Version stamp tests for `Cargo.toml`/`Cargo.lock`, Viewer tests for `crates/core/src/share_export/**`, Release candidate for `crates/acp/registry-template/agent.json` |
+| `src-rust/**` | Rust CI (8 check runs) and TUI Tests (2); also Version stamp tests for the workspace `Cargo.toml`/`Cargo.lock`, Viewer tests for `crates/core/src/share_export/**`, Version stamp tests and Release candidate for `crates/acp/registry-template/agent.json` |
 | `scripts/tui-tests/**` | TUI Tests |
-| `install.sh`, `install.ps1`, `scripts/*checksums*`, `scripts/package-release.py`, the release workflows | Rust CI, plus the installer or release test workflows that name those files |
+| `install.sh`, `install.ps1`, `scripts/*checksums*`, `scripts/package-release.py`, `patch-release.yml`, `release.yml`, `release-build.yml` | Rust CI, plus the installer or release test workflows that name those files |
+| `.github/workflows/<name>.yml` | that workflow, plus any other whose `paths` names the file |
 | files under `npm/`, `session/**`, `marketplace/**` | the npm, Viewer or Marketplace tests that name those files |
 | `README.md`, `docs/index.md`, `docs/installation.md` | Version stamp tests |
-| any other `scripts/` file | only a workflow whose `paths` names it; usually none |
+| any other `scripts/` file | the workflows whose `paths` name it (several `scripts/*.py` trigger Rust CI); check with `grep -l <file> .github/workflows/*.yml` |
 | other docs, `AGENTS.md`, `CLAUDE.md` | none |
 
 - Every PR also gets CodeQL code scanning (four `Analyze (...)` jobs and `CodeQL`) and a Vercel status. A `src-rust/` PR therefore shows 15 check runs. Recount from the workflow files when they change.
