@@ -69,6 +69,10 @@ CARGO=("$RUSTUP" run "$TOOLCHAIN" cargo)
 if [ "$DRY_RUN" = 1 ]; then
   SCRATCH_HOME="$OUT/home.XXXXXX"
 else
+  "$RUSTUP" run "$TOOLCHAIN" cargo --version >/dev/null 2>&1 || {
+    echo "gates: '$RUSTUP run $TOOLCHAIN cargo' does not run; install the toolchain or set RUSTUP" >&2
+    exit 2
+  }
   mkdir -p "$OUT" || exit 2
   SCRATCH_HOME="$(mktemp -d "$OUT/home.XXXXXX")" || exit 2
   trap 'rm -rf "$SCRATCH_HOME"' EXIT

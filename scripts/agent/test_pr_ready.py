@@ -44,10 +44,11 @@ def run(id, name, conclusion="success", status="completed", suite=1, started="20
 
 
 AHEAD = {"status": "ahead", "ahead_by": 2, "behind_by": 0}
-def workflow(id, name, suite, conclusion="success", status="completed"):
+def workflow(id, name, suite, conclusion="success", status="completed", path=None):
     return {
         "id": id,
         "name": name,
+        "path": path or f".github/workflows/{name.lower().replace(' ', '-')}.yml",
         "check_suite_id": suite,
         "status": status,
         "conclusion": conclusion if status == "completed" else None,
@@ -86,7 +87,7 @@ class VerdictTests(unittest.TestCase):
         ]
         self.assertEqual(verdict(checks=checks), "NOT READY: Rust CI / Format, lint, and test: cancelled")
 
-    def test_same_started_at_falls_back_to_the_higher_id(self):
+    def test_higher_id_is_the_newer_run(self):
         checks = [run(11, "job", "success"), run(10, "job", "failure")]
         self.assertEqual(verdict(checks=checks), "READY")
 
@@ -156,8 +157,27 @@ class VerdictTests(unittest.TestCase):
             verdict(checks=[run(1, "a")], statuses=statuses[:1]), "NOT READY: status Vercel: pending"
         )
 
+    def test_two_workflows_with_one_name_are_kept_apart(self):
+        workflows = WORKFLOWS + [
+            workflow(104, "Tests", 4, "failure", path=".github/workflows/a.yml"),
+            workflow(105, "Tests", 5, path=".github/workflows/b.yml"),
+        ]
+        result = verdict(checks=[run(1, "a")], workflows=workflows)
+        self.assertEqual(result, "NOT READY: workflow Tests: failure")
+
+    def test_unstable_is_not_ready_and_has_hooks_is_ready(self):
+        self.assertEqual(verdict(p=pull(merge_state="unstable"), checks=[run(1, "a")]), "NOT READY: mergeable_state=unstable")
+        self.assertEqual(verdict(p=pull(merge_state="has_hooks"), checks=[run(1, "a")]), "READY")
+
+    def test_error_status_is_not_ready(self):
+        statuses = [{"id": 1, "context": "Vercel", "state": "error"}]
+        self.assertEqual(verdict(checks=[run(1, "a")], statuses=statuses), "NOT READY: status Vercel: error")
+
     def test_merged_pr_reports_only_that(self):
-        result = verdict(p=pull(None, "unknown", state="closed", merged=True), checks=[run(1, "a")])
+        diverged = {"status": "diverged", "ahead_by": 3, "behind_by": 7}
+        result = verdict(
+            p=pull(None, "unknown", state="closed", merged=True), compare=diverged, checks=[run(1, "a")]
+        )
         self.assertEqual(result, "NOT READY: already merged")
 
     def test_closed_draft_pr_lists_every_reason(self):
@@ -253,14 +273,14 @@ class ScriptTests(unittest.TestCase):
         result = self.script("7")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("NOT READY: mergeable still unknown after 3 tries", result.stdout)
-        self.assertEqual(sum("/pulls/" in c[1] for c in self.calls()), 3)
+        self.assertEqual(sum("/pulls/" in c[1] for c in self.calls()), 4)
 
     def test_only_reads_through_rest(self):
         self.write("pulls.json", [pull()])
         result = self.script("7", "--repo", "Example/repo")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)
         for call in calls:
             self.assertEqual(call[0], "api")
             self.assertTrue(call[1].startswith("repos/Example/repo/"), call)
@@ -269,6 +289,22 @@ class ScriptTests(unittest.TestCase):
             if any(part in call[1] for part in ("/check-runs", "/statuses", "/actions/runs")):
                 self.assertIn("--paginate", call, call)
                 self.assertIn("--slurp", call, call)
+
+    def test_closed_pr_is_not_retried(self):
+        self.write("pulls.json", [pull(None, "unknown", state="closed")])
+        result = self.script("7")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("NOT READY: PR is closed", result.stdout)
+        # One read before the checks, one after.
+        self.assertEqual(sum("/pulls/" in c[1] for c in self.calls()), 2)
+
+    def test_head_that_moves_during_the_check_is_not_ready(self):
+        moved = pull()
+        moved["head"] = {"sha": "b" * 40}
+        self.write("pulls.json", [pull(), moved])
+        result = self.script("7")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"the head moved to {'b' * 40} during the check", result.stdout)
 
     def test_api_failure_exits_2(self):
         self.write("pulls.json", [pull()])

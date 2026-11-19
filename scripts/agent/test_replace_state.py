@@ -96,6 +96,43 @@ class ReplaceSectionTests(unittest.TestCase):
         with self.assertRaisesRegex(replace_state.SectionError, "2 Current state headings"):
             replace_state.replace_section(OLD + "\n" + OLD, NEW)
 
+    def test_section_file_must_end_with_one_next_action_paragraph(self):
+        bad = (
+            "## Current state: 2026-11-19\n\nA.\n",
+            "## Current state: 2026-11-19\n\n**Next action:** a.\n\nTrailing.\n",
+            "## Current state: 2026-11-19\n\n**Next action:** a.\n\n**Next action:** b.\n",
+            "## Current state: 2026-11-19\n\n## Inner\n\n**Next action:** a.\n",
+            "## Current state: 2026-11-19\n\n---\n\n**Next action:** a.\n",
+        )
+        for section in bad:
+            with self.assertRaises(replace_state.SectionError, msg=section):
+                replace_state.replace_section(OLD, section)
+        ok = "## Current state: 2026-11-19\n\n### Done\n\n```\n## fenced\n```\n\n**Next action:** a.\n"
+        self.assertTrue(replace_state.replace_section(OLD, ok).startswith(ok))
+
+    def test_every_result_survives_a_second_rewrite(self):
+        bodies = (
+            "Intro.\n\n" + OLD + "\nOriginal text.\n\n### Prompt\n",
+            "## What happens\n\nNo headings below.\n",
+            "## Current state: 2026-11-18\n\nOld.\n\n## Outcome\n",
+        )
+        other = NEW.replace("New facts.", "Newer facts.")
+        for body in bodies:
+            once = replace_state.replace_section(body, NEW, insert=True)
+            twice = replace_state.replace_section(once, other)
+            self.assertEqual(twice, once.replace("New facts.", "Newer facts."), body)
+
+    def test_loose_heading_is_not_duplicated_by_insert(self):
+        for body in ("## Current state: 2026-11-18 (sweep v4)\n\nOld.\n", "### Current state\n\nOld.\n"):
+            with self.assertRaisesRegex(replace_state.SectionError, "another form"):
+                replace_state.replace_section(body, NEW, insert=True)
+
+    def test_fenced_example_heading_is_not_counted(self):
+        body = OLD + "\n```\n## Current state: 2026-01-01\n```\n"
+        self.assertEqual(
+            replace_state.replace_section(body, NEW), NEW + "\n```\n## Current state: 2026-01-01\n```\n"
+        )
+
     def test_section_file_must_start_with_the_dated_heading(self):
         for bad in ("New facts only.\n", "## Current state\n\nundated\n", "Intro\n" + NEW):
             with self.assertRaises(replace_state.SectionError):
@@ -183,6 +220,24 @@ class ScriptTests(unittest.TestCase):
         patch = [c for c in self.calls() if "-X" in c]
         self.assertEqual(len(patch), 1)
         self.assertEqual(patch[0][:4], ["api", "-X", "PATCH", "repos/Example/repo/issues/5"])
+
+    def test_default_out_dir_inside_a_git_work_tree_is_refused(self):
+        repo = self.dir / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        env = dict(
+            os.environ, PATH=f"{self.dir}{os.pathsep}{os.environ['PATH']}", FAKE_GH_DIR=str(self.dir)
+        )
+        result = subprocess.run(
+            [sys.executable, str(HERE / "replace-state.py"), "5", str(self.section)],
+            env=env,
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--out-dir", result.stderr)
+        self.assertEqual(list(repo.iterdir()), [repo / ".git"])
 
     def test_a_second_run_keeps_the_first_copies(self):
         self.assertEqual(self.script().returncode, 0)

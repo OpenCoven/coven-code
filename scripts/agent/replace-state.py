@@ -5,20 +5,27 @@ usage: replace-state.py <issue> <section-file> [--apply] [--insert] [--to-end]
                         [--repo OWNER/NAME] [--out-dir DIR]
 
 The section file must start with its own "## Current state: YYYY-MM-DD"
-heading. The old section starts at its heading and ends:
+heading and end with one paragraph that starts with "**Next action:**"; it
+may hold "###" or deeper headings but no "#"/"##" heading, "<details" or
+"---" line. That keeps its end findable, so every later run replaces exactly
+it. A result that a second run would cut differently is refused.
+
+The old section starts at its heading and ends:
 - after its first "**Next action:**" paragraph, if it has one before the next
   "#" or "##" heading, "<details" line or "---" rule;
 - otherwise at the first of those, or at a "###" to "######" heading;
-- otherwise, with --to-end only, at the end of the body. Without --to-end
-  that is an error, so text with no marker after the section is never lost.
+- otherwise, with --to-end only, at the end of the body, taking any plain
+  text after it too. Without --to-end that is an error, so unmarked text
+  after an old section is never lost by accident.
 Lines inside fenced code blocks are not markers. Text after the section (the
 original report, acceptance, prompts) is kept.
 
 By default it only previews: it prints a unified diff and writes
 <issue>.<UTC time>.before.md and .after.md into --out-dir (default: the
-current directory), so earlier copies are never overwritten. --apply also
-writes the new body with `gh api -X PATCH`, after checking that the issue has
-not changed since it was read. --insert puts the section at the top of a body
+current directory, refused when that is inside a git work tree, where the
+copies could be committed by accident). Earlier copies are never overwritten.
+--apply also writes the new body with `gh api -X PATCH`, after checking that
+the body has not changed since it was read. --insert puts the section at the top of a body
 that has none; without it, a missing section is an error.
 
 Exit status: 0 on success (or no change), 1 when the body or the section's
@@ -40,6 +47,7 @@ NEXT_ACTION = re.compile(r"\*\*Next action:\*\*")
 HARD_STOP = re.compile(r"#{1,2}\s|<details\b|(-{3,}|\*{3,}|_{3,})\s*$")
 SOFT_STOP = re.compile(r"#{3,6}\s")
 FENCE = re.compile(r" {0,3}(```|~~~)")
+ANY_STATE_HEADING = re.compile(r"#{1,6}\s*Current state\b", re.I)
 
 
 class SectionError(Exception):
@@ -47,14 +55,27 @@ class SectionError(Exception):
 
 
 def normalize_section(text):
+    """Check the new section so that a later run finds exactly where it ends."""
     text = text.replace("\r\n", "\n").strip("\n")
-    first = text.split("\n", 1)[0]
+    first, _, body = text.partition("\n")
     if not HEADING.fullmatch(first):
         raise SectionError(
             "the section file must start with a '## Current state: YYYY-MM-DD' heading"
         )
-    if len(HEADING.findall(text)) != 1:
-        raise SectionError("the section file holds more than one Current state heading")
+    actions = []
+    for offset, line in markers(body):
+        if HARD_STOP.match(line) or ANY_STATE_HEADING.match(line):
+            raise SectionError(
+                "the section file may hold only ### or deeper headings, and no <details> "
+                f"or --- line: {line.strip()!r}"
+            )
+        if NEXT_ACTION.match(line):
+            actions.append(offset)
+    if len(actions) != 1 or "\n\n" in body[actions[0]:]:
+        raise SectionError(
+            "the section file must end with exactly one paragraph that starts with "
+            "**Next action:**, so that a later run knows where the section ends"
+        )
     return text + "\n"
 
 
@@ -97,14 +118,17 @@ def section_end(rest, to_end):
     )
 
 
-def replace_section(body, section, insert=False, to_end=False):
-    """Return body with its dated Current state section replaced by section."""
-    body = (body or "").replace("\r\n", "\n")
-    section = normalize_section(section)
-    found = list(HEADING.finditer(body))
+def splice(body, section, insert, to_end):
+    found = [offset for offset, line in markers(body) if HEADING.fullmatch(line.rstrip("\n"))]
     if len(found) > 1:
         raise SectionError(f"the body holds {len(found)} Current state headings")
     if not found:
+        loose = [line.strip() for _, line in markers(body) if ANY_STATE_HEADING.match(line)]
+        if loose:
+            raise SectionError(
+                f"the body has a Current state heading in another form ({loose[0]!r}); "
+                "fix it by hand to '## Current state: YYYY-MM-DD' first"
+            )
         if not insert:
             raise SectionError(
                 "the body has no '## Current state: YYYY-MM-DD' section; "
@@ -112,11 +136,23 @@ def replace_section(body, section, insert=False, to_end=False):
             )
         rest = body.lstrip("\n")
         return section + ("\n" + rest if rest else "")
-    start = found[0].start()
-    after_heading = found[0].end()
+    start = found[0]
+    after_heading = body.index("\n", start) + 1 if "\n" in body[start:] else len(body)
     rest = body[after_heading:]
     tail = rest[section_end(rest, to_end):].lstrip("\n")
     return body[:start] + section + ("\n" + tail if tail else "")
+
+
+def replace_section(body, section, insert=False, to_end=False):
+    """Return body with its dated Current state section replaced by section."""
+    body = (body or "").replace("\r\n", "\n")
+    section = normalize_section(section)
+    out = splice(body, section, insert, to_end)
+    # The next run must find the same boundary, or it would take original
+    # text with it.
+    if splice(out, section, False, False) != out:
+        raise SectionError("the result would not survive a second rewrite; refusing")
+    return out
 
 
 def gh(args, **kwargs):
@@ -126,7 +162,8 @@ def gh(args, **kwargs):
         raise RuntimeError("gh is not installed") from error
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or error.stdout or "").strip()
-        raise RuntimeError(f"gh api {args[0]} failed: {detail}") from error
+        target = next((a for a in args if a.startswith("repos/")), args[0])
+        raise RuntimeError(f"gh api {target} failed: {detail}") from error
 
 
 def main(argv=None):
@@ -141,8 +178,23 @@ def main(argv=None):
         help="let a section with no Next action and nothing after it run to the end of the body",
     )
     parser.add_argument("--repo", default=DEFAULT_REPO)
-    parser.add_argument("--out-dir", type=pathlib.Path, default=pathlib.Path.cwd())
+    parser.add_argument("--out-dir", type=pathlib.Path, help="where to keep the copies")
     args = parser.parse_args(argv)
+    if args.out_dir is None:
+        try:
+            inside = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True
+            ).stdout.strip()
+        except FileNotFoundError:
+            inside = ""
+        if inside == "true":
+            print(
+                "replace-state: the current directory is inside a git work tree; "
+                "pass --out-dir for the before/after copies",
+                file=sys.stderr,
+            )
+            return 2
+        args.out_dir = pathlib.Path.cwd()
     endpoint = f"repos/{args.repo}/issues/{args.issue}"
     try:
         section = args.section_file.read_text(encoding="utf-8")
@@ -188,13 +240,17 @@ def main(argv=None):
         return 0
     try:
         current = json.loads(gh([endpoint], capture_output=True).stdout)
-        if current.get("updated_at") != issue.get("updated_at"):
+        if (current.get("body") or "").replace("\r\n", "\n") != before:
             print(
                 f"replace-state: #{args.issue} changed while it was being rewritten; rerun",
                 file=sys.stderr,
             )
             return 2
-        gh(["-X", "PATCH", endpoint, "-F", f"body=@{after_file}", "--jq", ".html_url"])
+        done = gh(
+            ["-X", "PATCH", endpoint, "-F", f"body=@{after_file}", "--jq", ".html_url"],
+            capture_output=True,
+        )
+        print(f"#{args.issue}: updated {done.stdout.strip()}")
     except (RuntimeError, json.JSONDecodeError) as error:
         print(f"replace-state: {error}", file=sys.stderr)
         return 2

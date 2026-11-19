@@ -1,6 +1,7 @@
 """Offline tests for gates.sh and pr-ready.sh: syntax, shellcheck, and the gates dry run."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -99,6 +100,12 @@ class GatesDryRunTests(unittest.TestCase):
             command = "cargo " + gates[name].split(" cargo ", 1)[1]
             self.assertIn(command, ci, name)
 
+    def test_default_toolchain_is_read_from_the_real_rust_ci(self):
+        pin = re.search(r"dtolnay/rust-toolchain@([0-9][0-9.]*)", RUST_CI.read_text()).group(1)
+        result = self.dry_run(str(HERE.parents[1]), str(self.out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"toolchain={pin} ", result.stdout)
+
     def test_usage_errors_exit_2(self):
         self.assertEqual(self.dry_run().returncode, 2)
         self.assertEqual(self.dry_run(str(self.worktree)).returncode, 2)
@@ -153,7 +160,8 @@ class GatesRunTests(unittest.TestCase):
     def gates(self, **env):
         base = dict(os.environ, RUSTUP=str(self.rustup), COVEN_TOOLCHAIN="9.9.9", FAKE_CALLS=str(self.calls))
         base.pop("ONLY_TESTS", None)
-        base.update(GATES_COMPUTER_USE="1", **env)
+        base.update(GATES_COMPUTER_USE="1")
+        base.update(env)
         return subprocess.run(
             ["bash", str(GATES), str(self.worktree), str(self.out)], env=base, capture_output=True, text=True
         )
@@ -188,10 +196,17 @@ class GatesRunTests(unittest.TestCase):
         self.assertRegex(identity, r"^head [0-9a-f]{40} tree [0-9a-f]{40}\n")
         self.assertIn("toolchain 9.9.9", identity)
         test_calls = [c for c in self.calls.read_text().splitlines() if " cargo test " in c]
+        self.assertIn("run 9.9.9 cargo --version", self.calls.read_text().splitlines()[0])
         self.assertEqual(len(test_calls), 2)
         for call in test_calls:
             self.assertIn(f"HOME={self.out}/home.", call)
         self.assertEqual(list(self.out.glob("home.*")), [])
+
+    def test_missing_toolchain_exits_2_before_writing(self):
+        result = self.gates(RUSTUP=shutil.which("false") or "/usr/bin/false")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("install the toolchain", result.stderr)
+        self.assertFalse(self.out.exists())
 
     def test_only_tests_runs_two_gates(self):
         result = self.gates(ONLY_TESTS="1")

@@ -107,7 +107,7 @@ def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_chec
         f"base:      origin/{base} is {'' if contains else 'NOT '}an ancestor of the head"
         f" (compare status={status}, ahead_by={compare.get('ahead_by')}, behind_by={behind})"
     )
-    if not contains:
+    if not contains and pull.get("state") == "open":
         reasons.append(f"origin/{base} is not merged into the head (behind by {behind})")
 
     mergeable = pull.get("mergeable")
@@ -151,15 +151,17 @@ def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_chec
 
     # A workflow run can exist before its jobs have check runs (queued, or a
     # workflow_run trigger), or fail without any job (startup_failure).
+    # Keyed by the workflow file, since two workflows can share a display name.
     newest_workflows = latest(
         workflow_runs,
-        key=lambda run: run.get("name") or "?",
+        key=lambda run: run.get("path") or run.get("workflow_id") or run.get("name") or "?",
         order=lambda run: run.get("id") or 0,
     )
     if newest_workflows:
         lines.append(f"workflows: {len(newest_workflows)} workflow runs")
-    for name in sorted(newest_workflows):
-        run = newest_workflows[name]
+    for key in sorted(newest_workflows, key=str):
+        run = newest_workflows[key]
+        name = run.get("name") or str(key)
         if run.get("status") != "completed":
             result = run.get("status") or "pending"
         else:
@@ -209,9 +211,11 @@ def main(argv=None):
         help="NOT READY with fewer check names than this (default 1; 0 allows none)",
     )
     args = parser.parse_args(argv)
+    if args.min_checks < 0:
+        parser.error("--min-checks must be 0 or more")
     try:
         tries = max(1, int(os.environ.get("PR_READY_TRIES", "12")))
-        delay = float(os.environ.get("PR_READY_DELAY", "10"))
+        delay = max(0.0, float(os.environ.get("PR_READY_DELAY", "10")))
     except ValueError:
         print("pr-ready: PR_READY_TRIES and PR_READY_DELAY must be numbers", file=sys.stderr)
         return 2
@@ -244,12 +248,16 @@ def main(argv=None):
             ),
             key="workflow_runs",
         )
+        # A push during the calls above would make the verdict describe an old head.
+        now = (gh_json([f"repos/{repo}/pulls/{args.pr}"]).get("head") or {}).get("sha")
     except ApiError as error:
         print(f"pr-ready: {error}", file=sys.stderr)
         return 2
     lines, reasons = evaluate(
         pull, compare, check_runs, statuses, workflow_runs, used, args.min_checks
     )
+    if now != head:
+        reasons.append(f"the head moved to {now} during the check; rerun")
     print("\n".join(lines))
     print(verdict_line(reasons))
     return 0 if not reasons else 1
