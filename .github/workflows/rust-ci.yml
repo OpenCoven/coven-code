@@ -71,8 +71,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Throwaway failure for the all-required proof (reverted next commit)
-        run: exit 1
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
