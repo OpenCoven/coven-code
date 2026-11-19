@@ -2211,19 +2211,19 @@ impl PromptInputState {
         if self.mode == InputMode::Readonly {
             return;
         }
-        let line_end = self.text[self.cursor..]
-            .find('\n')
-            .map(|p| self.cursor + p)
-            .unwrap_or(self.text.len());
-        // A CRLF line ends at its CR, which belongs to the line break.
-        let line_end = if line_end > self.cursor && self.text[..line_end].ends_with('\r') {
-            line_end - 1
-        } else {
-            line_end
+        // The line ends at its LF, or at the CR of a CRLF, which belongs to
+        // the line break. A CR not followed by an LF is line content.
+        let rest = &self.text[self.cursor..];
+        let line_len = match rest.find('\n') {
+            Some(lf) => rest[..lf].strip_suffix('\r').map_or(lf, str::len),
+            None => rest.len(),
         };
 
-        if line_end > self.cursor {
-            let killed = self.text.drain(self.cursor..line_end).collect::<String>();
+        if line_len > 0 {
+            let killed = self
+                .text
+                .drain(self.cursor..self.cursor + line_len)
+                .collect::<String>();
             self.kill_ring.push(killed);
             self.update_token_estimate();
         }
@@ -4258,6 +4258,18 @@ mod tests {
         s.kill_line();
         assert_eq!(s.text, "a\nd");
         assert_eq!(s.kill_ring.entries, ["bc"]);
+
+        // A cursor between the CR and the LF cuts nothing.
+        let mut s = composer("a\r\nb", 2);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nb");
+        assert!(s.kill_ring.entries.is_empty());
+
+        // A CR with no LF after it is line content, as it is drawn.
+        let mut s = composer("ab\r", 0);
+        s.kill_line();
+        assert_eq!(s.text, "");
+        assert_eq!(s.kill_ring.entries, ["ab\r"]);
     }
 
     /// `gE` with only whitespace before the cursor goes to the start of the
@@ -4272,6 +4284,13 @@ mod tests {
         let mut s = vim_composer("  a", 2);
         s.vim_command("g");
         s.vim_command("e");
+        assert_eq!(s.cursor, 0);
+
+        // With a count, the step that runs out of words stops at the start.
+        let mut s = vim_composer("  a b", 4);
+        for key in ["2", "g", "E"] {
+            s.vim_command(key);
+        }
         assert_eq!(s.cursor, 0);
     }
 
