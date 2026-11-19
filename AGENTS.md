@@ -100,6 +100,15 @@ For parallel-agent or batch work:
 - Each worker prompt must include the base branch/commit, assigned files or ownership boundary, non-goals, verification recipe, and PR body requirements.
 - Each worker final response must include the branch, PR URL, summary, verification evidence, and known gaps. Use a bare `PR: <url>` line when an orchestrator needs to parse results.
 
+## Agent Tools
+
+`scripts/agent/` holds the tools parallel agent runs share. None of them merges, pushes or edits anything unless told to.
+
+- `scripts/agent/pr-ready.sh <pr> [--min-checks N]`: REST only (`gh api`). Prints the head SHA, whether `origin/main` is an ancestor of it, `mergeable` and `mergeable_state` (retried for about two minutes while unknown), the latest run for each check name (keyed by workflow) and the latest commit status per context, then `READY` or `NOT READY: <reasons>`. Exits 0 only when READY. A head with no check runs is NOT READY unless `--min-checks 0`.
+- `scripts/agent/gates.sh [--dry-run] <worktree> <outdir>`: the Rust CI gates run locally (fmt, check, both clippy runs, workspace tests, the `next_frame_perf` allocation gate), one log per gate, and `<outdir>/summary.txt` with each exit code and the test counts. The toolchain defaults to the pin in `rust-ci.yml` (`COVEN_TOOLCHAIN` overrides it) and `CARGO_TARGET_DIR` to the worktree's own `src-rust/target`. Set `CARGO_BUILD_JOBS` and check the load before a real run; `--dry-run` only prints the commands.
+- `scripts/agent/replace-state.py <issue> <section-file> [--apply] [--insert]`: rewrites an issue's `## Current state: YYYY-MM-DD` section, which ends after its `**Next action:**` paragraph or at the next heading. By default it previews: a diff, plus `<issue>.before.md` and `<issue>.after.md` in `--out-dir` (default: the current directory). Only `--apply` writes the body, with `gh api -X PATCH`. `--insert` adds the section to a body that has none.
+- Tests: `python3 -B -m unittest discover -s scripts/agent -p 'test_*.py' -v`, offline, with a fake `gh`. The Agent tools tests workflow runs them for changes under `scripts/agent/`.
+
 ## Providers
 
 Coven Code supports exactly two providers: **Claude** (Anthropic) and **Codex**

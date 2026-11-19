@@ -1,0 +1,27 @@
+name: Agent tools tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/agent/**'
+      - '.github/workflows/agent-tools-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-tools:
+    name: Agent tools offline tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Require shellcheck
+        run: shellcheck --version
+      - name: Test pr-ready, replace-state and gates without GitHub or cargo
+        env:
+          REQUIRE_SHELLCHECK: '1'
+        run: python3 -B -m unittest discover -s scripts/agent -p 'test_*.py' -v
