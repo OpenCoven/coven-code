@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# `/import-config` reloads the saved settings into the open session (#578), in
+# `/config import` (formerly `/import-config`) reloads the saved settings into
+# the open session (#578), in
 # Classic and Next, each in a throwaway home and project. A saved bypass mode
 # must not reach the session: it stays in default and says so once. A mode
 # chosen at launch with `--permission-mode` survives the reload.
@@ -17,12 +18,13 @@ _import_mode_get() {
   else _fail "$2" "$(tui_capture)"; fi
 }
 
-# _import_mode_run <label>: /import-config, pick settings.json, confirm.
+# _import_mode_run <label>: /config import, pick settings.json, confirm.
 _import_mode_run() {
-  tui_type "/import-config"; tui_keys Enter
+  tui_type "/config import"; tui_keys Enter
   if ! wait_for "settings.json" 10; then _fail "$1: the picker opens" "$(tui_capture)"; return 1; fi
   tui_keys Down; tui_settle 0.3; tui_keys Enter
-  if ! wait_for "Import" 10; then _fail "$1: the preview opens" "$(tui_capture)"; return 1; fi
+  # Only the preview shows the target file; the picker shows sources.
+  if ! wait_for "Target" 10; then _fail "$1: the preview opens" "$(tui_capture)"; return 1; fi
   tui_settle 0.3; tui_keys Enter
   tui_settle 1
   return 0
@@ -39,7 +41,7 @@ _import_mode_renderer() {
   local scratch; scratch="$(mktemp -d)"
   local settings="$scratch/home/.coven-code/settings.json"
   mkdir -p "$scratch/home/.coven-code" "$scratch/home/.claude" "$scratch/project"
-  # The file /import-config reads; it names no permission mode.
+  # The file /config import reads; it names no permission mode.
   printf '%s\n' '{"theme": "dark"}' >"$scratch/home/.claude/settings.json"
 
   local saved_prefix="$TUI_LAUNCH_PREFIX" saved_boot="$TUI_BOOT_STRING"
@@ -89,7 +91,7 @@ _import_mode_renderer() {
 }
 
 tc_import_config_permission_mode() {
-  describe "Saved permission mode across /import-config (Classic and Next)"
+  describe "Saved permission mode across /config import (Classic and Next)"
   if ! have_tmux; then _skip "tmux not installed"; return 0; fi
   _import_mode_renderer "" "Classic" "Coven v"
   _import_mode_renderer "next" "Next" "preview"

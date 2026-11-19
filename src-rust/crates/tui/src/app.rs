@@ -824,9 +824,10 @@ pub struct App {
     // ---- Visual mode indicators -------------------------------------------
     /// Plan mode — input border turns blue, [PLAN] shown in status bar.
     pub plan_mode: bool,
-    /// Whether the session's permission mode was chosen at launch
-    /// (`--permission-mode`, `--dangerously-skip-permissions`). A reload of
-    /// the saved settings then keeps the session's mode, as a start does.
+    /// Whether the launch, not the saved settings, chose the session's
+    /// permission mode (`--permission-mode`, `--dangerously-skip-permissions`,
+    /// a GitHub context or a scoped workspace). A reload of the saved settings
+    /// (`/config import`) then keeps the session's mode, as a start does.
     pub permission_mode_from_launch: bool,
     /// "While you were away" summary text shown on the welcome screen.
     pub away_summary: Option<String>,

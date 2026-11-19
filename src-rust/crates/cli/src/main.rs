@@ -726,7 +726,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut permission_mode_notice = None;
     // Whether the launch, not the saved settings, chose the session's mode.
-    // A later reload of the settings (`/import-config`) then keeps it.
+    // A later reload of the settings (`/config import`) then keeps it.
     let permission_mode_from_launch = cli.dangerously_skip_permissions
         || cli.permission_mode.is_some()
         || github_context.is_some()

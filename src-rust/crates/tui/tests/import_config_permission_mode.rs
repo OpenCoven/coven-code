@@ -1,9 +1,10 @@
-//! `/import-config` reloads the saved settings into the running session. The
-//! saved permission mode must reach it under the same rule as a start: a mode
-//! chosen at launch stays, and a saved bypass mode is never restored. Each case
-//! runs in a child process with its own home and engine home, because both are
-//! found through process-wide environment. Unix only: on Windows the import
-//! finds `~/.claude` through the profile folder, which no variable redirects.
+//! `/config import` (formerly `/import-config`) reloads the saved settings
+//! into the running session. The saved permission mode must reach it under the
+//! same rule as a start: a mode chosen at launch stays, and a saved bypass mode
+//! is never restored. Each case runs in a child process with its own home and
+//! engine home, because both are found through process-wide environment. Unix
+//! only: on Windows the import finds `~/.claude` through the profile folder,
+//! which no variable redirects.
 #![cfg(unix)]
 use claurst_core::config::{Config, PermissionMode};
 use claurst_core::cost::CostTracker;
@@ -29,7 +30,7 @@ fn import_config_permission_mode_child() {
     );
     let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
     let engine_home = std::path::PathBuf::from(std::env::var_os("COVEN_CODE_HOME").unwrap());
-    // The file `/import-config` reads. It names no permission mode: the mode
+    // The file `/config import` reads. It names no permission mode: the mode
     // comes from the engine settings the import reloads.
     std::fs::create_dir_all(home.join(".claude")).unwrap();
     std::fs::write(home.join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
@@ -150,7 +151,7 @@ fn import_config_permission_mode_child() {
         app.permission_mode_from_launch = from_launch;
         app.plan_mode = session == PermissionMode::Plan;
 
-        // /import-config, then "settings.json", then confirm the preview.
+        // /config import, then "settings.json", then confirm the preview.
         app.open_import_config_picker();
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
