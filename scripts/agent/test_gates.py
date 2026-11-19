@@ -84,7 +84,13 @@ class GatesDryRunTests(unittest.TestCase):
 
     def test_only_tests_skips_fmt_check_and_clippy(self):
         result = self.dry_run(str(self.worktree), str(self.out), ONLY_TESTS="1")
-        self.assertEqual(list(self.gate_lines(result.stdout)), ["test", "alloc"])
+        gates = self.gate_lines(result.stdout)
+        run = [gate for gate, command in gates.items() if not command.startswith("skipped")]
+        self.assertEqual(run, ["test", "alloc"])
+        self.assertEqual(
+            [gate for gate, command in gates.items() if command == "skipped (ONLY_TESTS=1)"],
+            ["fmt", "check", "clippy", "clippy-computer-use"],
+        )
 
     def test_computer_use_gate_can_be_skipped(self):
         result = self.dry_run(str(self.worktree), str(self.out), GATES_COMPUTER_USE="0")
@@ -131,6 +137,7 @@ FAKE_RUSTUP = textwrap.dedent(
     case "$4" in
       clippy) exit "${FAKE_CLIPPY_RC:-0}" ;;
       test)
+        [ -n "${FAKE_TOUCH:-}" ] && echo x > "$FAKE_TOUCH"
         echo "test result: ok. 3 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.1s"
         echo "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.1s"
         echo "test widgets::draws ... FAILED"
@@ -216,16 +223,37 @@ class GatesRunTests(unittest.TestCase):
 
     def test_stale_logs_from_an_earlier_run_are_removed(self):
         self.out.mkdir()
+        (self.out / "identity.txt").write_text("head old\n")
         (self.out / "fmt.log").write_text("old\n")
         result = self.gates(ONLY_TESTS="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.out / "fmt.log").exists())
         self.assertTrue((self.out / "test.log").exists())
 
+    def test_unrelated_nonempty_outdir_is_refused(self):
+        self.out.mkdir()
+        (self.out / "test.log").write_text("someone else's\n")
+        result = self.gates()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("not empty", result.stderr)
+        self.assertEqual((self.out / "test.log").read_text(), "someone else's\n")
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["test.log"])
+        self.out.joinpath("test.log").unlink()
+        self.assertEqual(self.gates().returncode, 0)
+
+    def test_worktree_change_during_the_run_exits_3(self):
+        result = self.gates(FAKE_TOUCH=str(self.worktree / "src-rust" / "new.rs"))
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertTrue(self.summary()[-1].startswith("result CHANGED"))
+
     def test_only_tests_runs_two_gates(self):
         result = self.gates(ONLY_TESTS="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([line.split()[0] for line in self.summary() if " rc=" in line], ["test", "alloc"])
+        skipped = [line for line in self.summary() if "skipped" in line]
+        self.assertEqual(
+            skipped, [f"{gate} skipped (ONLY_TESTS=1)" for gate in ("fmt", "check", "clippy", "clippy-computer-use")]
+        )
 
 
 if __name__ == "__main__":

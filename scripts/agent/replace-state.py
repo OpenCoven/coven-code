@@ -14,7 +14,7 @@ so it never drops original issue text. The old section must:
   (ATX or setext), a rule or a code fence, HTML anywhere in a line, "]:"
   anywhere (a link or footnote definition, even in a quote or list), or a
   lone carriage return is refused, as is text right after the section that
-  starts indented.
+  starts indented. So are a footnote reference ("[^") and "$$" anywhere.
 The old section ends after that Next action line. Everything after it (the
 original report, acceptance, prompts) is kept byte for byte.
 
@@ -58,8 +58,10 @@ RISKY = re.compile(
 # HTML anywhere in a line: a tag, comment, declaration or processing instruction.
 HTML = re.compile(r"<[A-Za-z!/?]|-->")
 # A link or footnote definition applies to the whole body, even inside a quote
-# or list item, so any "]:" is refused.
-DEFINITION = re.compile(r"\]\s*:")
+# or list item, so any "]:" is refused. A footnote reference decides whether
+# and in what order footnotes further down render, so "[^" is refused too, and
+# "$$" since a math block can span blank lines.
+DEFINITION = re.compile(r"\]\s*:|\[\^|\$\$")
 
 
 class SectionError(Exception):
@@ -235,7 +237,8 @@ def main(argv=None):
     if "pull_request" in issue:
         print(f"replace-state: #{args.issue} is a pull request, not an issue", file=sys.stderr)
         return 2
-    before = (issue.get("body") or "").replace("\r\n", "\n")
+    original = issue.get("body") or ""
+    before = original.replace("\r\n", "\n")
     try:
         after = replace_section(before, section, insert=args.insert)
     except SectionError as error:
@@ -255,7 +258,8 @@ def main(argv=None):
     before_file = prefix.with_name(prefix.name + ".before.md")
     after_file = prefix.with_name(prefix.name + ".after.md")
     try:
-        before_file.write_text(before, encoding="utf-8")
+        # The exact original, CRLF and all, so it can be restored byte for byte.
+        before_file.write_text(original, encoding="utf-8", newline="")
         after_file.write_text(after, encoding="utf-8")
     except OSError as error:
         print(f"replace-state: cannot write the copies: {error}", file=sys.stderr)
@@ -269,7 +273,8 @@ def main(argv=None):
             n=1,
         )
     )
-    if after == before:
+    # A dropped byte-order mark alone is not worth an edit.
+    if after == before.lstrip("\ufeff"):
         print(f"#{args.issue}: no change")
         return 0
     if not args.apply:

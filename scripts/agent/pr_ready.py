@@ -273,7 +273,7 @@ def main(argv=None):
         )
         check_runs = pages(
             gh_json(
-                [f"repos/{repo}/commits/{head}/check-runs?per_page=100", "--paginate", "--slurp"]
+                [f"repos/{repo}/commits/{head}/check-runs?filter=all&per_page=100", "--paginate", "--slurp"]
             ),
             key="check_runs",
         )

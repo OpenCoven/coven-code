@@ -101,7 +101,7 @@ class ReplaceSectionTests(unittest.TestCase):
             self.refused(OLD.replace("Old facts.", line))
 
     def test_nested_definitions_are_refused(self):
-        for line in ("> [spec]: https://example.com/spec", "- [x]: url", "> [^1]: note", "text [a] : b"):
+        for line in ("> [spec]: https://example.com/spec", "- [x]: url", "> [^1]: note", "text [a] : b", "Old[^n].", "$$"):
             with self.assertRaises(replace_state.SectionError, msg=line):
                 replace_state.normalize_section(NEW.replace("New facts.", line))
             self.refused(OLD.replace("Old facts.", line) + "\nSee the [spec].\n")
@@ -352,6 +352,21 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("--out-dir", result.stderr)
         self.assertEqual(list(repo.iterdir()), [repo / ".git"])
+
+    def test_before_copy_is_the_exact_original(self):
+        crlf = self.body.replace("\n", "\r\n")
+        (self.dir / "issue.json").write_text(json.dumps({"number": 5, "body": crlf}))
+        self.assertEqual(self.script().returncode, 0)
+        [before] = self.out.glob("5.*.before.md")
+        self.assertEqual(before.read_bytes(), crlf.encode())
+
+    def test_only_a_byte_order_mark_to_drop_is_no_change(self):
+        same = "\ufeffIntro.\n\n" + NEW + "\nKeep.\n"
+        (self.dir / "issue.json").write_text(json.dumps({"number": 5, "body": same}))
+        result = self.script("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no change", result.stdout)
+        self.assertEqual([c for c in self.calls() if "-X" in c], [])
 
     def test_a_second_run_keeps_the_first_copies(self):
         self.assertEqual(self.script().returncode, 0)

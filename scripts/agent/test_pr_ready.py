@@ -320,6 +320,9 @@ class ScriptTests(unittest.TestCase):
             if any(part in call[1] for part in ("/check-runs", "/statuses", "/actions/runs")):
                 self.assertIn("--paginate", call, call)
                 self.assertIn("--slurp", call, call)
+            if "/check-runs" in call[1]:
+                # The default filter=latest would hide runs the per-workflow keys need.
+                self.assertIn("filter=all", call[1])
 
     def test_closed_pr_is_not_retried(self):
         self.write("pulls.json", [pull(None, "unknown", state="closed")])

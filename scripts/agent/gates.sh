@@ -15,6 +15,8 @@
 # workspace test counts;
 # <outdir>/identity.txt records the head, tree and dirty files tested.
 # --dry-run prints the commands and writes nothing.
+# <outdir> must be new, empty, or an earlier gates outdir (one holding
+# identity.txt), since a run replaces the logs it names.
 #
 # Environment (default):
 #   COVEN_TOOLCHAIN   toolchain for `rustup run` (the dtolnay/rust-toolchain pin
@@ -33,7 +35,9 @@
 # steps, the Windows job, the contract fixtures by name, and the Coven
 # engine contract. Hosted CI runs those.
 #
-# Exit status: 0 when every gate passed, 1 when any failed, 2 on usage errors.
+# Exit status: 0 when every gate passed, 1 when any failed, 2 on usage errors,
+# 3 when the gates passed but the worktree's head or dirty files changed
+# during the run, so the pass does not describe one tree.
 set -u
 
 usage() { echo "usage: $0 [--dry-run] <worktree> <outdir>" >&2; exit 2; }
@@ -55,6 +59,12 @@ else
 fi
 # Inside the worktree the logs would show up in identity.txt's git status.
 case "$OUT/" in "$WORKTREE"/*) echo "gates: put <outdir> outside the worktree" >&2; exit 2 ;; esac
+# A run removes and rewrites the logs it names; never do that to an unrelated
+# directory that happens to hold a test.log.
+if [ -e "$OUT" ] && [ ! -e "$OUT/identity.txt" ] && [ -n "$(ls -A "$OUT" 2>/dev/null || echo x)" ]; then
+  echo "gates: <outdir> exists and is not empty or an earlier gates outdir; give a new one" >&2
+  exit 2
+fi
 
 TOOLCHAIN="${COVEN_TOOLCHAIN:-}"
 if [ -z "$TOOLCHAIN" ]; then
@@ -120,7 +130,15 @@ if [ "$DRY_RUN" = 1 ]; then
   echo "cd $(printf '%q' "$PWD")"
   echo "toolchain=$TOOLCHAIN CARGO_TARGET_DIR=$CARGO_TARGET_DIR CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-}"
 fi
-if [ "${ONLY_TESTS:-}" != 1 ]; then
+if [ "${ONLY_TESTS:-}" = 1 ]; then
+  for gate in fmt check clippy clippy-computer-use; do
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "$gate: skipped (ONLY_TESTS=1)"
+    else
+      echo "$gate skipped (ONLY_TESTS=1)" | tee -a "$OUT/summary.txt"
+    fi
+  done
+else
   run fmt "${CARGO[@]}" fmt --all -- --check
   run check "${CARGO[@]}" check --workspace --locked
   run clippy "${CARGO[@]}" clippy --workspace --all-targets --locked -- -D warnings
@@ -157,8 +175,13 @@ print(f"tests passed={passed} failed={failed} ignored={ignored}")
 for failure in failures:
     print("  ", failure)
 PY
-if [ "$(git -C "$WORKTREE" rev-parse HEAD) $(git -C "$WORKTREE" status --porcelain | cksum)" != "$IDENTITY" ]; then
-  echo "warning: the worktree's head or dirty files changed during the run" | tee -a "$OUT/summary.txt"
+if [ "$FAILED" != 0 ]; then
+  echo "result FAIL" | tee -a "$OUT/summary.txt"
+  exit 1
 fi
-echo "result $([ "$FAILED" = 0 ] && echo pass || echo FAIL)" | tee -a "$OUT/summary.txt"
-exit "$FAILED"
+if [ "$(git -C "$WORKTREE" rev-parse HEAD) $(git -C "$WORKTREE" status --porcelain | cksum)" != "$IDENTITY" ]; then
+  echo "result CHANGED (the worktree's head or dirty files changed during the run)" | tee -a "$OUT/summary.txt"
+  exit 3
+fi
+echo "result pass" | tee -a "$OUT/summary.txt"
+exit 0
