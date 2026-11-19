@@ -12,13 +12,14 @@ name: All required
 #     success, skipped or neutral (failed, cancelled, timed out, ...);
 #   - passes once all of them have completed and the set is unchanged
 #     across two polls.
-# Only the latest run of each workflow per event (pull_request, a manual
-# dispatch on the branch, CodeQL's dynamic run), and only that run's jobs,
-# count. Commit statuses (the statuses API) are not read.
+# Only the latest run of each workflow per event (this PR's pull_request
+# run, a manual dispatch on the branch, CodeQL's dynamic run), and only that
+# run's jobs, count. Commit statuses (the statuses API) are not read.
 #
 # The result is final for its run. After re-running a job elsewhere, re-run
-# this workflow too; it waits for the re-run to finish. A new push starts it
-# again on its own.
+# this workflow too; it waits for the re-run to finish (a failed job from the
+# earlier attempt counts as pending while its workflow is running again). A
+# new push starts it again on its own.
 #
 # A pull_request run uses this file as the PR changed it, so a PR that edits
 # this file can change what the check enforces. Review such PRs as you would
@@ -43,6 +44,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
       SELF_RUN_ID: ${{ github.run_id }}
       # Seconds to wait before the first look, between polls, and before
       # confirming that a fully completed set did not change. Each poll
@@ -78,29 +80,44 @@ jobs:
           fi
 
           # Prints one JSON array: the latest run of every other workflow on
-          # the head (per event), then the check runs that belong to those
-          # runs (latest per job name) or to another app (latest per name).
+          # the head (per event; pull_request runs of another PR with the
+          # same head are left out), then the check runs that belong to
+          # those runs (latest per job name) or to another app (latest per
+          # name). A failed job from an earlier attempt of a run that is
+          # running again is reported as pending, because a re-run job that
+          # waits on `needs:` gets its new check run only when it is queued.
           # Names are flattened so they print safely in the log and table.
           snapshot() {
             local runs checks
             runs=$(gh api --paginate "$api/actions/runs?head_sha=$HEAD_SHA&per_page=100" \
                      --jq '.workflow_runs[]' |
-                   jq -s --argjson self "$self_workflow" '
-                     map(select(.workflow_id != $self))
+                   jq -s --argjson self "$self_workflow" --argjson pr "$PR_NUMBER" '
+                     map(select(.workflow_id != $self
+                                and (.event != "pull_request"
+                                     or (.pull_requests | length) == 0
+                                     or any(.pull_requests[]; .number == $pr))))
                      | group_by([.workflow_id, .event]) | map(max_by(.id))
                      | map({kind: "workflow", id, status, conclusion,
                             name: ((.name // "") | gsub("[\\r\\n|\\[\\]]"; " ")),
-                            url: .html_url, suite: .check_suite_id})') || return 1
+                            url: .html_url, suite: .check_suite_id,
+                            started: (.run_started_at // "")})') || return 1
             checks=$(gh api --paginate "$api/commits/$HEAD_SHA/check-runs?filter=all&per_page=100" \
                        --jq '.check_runs[]' |
-                     jq -s --argjson runs "$runs" '
-                       ($runs | map(.suite)) as $keep
+                     jq -s --argjson runs "$runs" --argjson good "$good" '
+                       ($runs | map({key: (.suite | tostring), value: .}) | from_entries) as $parent
                        | map(select(.app.slug != "github-actions"
-                                    or (.check_suite.id as $s | any($keep[]; . == $s))))
+                                    or $parent[.check_suite.id | tostring] != null))
                        | group_by(if .app.slug == "github-actions"
                                   then [.check_suite.id, .name]
                                   else [.app.id, .name] end)
                        | map(max_by(.id))
+                       | map($parent[.check_suite.id | tostring] as $p
+                             | if $p != null and $p.status != "completed"
+                                  and .status == "completed"
+                                  and (.conclusion as $c | any($good[]; . == $c) | not)
+                                  and (.started_at // "") < $p.started
+                               then .status = "waiting for its re-run" | .conclusion = null
+                               else . end)
                        | map({kind: "check", id, status, conclusion,
                               name: ((.name // "") | gsub("[\\r\\n|\\[\\]]"; " ")),
                               url: .html_url})') || return 1
