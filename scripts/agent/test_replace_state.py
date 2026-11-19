@@ -121,6 +121,7 @@ class ReplaceSectionTests(unittest.TestCase):
             "**Next action (Val):** review.",
             "Next steps. **Next action** is review.",
             "> Next Actions (owner Val): review",
+            "Blocked on #12; next actions: review",
         ):
             body = OLD.replace("**Next action:** review #1.", marker) + tail
             self.assertNotEqual(body, OLD + tail)
