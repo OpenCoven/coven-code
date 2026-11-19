@@ -11144,8 +11144,11 @@ mod windows_open_tests {
     async fn file_opener_passes_the_whole_path() {
         let directory = tempfile::tempdir().unwrap();
         // The opener's `cmd.exe` has `SystemRoot` set, and would replace
-        // `%SystemRoot%` with its value.
-        let folder = directory.path().join("with space & %SystemRoot%");
+        // `%SystemRoot%` with its value; with delayed expansion on, it would
+        // also replace `!SystemRoot!` and drop the `^`.
+        let folder = directory
+            .path()
+            .join("with space & %SystemRoot% !SystemRoot! ^x");
         std::fs::create_dir(&folder).unwrap();
         let extension = format!(".coventest517x{}", std::process::id());
         let file = folder.join(format!("keybindings{extension}"));

@@ -63,7 +63,7 @@ fn shell_command_passes_quotes_as_written() {
 
 /// `start` gets its target through a variable that `cmd.exe` expands after
 /// it has read the line, and a target that would split `start`'s argument
-/// is refused. What `start` then opens is covered by the callers' tests, in
+/// is refused, as is an empty one. What `start` then opens is covered by the callers' tests, in
 /// claurst-tui and claurst-mcp.
 #[test]
 fn shell_start_hands_over_its_target_in_a_variable() {
@@ -78,7 +78,7 @@ fn shell_start_hands_over_its_target_in_a_variable() {
     assert_eq!(
         arguments,
         [format!(
-            r#"/V:ON /C "start "" "!{START_TARGET_VARIABLE}!"""#
+            r#"/D /V:ON /C "start "" "!{START_TARGET_VARIABLE}!"""#
         )]
     );
     assert_eq!(
@@ -88,10 +88,8 @@ fn shell_start_hands_over_its_target_in_a_variable() {
             Some(std::ffi::OsStr::new(target))
         )]
     );
-    let error = start(
-        std::process::Command::new("cmd"),
-        r#"x" & echo injected & ""#,
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    for refused in [r#"x" & echo injected & ""#, ""] {
+        let error = start(std::process::Command::new("cmd"), refused).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{refused}");
+    }
 }

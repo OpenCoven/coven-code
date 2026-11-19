@@ -84,8 +84,9 @@ fn xaa_login_opens_the_whole_url() {
     let scheme = format!("coven-test-517-{}", std::process::id());
     let _registered = register_scheme(&scheme, &capture);
     // The login appends four parameters with `&`. `%PATH%` is set, and
-    // `cmd.exe` would replace it with its value.
-    let endpoint = format!("{scheme}://authorize?audience=mcp%2Btools&note=%PATH%");
+    // `cmd.exe` would replace it with its value; with delayed expansion on,
+    // it would also replace `!PATH!` and drop the `^`.
+    let endpoint = format!("{scheme}://authorize?audience=mcp%2Btools&note=%PATH%!PATH!^x");
 
     // The launch waits for `cmd.exe`; bound it, should Windows ask anything.
     let (sent, launched) = std::sync::mpsc::channel();
@@ -103,7 +104,7 @@ fn xaa_login_opens_the_whole_url() {
     let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
     let expected = BTreeMap::from([
         ("audience".to_string(), "mcp+tools".to_string()),
-        ("note".to_string(), "%PATH%".to_string()),
+        ("note".to_string(), "%PATH%!PATH!^x".to_string()),
         ("response_type".to_string(), "code".to_string()),
         (
             "code_challenge".to_string(),
