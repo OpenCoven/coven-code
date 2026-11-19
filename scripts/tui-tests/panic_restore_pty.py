@@ -237,7 +237,8 @@ def check_main_panic(report, label, probe, keyboard, setups):
                      f"{label}: the keyboard pop is sent before leaving the alternate screen",
                      f"pops at {pops}, leave at {hook.find(LEAVE_ALT)}: {text(after[:300])}")
     else:
-        report.check(not pops, f"{label}: no keyboard pop is sent when none was pushed", text(after[:300]))
+        report.check(bool(match) and not pops, f"{label}: no keyboard pop is sent when none was pushed",
+                     text(after[:300]))
     # The last title the hook writes must be the empty one.
     titles = list(TITLE.finditer(hook))
     report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None

@@ -646,11 +646,17 @@ mod tests {
         restore_terminal_cleanup(&mut written, false).unwrap();
         let written = String::from_utf8(written).unwrap();
 
+        assert!(
+            written.starts_with("\x1b]0;\x07"),
+            "title cleared first: {written:?}"
+        );
         assert!(written.contains("\x1b[?1049l"), "{written:?}");
         assert!(!written.contains("\x1b[<"), "no keyboard pop: {written:?}");
     }
 
     /// The restore tests share the process-wide record of who has the terminal.
+    /// The panic hook keeps the writer of the first `take_terminal` call, so
+    /// every test passes `|| ThreadWire`.
     #[cfg(unix)]
     static TAKEN_TERMINAL_TESTS: Mutex<()> = Mutex::new(());
 
