@@ -7715,7 +7715,7 @@ mod tests {
     /// #571: a full context in a short history is reported once for each
     /// history length.
     #[test]
-    fn nothing_to_compact_is_said_once_per_history_length_and_keeps_the_count() {
+    fn nothing_to_compact_is_said_once_per_history_length() {
         let mut app = app_with_a_full_context();
         let mut noted = None;
         note_nothing_to_compact(&mut app, 95, 9, &mut noted);
