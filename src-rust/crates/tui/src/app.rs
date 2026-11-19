@@ -11072,3 +11072,126 @@ role = "Research"
         );
     }
 }
+
+/// #517 on Windows: the keybindings file opens through `cmd.exe /C start`,
+/// which must get the file's path whole. Before, `Command::arg` wrote the
+/// quotes around the path as `\"`, which `cmd.exe` does not unescape.
+///
+/// A file type registered for the current user stands in for the user's
+/// editor: Windows runs this test binary with the path it was asked to open.
+/// Whether a real editor then shows the file can only be seen on a desktop.
+#[cfg(all(test, windows))]
+mod windows_open_tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    const HANDLER: &str = "app::windows_open_tests::file_open_handler";
+    const CAPTURE: &str = "capture";
+
+    /// Registry keys under `HKCU\Software\Classes`, removed on drop.
+    struct Registered(Vec<String>);
+
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            for key in &self.0 {
+                let _ = Command::new("reg")
+                    .args(["delete", key.as_str(), "/f"])
+                    .output();
+            }
+        }
+    }
+
+    fn reg_add(key: &str, value: &[&str], data: &str) {
+        let output = Command::new("reg")
+            .arg("add")
+            .arg(key)
+            .args(value)
+            .args(["/d", data, "/f"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "reg add {key}: {output:?}");
+    }
+
+    /// Make files ending in `extension` open with this test binary, which
+    /// writes the path it was given to `capture`.
+    fn register_file_type(extension: &str, capture: &Path) -> Registered {
+        let class = format!("CovenTest517File{}", std::process::id());
+        let classes = r"HKCU\Software\Classes";
+        let registered = Registered(vec![
+            format!(r"{classes}\{extension}"),
+            format!(r"{classes}\{class}"),
+        ]);
+        reg_add(&registered.0[0], &["/ve"], &class);
+        let handler = format!(
+            r#""{}" --exact {HANDLER} --ignored --nocapture "{}" "%1""#,
+            std::env::current_exe().unwrap().display(),
+            capture.display(),
+        );
+        reg_add(
+            &format!(r"{classes}\{class}\shell\open\command"),
+            &["/ve"],
+            &handler,
+        );
+        registered
+    }
+
+    async fn wait_for(capture: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(capture) {
+                return text;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nothing was opened within 60 s: {} was not written",
+                capture.display()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn file_opener_passes_the_whole_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("with space & ampersand");
+        std::fs::create_dir(&folder).unwrap();
+        let extension = format!(".coventest517x{}", std::process::id());
+        let file = folder.join(format!("keybindings{extension}"));
+        std::fs::write(&file, "{}").unwrap();
+        let capture = directory.path().join(format!("opened.{CAPTURE}"));
+        let _registered = register_file_type(&extension, &capture);
+
+        let _opener = super::open_file_externally(&file).unwrap();
+
+        let opened = PathBuf::from(wait_for(&capture).await);
+        assert_eq!(
+            std::fs::canonicalize(&opened).ok(),
+            Some(std::fs::canonicalize(&file).unwrap()),
+            "Windows was asked to open {}",
+            opened.display()
+        );
+    }
+
+    /// Run by Windows as the test file type's handler, with the capture file
+    /// and the opened path as its last two arguments. It does nothing unless
+    /// the first of those is a capture file.
+    #[test]
+    #[ignore = "run by Windows as the handler of the test file type"]
+    fn file_open_handler() {
+        let mut arguments = std::env::args_os().rev();
+        let (Some(opened), Some(capture)) = (arguments.next(), arguments.next()) else {
+            return;
+        };
+        let capture = PathBuf::from(capture);
+        if capture
+            .extension()
+            .is_none_or(|extension| extension != CAPTURE)
+        {
+            return;
+        }
+        let partial = capture.with_extension("partial");
+        std::fs::write(&partial, opened.to_string_lossy().as_bytes()).unwrap();
+        std::fs::rename(partial, capture).unwrap();
+    }
+}
