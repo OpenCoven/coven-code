@@ -10,9 +10,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use claurst_core::config::{Config, Settings};
 use claurst_core::permissions::PermissionManager;
-use claurst_core::CostTracker;
+use claurst_core::{CostTracker, PermissionMode};
 use claurst_query::QueryConfig;
 use claurst_tools::Tool;
+use tracing::warn;
 
 /// Snapshot of the global agent runtime — built at server startup, cloned
 /// (cheaply, via Arc) into each session.
@@ -43,11 +44,7 @@ impl AgentRuntime {
             )
         })?;
         let mut config = settings.effective_config();
-        // Plan mode requires interactive UI — fall back to Default so the
-        // ACP permission bridge can route decisions to the client.
-        if config.permission_mode == claurst_core::PermissionMode::Plan {
-            config.permission_mode = claurst_core::PermissionMode::Default;
-        }
+        config.permission_mode = acp_permission_mode(&config.permission_mode);
         config.project_dir = Some(working_dir.clone());
 
         let active_provider = config.selected_provider_id().to_string();
@@ -109,6 +106,27 @@ impl AgentRuntime {
             permission_manager,
             working_dir,
         })
+    }
+}
+
+/// The mode an ACP server runs in for the mode saved in settings.
+///
+/// `coven-code acp` takes no flag and reads no variable that names a mode, so
+/// nothing can opt in to a saved `bypassPermissions`: under the rule every
+/// start shares, it runs in `default`, and the server says so on stderr, never
+/// on the protocol stream. Plan mode needs the interactive plan approval ACP
+/// does not have, so a saved `plan` also runs in `default`, where the
+/// permission bridge routes each decision to the client.
+fn acp_permission_mode(saved: &PermissionMode) -> PermissionMode {
+    let restored = saved.restored_from_settings();
+    if restored.mode != *saved {
+        if let Some(notice) = restored.notice {
+            warn!("ACP: {notice}; running in default mode, as ACP has no opt-in for bypass");
+        }
+    }
+    match restored.mode {
+        PermissionMode::Plan => PermissionMode::Default,
+        mode => mode,
     }
 }
 

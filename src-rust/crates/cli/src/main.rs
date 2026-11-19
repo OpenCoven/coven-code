@@ -725,6 +725,12 @@ async fn main() -> anyhow::Result<()> {
         config.hosted_review.allow_auto_memory_persistence = false;
     }
     let mut permission_mode_notice = None;
+    // Whether the launch, not the saved settings, chose the session's mode.
+    // A later reload of the settings (`/import-config`) then keeps it.
+    let permission_mode_from_launch = cli.dangerously_skip_permissions
+        || cli.permission_mode.is_some()
+        || github_context.is_some()
+        || scoped_workspace.is_some();
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
         #[cfg(unix)]
@@ -1217,6 +1223,7 @@ async fn main() -> anyhow::Result<()> {
         user_question_rx,
         diagnostic_log,
         permission_mode_notice,
+        permission_mode_from_launch,
     )
     .await;
 
@@ -3231,6 +3238,7 @@ async fn run_interactive(
     >,
     diagnostic_log: Option<diagnostics::DiagnosticLog>,
     permission_mode_notice: Option<&'static str>,
+    permission_mode_from_launch: bool,
 ) -> anyhow::Result<()> {
     use claurst_bridge::{BridgeOutbound, TuiBridgeEvent};
     use claurst_commands::{execute_command, CommandContext, CommandResult};
@@ -3341,6 +3349,7 @@ async fn run_interactive(
     let mut terminal = setup_terminal(renderer)?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
+    app.permission_mode_from_launch = permission_mode_from_launch;
     // What the saved permission mode did to this session, said once in a
     // notification, which both renderers draw. The newest notification is
     // the one shown, so this goes in before the renderer warning and outlasts

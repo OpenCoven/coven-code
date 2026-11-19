@@ -1740,7 +1740,9 @@ impl App {
                 let new_config = new_settings.effective_config();
                 let result_message = claurst_core::summarize_import_result(&result, &paths);
                 let imported_mcp = result.imported_fields.iter().any(|f| f == "mcpServers");
-                self.config = new_config.clone();
+                let session_mode = self.config.permission_mode.clone();
+                self.config = new_config;
+                self.config.permission_mode = self.permission_mode_after_reload(session_mode);
                 self.model_name = self.config.effective_model().to_string();
                 self.cost_tracker.set_model(&self.model_name);
                 self.refresh_context_window_size();
@@ -1768,6 +1770,29 @@ impl App {
                 self.import_config_dialog.close();
             }
         }
+    }
+
+    /// The session's permission mode once the saved settings, now in
+    /// `self.config`, have been reloaded. The rule is the one a start
+    /// follows: a mode chosen at launch stays, and otherwise the saved mode
+    /// applies, except that a saved bypass mode is never restored. A change
+    /// to the session's mode, or a refused bypass, is said once.
+    fn permission_mode_after_reload(
+        &mut self,
+        session_mode: claurst_core::config::PermissionMode,
+    ) -> claurst_core::config::PermissionMode {
+        if self.permission_mode_from_launch {
+            return session_mode;
+        }
+        let saved = self.config.permission_mode.clone();
+        let restored = saved.restored_from_settings();
+        if restored.mode != session_mode || restored.mode != saved {
+            if let Some(notice) = restored.notice {
+                self.notifications
+                    .push(NotificationKind::Warning, notice.to_string(), Some(30));
+            }
+        }
+        restored.mode
     }
 
     pub(crate) fn current_user_turn_index(&self) -> Option<usize> {
