@@ -364,15 +364,19 @@ fn stop_mid_command(background: bool) {
             Ok(Err(after)) => format!("{:?} after the stop began", after.duration()),
             Err(error) => format!("at an unknown time ({error})"),
         };
+        // Only a write clearly before the stop counts as a stall; one within
+        // the clock's margin of it is reported as during the stop.
         let (when, stalled) = match dated(&late) {
-            Ok(written) if written < stop_began => (
+            Ok(written) if written + Duration::from_millis(50) < stop_began => (
                 format!(
                     "{:?} before the stop",
                     stop_began.duration_since(written).unwrap_or_default()
                 ),
                 true,
             ),
-            Ok(written) if written <= stop_ended => ("while the stop was sent".to_string(), false),
+            Ok(written) if written <= stop_ended + Duration::from_millis(50) => {
+                ("while the stop was sent".to_string(), false)
+            }
             Ok(written) => (
                 format!(
                     "{:?} after the stop",

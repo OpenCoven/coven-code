@@ -2794,7 +2794,7 @@ mod plugin_session_tests {
             }));
             if timeout(Duration::from_secs(10), ready)
                 .await
-                .unwrap()
+                .expect("the flow neither opened the browser nor ended within 10s")
                 .is_ok()
             {
                 break (plugin, task, redirect_uri);
@@ -2811,7 +2811,7 @@ mod plugin_session_tests {
         plugin.revoke();
         timeout(Duration::from_secs(10), plugin.wait_retired())
             .await
-            .unwrap()
+            .expect("retirement did not complete within 10s")
             .unwrap();
         let error = task.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("revoked"));
