@@ -192,7 +192,7 @@ impl Interactive {
         &mut self,
         prompt: &str,
     ) -> (
-        tokio::sync::mpsc::UnboundedSender<QueryEvent>,
+        tokio::sync::mpsc::Sender<QueryEvent>,
         tokio::task::JoinHandle<()>,
     ) {
         let message = Message::user(prompt.to_string());
@@ -201,7 +201,8 @@ impl Interactive {
         self.session.messages = self.messages.clone();
         self.app.is_streaming = true;
         self.app.streaming_text.clear();
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let worker = tokio::spawn(forward_scoped_events(
             turn_rx,
             self.events.clone(),
@@ -213,12 +214,12 @@ impl Interactive {
     /// Send `events` from a worker and wait until the queue holds them all.
     async fn deliver(
         &mut self,
-        worker: &tokio::sync::mpsc::UnboundedSender<QueryEvent>,
+        worker: &tokio::sync::mpsc::Sender<QueryEvent>,
         events: Vec<QueryEvent>,
     ) {
         let target = self.queue.len() + events.len();
         for event in events {
-            worker.send(event).expect("worker is running");
+            worker.send(event).await.expect("worker is running");
         }
         let queued = async {
             while self.queue.len() < target {
