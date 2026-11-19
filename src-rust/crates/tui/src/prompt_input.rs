@@ -5441,6 +5441,62 @@ mod tests {
         assert!(s.text.len() < "lo world".len());
     }
 
+    /// The text the last Insert recorded for dot-repeat, if any.
+    fn recorded_insert(s: &PromptInputState) -> Option<&str> {
+        match &s.vim_dot_action {
+            Some(DotRepeatAction::Insert { text, .. }) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Leaving an insert made before the end of the text records exactly
+    /// what was typed (#569). It used to slice from the old text's length
+    /// to the cursor, which panicked here or dropped the first characters.
+    #[test]
+    fn escape_records_an_insert_made_before_the_end_of_the_text() {
+        let mut s = vim_composer("ab", 0);
+        s.vim_command("i");
+        s.insert_char('x');
+        s.vim_command("Escape");
+        assert_eq!(s.vim_mode, VimMode::Normal);
+        assert_eq!(s.text, "xab");
+        assert_eq!(recorded_insert(&s), Some("x"));
+
+        let mut s = vim_composer("ab", 1);
+        s.vim_command("i");
+        for c in "xyz".chars() {
+            s.insert_char(c);
+        }
+        s.vim_command("Escape");
+        assert_eq!(s.text, "axyzb");
+        assert_eq!(recorded_insert(&s), Some("xyz"));
+        s.vim_command(".");
+        assert_eq!(s.text, "axyzxyzb");
+    }
+
+    /// When the cursor left the inserted span, the span from the entry
+    /// cursor is not what was typed, so nothing is recorded (#569).
+    #[test]
+    fn escape_after_the_cursor_left_the_insert_records_nothing() {
+        let mut s = vim_composer("ab", 1);
+        s.vim_command("i");
+        s.insert_char('x');
+        s.move_left();
+        s.move_left();
+        s.vim_command("Escape");
+        assert_eq!(s.vim_mode, VimMode::Normal);
+        assert_eq!(s.text, "axb");
+        assert_eq!(recorded_insert(&s), None);
+
+        // Backspace past the entry cursor shrinks the text.
+        let mut s = vim_composer("abc", 2);
+        s.vim_command("i");
+        s.backspace();
+        s.vim_command("Escape");
+        assert_eq!(s.text, "ac");
+        assert_eq!(recorded_insert(&s), None);
+    }
+
     // ---- Visual line mode (V) -------------------------------------------
 
     #[test]
