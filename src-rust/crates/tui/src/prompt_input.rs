@@ -4270,6 +4270,12 @@ mod tests {
         s.kill_line();
         assert_eq!(s.text, "");
         assert_eq!(s.kill_ring.entries, ["ab\r"]);
+
+        // Only the CR right before the LF belongs to the line break.
+        let mut s = composer("a\r\r\nb", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nb");
+        assert_eq!(s.kill_ring.entries, ["\r"]);
     }
 
     /// `gE` with only whitespace before the cursor goes to the start of the
