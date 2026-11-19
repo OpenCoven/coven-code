@@ -8,7 +8,7 @@ use tokio::time::{timeout, Duration};
 const SECRET: &str = "mcp-endpoint-privacy-canary";
 const TOKEN: &str = "mcp-bearer-canary";
 /// A local address that refuses connections. This assumes nothing listens on
-/// port 1, and no test is given it: binding port 0 picks from the ephemeral
+/// port 1, and no test binds it: binding port 0 picks from the ephemeral
 /// range, far above it. A port freed by dropping a socket is open to any other
 /// test, whose server answers instead of refusing, and the error then has
 /// another category.

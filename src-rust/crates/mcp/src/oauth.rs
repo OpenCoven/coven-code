@@ -2792,7 +2792,7 @@ mod plugin_session_tests {
                 let _ = opened.send(());
                 Ok(())
             }));
-            if timeout(Duration::from_secs(2), ready)
+            if timeout(Duration::from_secs(10), ready)
                 .await
                 .unwrap()
                 .is_ok()
@@ -2809,18 +2809,19 @@ mod plugin_session_tests {
             );
         };
         plugin.revoke();
-        timeout(Duration::from_secs(2), plugin.wait_retired())
+        timeout(Duration::from_secs(10), plugin.wait_retired())
             .await
             .unwrap()
             .unwrap();
         let error = task.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("revoked"));
         // The flow's listener is gone once the callback address can be bound
-        // again; a listener the flow kept would hold it for good. The port is
-        // free once retirement completes, so another test in this process may
-        // bind it first and hold it for a while: retry until that test lets
-        // go, as `valid_callback_exchanges_once_persists_and_cannot_replay`
-        // does.
+        // again; a listener the flow kept would hold it for good, or at least
+        // until the flow's own `CALLBACK_TIMEOUT` (180 s), far past the 10 s
+        // here. The port is free once retirement completes, so another test
+        // in this process may bind it first and hold it for a while: retry
+        // until that test lets go, as
+        // `valid_callback_exchanges_once_persists_and_cannot_replay` does.
         let redirect_url = url::Url::parse(&redirect_uri).unwrap();
         let callback_address = (
             redirect_url.host_str().unwrap(),

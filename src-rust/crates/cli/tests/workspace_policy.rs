@@ -334,11 +334,12 @@ fn stop_mid_command(background: bool) {
     // Should the delayed write be found below, these tell a runner that
     // stalled before the stop from a write that landed after it (#568).
     let stop_delay = stopped_at.elapsed();
-    let stopped_wall = SystemTime::now();
+    let stop_began = SystemTime::now();
     // Coven's Stop for a harness run: one SIGKILL to the run's process group
     // (`terminate_unix_process_group` in coven-cli's pty_runner.rs).
     killpg(group_of(&engine.0), Signal::SIGKILL)
         .unwrap_or_else(|error| panic!("the stop failed: {error}\n{}", logs(&base, "stop")));
+    let stop_ended = SystemTime::now();
     let status = engine.0.wait().unwrap();
     assert_eq!(
         status.signal(),
@@ -355,18 +356,36 @@ fn stop_mid_command(background: bool) {
     thread::sleep((stopped_at + Duration::from_secs(6)).saturating_duration_since(Instant::now()));
     if late.exists() {
         // The cause of one hosted failure here is not established (#568):
-        // say whether the write landed before the stop or after it.
-        let dated = fs::metadata(&late)
-            .and_then(|meta| meta.modified())
-            .map(|written| written.duration_since(stopped_wall));
-        let (when, stalled) = match dated {
-            Ok(Ok(after)) => (format!("{after:?} after the stop"), false),
-            Ok(Err(before)) => (format!("{:?} before the stop", before.duration()), true),
+        // say when the shell started and whether its write landed before the
+        // stop, during it or after it.
+        let dated = |file: &Path| fs::metadata(file).and_then(|meta| meta.modified());
+        let shell_started = match dated(&started).map(|at| stop_began.duration_since(at)) {
+            Ok(Ok(before)) => format!("{before:?} before the stop"),
+            Ok(Err(after)) => format!("{:?} after the stop began", after.duration()),
+            Err(error) => format!("at an unknown time ({error})"),
+        };
+        let (when, stalled) = match dated(&late) {
+            Ok(written) if written < stop_began => (
+                format!(
+                    "{:?} before the stop",
+                    stop_began.duration_since(written).unwrap_or_default()
+                ),
+                true,
+            ),
+            Ok(written) if written <= stop_ended => ("while the stop was sent".to_string(), false),
+            Ok(written) => (
+                format!(
+                    "{:?} after the stop",
+                    written.duration_since(stop_ended).unwrap_or_default()
+                ),
+                false,
+            ),
             Err(error) => (format!("at an unknown time ({error})"), false),
         };
         panic!(
-            "a stopped scoped run still wrote after its delay: the stop came {stop_delay:?} \
-             after the test read the shell's PID, and the write is dated {when}{}\n{}",
+            "a stopped scoped run still wrote after its delay: the shell started {shell_started}, \
+             the stop came {stop_delay:?} after the test read the shell's PID, and the write \
+             is dated {when}{}\n{}",
             if stalled {
                 "; the test runner stalled before the stop, so the host is likely too busy \
                  to run this test"
