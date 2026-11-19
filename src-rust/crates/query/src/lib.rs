@@ -5730,6 +5730,87 @@ mod tests {
         (outcome, events, messages, cost_tracker)
     }
 
+    /// #572: an interactive turn whose consumer has stopped draining, with
+    /// its backpressured buffer full, still ends promptly once cancelled.
+    #[tokio::test]
+    async fn a_cancelled_turn_does_not_wait_on_a_stalled_backpressured_consumer() {
+        const HELD_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"held\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"one\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"two\"}}\n\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let api_base = serve_anthropic_partial_sse(HELD_SSE).await;
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "test-key".to_string(),
+            api_base,
+            max_retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let cost_tracker = claurst_core::cost::CostTracker::new();
+        let tool_ctx = ToolContext {
+            working_dir: temp.path().to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: cost_tracker.clone(),
+            session_id: "stalled-consumer".to_string(),
+            goal_turn: Default::default(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+        let mut messages = vec![Message::user("test a stalled consumer")];
+        // One slot, and the receiver is never read: the consumer is stalled.
+        let (event_tx, _stalled_consumer) = mpsc::channel(1);
+        let probe = event_tx.clone();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let query_config = make_config(None, None);
+        let query = run_query_loop_with_events(
+            &client,
+            &mut messages,
+            &[],
+            &tool_ctx,
+            &query_config,
+            cost_tracker,
+            Some(event_tx.into()),
+            cancel_token.clone(),
+            None,
+        );
+        tokio::pin!(query);
+        // Run the turn until its one slot is full and it waits for the next.
+        let filled = async {
+            while probe.capacity() > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        tokio::select! {
+            outcome = &mut query => panic!("the turn ended before the buffer filled: {outcome:?}"),
+            _ = tokio::time::timeout(std::time::Duration::from_secs(10), filled) => {}
+        }
+        assert_eq!(probe.capacity(), 0, "the buffer is full");
+        cancel_token.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), &mut query)
+            .await
+            .expect("a cancelled turn ends without waiting for the consumer");
+        assert!(matches!(outcome, QueryOutcome::Cancelled), "{outcome:?}");
+    }
+
     async fn run_anthropic_sse_sequence_in_worktree(
         bodies: Vec<&'static str>,
         working_dir: &std::path::Path,
