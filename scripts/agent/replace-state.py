@@ -16,7 +16,10 @@ so it never drops original issue text. The old section must:
   lone carriage return is refused, as is text right after the section that
   starts indented. So are a footnote reference ("[^") and "$$" anywhere,
   and a near-miss marker such as "**Next Action:**" or "Next action:".
-The old section ends after that Next action line. Everything after it (the
+The old section ends after that Next action line. One limit: an old section
+with no marker at all, or one too mangled to mention a next action, is taken
+to run on to the first exact "**Next action:**" line below it, so read the
+preview diff before --apply. Everything after it (the
 original report, acceptance, prompts) is kept byte for byte.
 
 The section file follows the same rules: its heading, plain lines, and one

@@ -81,13 +81,16 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKTREE/src-rust/target}"
 # CI sets none of these. A caller's RUSTFLAGS=--cap-lints=allow or
 # CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false would let a gate pass that fails
 # in CI, and a Coven agent shell's COVEN_HOME would point the tests at a real
-# home instead of the scratch one. Settings in $CARGO_HOME/config.toml still
+# home instead of the scratch one. A CARGO_TARGET_<triple>_RUNNER of `true`
+# would skip every test, and XDG_* would send test caches to the caller's real
+# directories on Linux. Settings in $CARGO_HOME/config.toml still
 # apply. (COVEN_TOOLCHAIN was read above.)
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS \
   CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET RUSTC CLIPPY_CONF_DIR
 for var in $(compgen -e); do
   case "$var" in
-    CARGO_TARGET_*_RUSTFLAGS | CARGO_PROFILE_* | COVEN_* | CLAURST_* | ANTHROPIC_* | OPENAI_* | CODEX_*)
+    CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUNNER | CARGO_PROFILE_* | XDG_* | \
+      COVEN_* | CLAURST_* | ANTHROPIC_* | OPENAI_* | CODEX_*)
       unset "$var" ;;
   esac
 done
@@ -196,7 +199,9 @@ run alloc "${TEST_ENV[@]}" "${CARGO[@]}" test -p claurst-tui --locked --test nex
   -- --ignored --skip measure_active_frames --test-threads=1
 [ "$DRY_RUN" = 1 ] && exit 0
 
-python3 -I - "$OUT/test.log" >>"$OUT/summary.txt" <<'PY'
+# A workspace test gate that passes without running a single test has not
+# tested anything (a cargo runner or config override); count it as failed.
+python3 -I - "$OUT/test.log" >>"$OUT/summary.txt" <<'PY' || FAILED=1
 import re
 import sys
 
@@ -214,6 +219,9 @@ with open(sys.argv[1], errors="replace") as log:
 print(f"tests passed={passed} failed={failed} ignored={ignored}")
 for failure in failures:
     print("  ", failure)
+if passed == 0:
+    print("tests: no test passed, so the test gate is counted as failed")
+    sys.exit(1)
 PY
 if [ "$FAILED" != 0 ]; then
   echo "result FAIL" | tee -a "$OUT/summary.txt"

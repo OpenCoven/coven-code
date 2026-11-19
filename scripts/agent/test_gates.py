@@ -134,11 +134,12 @@ FAKE_RUSTUP = textwrap.dedent(
     """\
     #!/bin/sh
     # Stands in for `rustup run <toolchain> cargo <subcommand> ...`.
-    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}${CARGO_TARGET_X_RUSTFLAGS-}${CARGO_PROFILE_TEST_DEBUG_ASSERTIONS-}${COVEN_HOME-}${COVEN_CODE_TEST_HOME-}" >> "$FAKE_CALLS"
+    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}${CARGO_TARGET_X_RUSTFLAGS-}${CARGO_TARGET_X_RUNNER-}${XDG_CACHE_HOME-}${CARGO_PROFILE_TEST_DEBUG_ASSERTIONS-}${COVEN_HOME-}${COVEN_CODE_TEST_HOME-}" >> "$FAKE_CALLS"
     case "$4" in
       clippy) exit "${FAKE_CLIPPY_RC:-0}" ;;
       test)
         [ -n "${FAKE_TOUCH:-}" ] && echo x > "$FAKE_TOUCH"
+        [ -n "${FAKE_NO_TESTS:-}" ] && exit 0
         echo "test result: ok. 3 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.1s"
         echo "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.1s"
         echo "test widgets::draws ... FAILED"
@@ -216,6 +217,12 @@ class GatesRunTests(unittest.TestCase):
             self.assertIn(f"HOME={self.out}/home.", call)
         self.assertEqual(list(self.out.glob("home.*")), [])
 
+    def test_test_gate_that_ran_no_tests_fails(self):
+        result = self.gates(FAKE_NO_TESTS="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("tests passed=0 failed=0 ignored=0", self.summary())
+        self.assertEqual(self.summary()[-1], "result FAIL")
+
     def test_worktree_without_git_exits_2_before_writing(self):
         shutil.rmtree(self.worktree / ".git")
         result = self.gates()
@@ -262,6 +269,8 @@ class GatesRunTests(unittest.TestCase):
             RUSTFLAGS=flags,
             CARGO_TARGET_X_RUSTFLAGS=flags,
             CARGO_PROFILE_TEST_DEBUG_ASSERTIONS="false",
+            CARGO_TARGET_X_RUNNER="true",
+            XDG_CACHE_HOME="/real/cache",
             COVEN_HOME="/real/home",
             COVEN_CODE_TEST_HOME="/real/test-home",
         )
