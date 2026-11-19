@@ -135,6 +135,18 @@ jobs:
           errors=0
           while :; do
             if ! now=$(snapshot); then
+              # An exhausted token budget is not an error: wait for its
+              # reset (the rate_limit endpoint does not count against it).
+              reset=$(gh api rate_limit \
+                        --jq 'if .resources.core.remaining == 0 then .resources.core.reset else 0 end' \
+                        2>/dev/null) || reset=0
+              if [[ $reset =~ ^[0-9]+$ ]] && [ "$reset" -gt 0 ]; then
+                pause=$((reset - $(date +%s) + 5))
+                [ "$pause" -ge "$POLL" ] || pause=$POLL
+                echo "::warning::The API rate limit is used up; waiting ${pause}s for it to reset."
+                sleep "$pause"
+                continue
+              fi
               errors=$((errors + 1))
               if [ "$errors" -ge "$MAX_ERRORS" ]; then
                 echo "::error::$errors polls in a row failed to read the head's runs and checks."
