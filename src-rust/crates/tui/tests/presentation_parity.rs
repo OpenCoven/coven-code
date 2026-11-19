@@ -29,7 +29,10 @@
 //! Semantic, but different by design (#411): how a permission request opens.
 //! Next focuses deny and ignores keys other than Escape until
 //! `PERMISSION_ARM_DELAY` of quiet has passed; Classic opens on the first
-//! option and takes keys at once. So the same relative keys (Up, Down, Enter)
+//! option and takes keys at once. (Classic guards a follow-up request, opened
+//! right after another was decided, as Next does; the interactive loop's
+//! `open_permission_panel` decides that, and these tests open first
+//! requests.) So the same relative keys (Up, Down, Enter)
 //! decide differently, and on Next keys pressed as the request opens decide
 //! nothing. `permission_requests_open_differently_by_design` pins those
 //! outcomes; the outgoing-operations comparison uses keys that choose an
@@ -570,8 +573,9 @@ fn bash_request(id: &str) -> PermissionRequest {
     )
 }
 
-/// A permission request opened the way the interactive loop opens it: Next
-/// guards it against stray keys (#411); Classic keeps its dialog as it was.
+/// A first permission request opened the way the interactive loop opens it:
+/// Next guards it against stray keys (#411); Classic keeps its dialog as it
+/// was, and guards only a follow-up request.
 fn opened_request(renderer: UiRenderer, id: &str) -> PermissionRequest {
     let request = bash_request(id);
     if renderer == UiRenderer::Next {
