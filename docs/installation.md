@@ -86,7 +86,7 @@ The local-binary path does not authenticate the file for you. Verify its origin
 and digest before installing it. The shell installer may still resolve the
 latest release if no `--version` is supplied, even with `--binary`.
 
-### Windows PowerShell 5.1 started through another program from PowerShell 7
+### Windows PowerShell 5.1: 'Get-FileHash' is not recognized
 
 `install.ps1` runs under PowerShell 7 (`pwsh`) and under Windows PowerShell 5.1
 (`powershell`). Typing `powershell` at a PowerShell 7 prompt is fine: PowerShell
@@ -108,24 +108,29 @@ Check that release v<version> exists for windows-x86_64:
 
 The release exists; the shell is the problem. The installer stops before it
 extracts the archive: no executable is installed, an existing install is left
-as it was, and the user PATH is not changed. Run it in one of these ways
-instead:
+as it was, and the user PATH is not changed (the install directory may be left
+behind, empty). Run it in one of these ways instead:
 
 - Run it under PowerShell 7: `pwsh -NoProfile -File .\install.ps1`.
 - Start Windows PowerShell 5.1 from the Start menu, or from a Command Prompt
-  that was not itself started from PowerShell 7, and run it there.
+  that was not started from PowerShell 7, directly or through another program,
+  and run it there.
 - Clear the variable for the Windows PowerShell you start, so it builds its own
-  module path. This works from any shell:
+  module path. This works from a Command Prompt or PowerShell, run in the folder
+  that holds `install.ps1` (not a `\\server\share` path):
 
   ```
   cmd /c "set PSModulePath=&& powershell -NoProfile -File .\install.ps1"
   ```
 
 Pass the installer's parameters after `.\install.ps1`. If running scripts is
-disabled on the system, add `-ExecutionPolicy Bypass` to that one command after
-you have inspected the script. Installs with `-Binary` do not use
-`Get-FileHash` and are not affected, but check that binary's digest in a shell
-that can load `Get-FileHash`, such as PowerShell 7.
+disabled, and you have inspected the script, put `-ExecutionPolicy Bypass`
+before `-File` (for example `pwsh -NoProfile -ExecutionPolicy Bypass -File
+.\install.ps1`); at an interactive prompt, run
+`Set-ExecutionPolicy -Scope Process Bypass` first. Installs with `-Binary` do
+not use `Get-FileHash` and are not affected, but check that binary's digest in
+a shell that can load `Get-FileHash`, such as PowerShell 7, or with
+`certutil -hashfile <file> SHA256`.
 
 ### Archive verification
 
