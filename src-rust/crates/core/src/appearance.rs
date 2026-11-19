@@ -57,12 +57,103 @@ choice!(
     Density { Comfortable => "comfortable", Compact => "compact" }
 );
 choice!(
-    /// Preferred layout; Work and Inspect fall back to Focus until #410.
+    /// Where the inspector starts: closed, on Work, or on Activity.
     LayoutChoice { Focus => "focus", Work => "work", Inspect => "inspect" }
 );
 
 /// Keys this version reads.
 const KEYS: &[&str] = &["theme", "colorMode", "glyphs", "density", "layout", "hints"];
+
+/// The top-level setting that sits beside `nextAppearance` and is edited with it.
+pub const REDUCE_MOTION_KEY: &str = "reduceMotion";
+
+/// Everything `/config appearance` can change, in display order.
+pub const EDITABLE_KEYS: [&str; 7] = [
+    "theme",
+    "colorMode",
+    "glyphs",
+    "density",
+    "layout",
+    "hints",
+    REDUCE_MOTION_KEY,
+];
+
+const FLAG_VALUES: &[&str] = &["true", "false"];
+
+/// Values `key` accepts, or `None` when `key` is not an appearance setting.
+pub fn choices_for(key: &str) -> Option<&'static [&'static str]> {
+    Some(match key {
+        "theme" => ThemeChoice::VALUES,
+        "colorMode" => ColorChoice::VALUES,
+        "glyphs" => GlyphChoice::VALUES,
+        "density" => Density::VALUES,
+        "layout" => LayoutChoice::VALUES,
+        "hints" | REDUCE_MOTION_KEY => FLAG_VALUES,
+        _ => return None,
+    })
+}
+
+/// Pending changes to the user's appearance settings: each named key set to
+/// one of its accepted values, or cleared back to its default. Only presentation keys can
+/// get in here, so applying these can never reach permissions, providers or
+/// identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppearanceEdits {
+    changes: BTreeMap<&'static str, Option<&'static str>>,
+}
+
+impl AppearanceEdits {
+    /// Record `key = value`, or say why it cannot be set.
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let Some(name) = EDITABLE_KEYS.iter().find(|known| **known == key) else {
+            return Err(format!(
+                "{key} is not an appearance setting. These are: {}.",
+                EDITABLE_KEYS.join(", ")
+            ));
+        };
+        let choices = choices_for(name).unwrap_or_default();
+        let Some(choice) = choices.iter().find(|choice| **choice == value) else {
+            return Err(format!(
+                "{key} cannot be {value}. Choose one of: {}.",
+                choices.join(", ")
+            ));
+        };
+        self.changes.insert(name, Some(choice));
+        Ok(())
+    }
+
+    /// Clear every appearance setting back to its default.
+    pub fn reset_all(&mut self) {
+        self.changes = EDITABLE_KEYS.iter().map(|key| (*key, None)).collect();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    /// The keys these edits change.
+    pub fn keys(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.changes.keys().copied()
+    }
+
+    /// The `reduceMotion` these edits ask for, when they change it.
+    pub fn reduce_motion(&self) -> Option<bool> {
+        self.changes
+            .get(REDUCE_MOTION_KEY)
+            .map(|value| *value == Some("true"))
+    }
+
+    /// Apply to a `nextAppearance` layer; `reduceMotion` is not in that
+    /// object, see [`Self::reduce_motion`].
+    pub fn apply_to(&self, settings: &mut NextAppearanceSettings) {
+        for (key, value) in &self.changes {
+            match value {
+                Some(value) => settings.set_text(key, value),
+                None => settings.clear_key(key),
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NextAppearanceSettings {
@@ -92,6 +183,66 @@ impl NextAppearanceSettings {
 
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Whether this layer held something other than an object.
+    pub fn is_unreadable(&self) -> bool {
+        self.unparsed.is_some()
+    }
+
+    /// A key's current value as settings.json spells it.
+    pub fn value_text(&self, key: &str) -> Option<&'static str> {
+        Some(match key {
+            "theme" => self.theme.as_str(),
+            "colorMode" => self.color.as_str(),
+            "glyphs" => self.glyphs.as_str(),
+            "density" => self.density.as_str(),
+            "layout" => self.layout.as_str(),
+            "hints" if self.hints => "true",
+            "hints" => "false",
+            _ => return None,
+        })
+    }
+
+    fn set_text(&mut self, key: &str, value: &str) {
+        let accepted = match key {
+            "theme" => ThemeChoice::parse(value).map(|v| self.theme = v),
+            "colorMode" => ColorChoice::parse(value).map(|v| self.color = v),
+            "glyphs" => GlyphChoice::parse(value).map(|v| self.glyphs = v),
+            "density" => Density::parse(value).map(|v| self.density = v),
+            "layout" => LayoutChoice::parse(value).map(|v| self.layout = v),
+            "hints" => {
+                self.hints = value == "true";
+                Some(())
+            }
+            _ => None,
+        };
+        if accepted.is_some() {
+            if let Some(known) = KEYS.iter().find(|known| **known == key) {
+                self.set.insert(known);
+            }
+            self.forget_stored_value(key);
+        }
+    }
+
+    fn clear_key(&mut self, key: &str) {
+        match key {
+            "theme" => self.theme = ThemeChoice::default(),
+            "colorMode" => self.color = ColorChoice::default(),
+            "glyphs" => self.glyphs = GlyphChoice::default(),
+            "density" => self.density = Density::default(),
+            "layout" => self.layout = LayoutChoice::default(),
+            "hints" => self.hints = false,
+            _ => return,
+        }
+        self.set.remove(key);
+        self.forget_stored_value(key);
+    }
+
+    /// Drop a value kept because it was rejected: the user just decided.
+    fn forget_stored_value(&mut self, key: &str) {
+        self.preserved.remove(key);
+        self.rejected.retain(|rejected| rejected != key);
     }
 
     /// Combine two settings layers key by key: each key `over` set to a
@@ -237,6 +388,77 @@ impl Serialize for NextAppearanceSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_presentation_keys_and_their_values_can_be_edited() {
+        let mut edits = AppearanceEdits::default();
+        for key in [
+            "model",
+            "provider",
+            "permissionMode",
+            "permission_mode",
+            "permissionRules",
+            "apiKey",
+            "familiar",
+            "",
+        ] {
+            let error = edits.set(key, "anything").unwrap_err();
+            assert!(error.contains("not an appearance setting"), "{error}");
+        }
+        let error = edits.set("theme", "plaid").unwrap_err();
+        assert!(error.contains("auto, dark, light"), "{error}");
+        assert!(edits.set("hints", "maybe").is_err());
+        assert!(edits.is_empty(), "a refused edit changes nothing");
+
+        // Every key in the list has choices, and each one takes effect.
+        for key in EDITABLE_KEYS {
+            for value in choices_for(key).expect("listed keys have choices") {
+                let mut edits = AppearanceEdits::default();
+                edits.set(key, value).expect("a listed value is accepted");
+                let mut layer = NextAppearanceSettings::default();
+                edits.apply_to(&mut layer);
+                if key == REDUCE_MOTION_KEY {
+                    assert_eq!(edits.reduce_motion(), Some(*value == "true"));
+                } else {
+                    assert_eq!(layer.value_text(key), Some(*value), "{key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn setting_a_key_replaces_a_rejected_value_and_leaves_the_rest() {
+        let mut layer: NextAppearanceSettings =
+            serde_json::from_str(r#"{"theme":"plaid","density":"compact","laterKey":42}"#).unwrap();
+        let mut edits = AppearanceEdits::default();
+        edits.set("theme", "dark").unwrap();
+        edits.apply_to(&mut layer);
+        assert!(layer.rejected_keys().is_empty());
+        assert_eq!(
+            serde_json::to_value(&layer).unwrap(),
+            serde_json::json!({"theme":"dark","density":"compact","laterKey":42})
+        );
+    }
+
+    #[test]
+    fn a_reset_clears_known_keys_and_keeps_unknown_ones() {
+        let mut layer: NextAppearanceSettings = serde_json::from_str(
+            r#"{"theme":"plaid","density":"compact","hints":true,"layout":"work","laterKey":42}"#,
+        )
+        .unwrap();
+        let mut edits = AppearanceEdits::default();
+        edits.reset_all();
+        edits.apply_to(&mut layer);
+        assert_eq!(edits.reduce_motion(), Some(false));
+        assert_eq!(layer.density, Density::Comfortable);
+        assert_eq!(layer.layout, LayoutChoice::Focus);
+        assert!(!layer.hints);
+        assert!(layer.rejected_keys().is_empty());
+        assert_eq!(
+            serde_json::to_value(&layer).unwrap(),
+            serde_json::json!({"laterKey":42})
+        );
+    }
 
     #[test]
     fn layers_merge_per_field_and_the_higher_layer_wins_each_key() {
