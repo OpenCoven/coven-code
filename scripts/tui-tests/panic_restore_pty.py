@@ -72,7 +72,7 @@ KEYBOARD_POP = re.compile(rb"\x1b\[<\d*u")
 TITLE = re.compile(rb"\x1b\][02];")
 TITLE_CLEARED = re.compile(rb"\x1b\][02];(?:\x07|\x1b\\)")
 # Any of these after a worker panic means the hook restored on the wrong thread.
-RESTORE_BYTES = (LEAVE_ALT, b"\x1b[?1000l", b"\x1b[?2004l", b"\x1b[?25h", b"\x1b[<")
+RESTORE_BYTES = (LEAVE_ALT, b"\x1b[?1000l", b"\x1b[?2004l", b"\x1b[?25h", b"\x1b[<", b"\x1b]0;\x07")
 MOUSE_MODES = (1000, 1002, 1003, 1006, 1015)
 COOKED = termios.ICANON | termios.ECHO | termios.ISIG
 
@@ -238,8 +238,10 @@ def check_main_panic(report, label, probe, keyboard, setups):
                      f"pops at {pops}, leave at {hook.find(LEAVE_ALT)}: {text(after[:300])}")
     else:
         report.check(not pops, f"{label}: no keyboard pop is sent when none was pushed", text(after[:300]))
+    # The last title the hook writes must be the empty one.
+    titles = list(TITLE.finditer(hook))
     report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None
-                 and TITLE_CLEARED.search(hook) is not None,
+                 and bool(titles) and TITLE_CLEARED.match(hook, titles[-1].start()) is not None,
                  f"{label}: clears the title set at startup before the panic message", text(after[:300]))
     # The main screen's stack is the shell's, whether or not flags were
     # pushed here.
