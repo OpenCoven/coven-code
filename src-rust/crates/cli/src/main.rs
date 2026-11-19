@@ -7494,6 +7494,38 @@ mod tests {
         server.abort();
     }
 
+    /// #571: idle compaction of a history too short to summarise is not a
+    /// finished compaction. No request is sent, the conversation is as it
+    /// was, and the status neither says it completed nor zeroes the count.
+    #[tokio::test]
+    async fn idle_compaction_of_a_short_history_is_not_reported_as_complete() {
+        let (client, mut requests, server) = compaction_fixture(true).await;
+        let history: Vec<_> = compactable_history().into_iter().take(11).collect();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        assert_eq!(
+            serde_json::to_value(&*messages.lock().await).unwrap(),
+            serde_json::to_value(&history).unwrap(),
+            "the conversation is unchanged"
+        );
+        assert!(requests.try_recv().is_err(), "no summary request was sent");
+
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        app.context_used_tokens = 9_000;
+        finish_idle_compaction(&mut app, Some(&outcome));
+        assert_ne!(
+            app.status_message.as_deref(),
+            Some("Auto-compact complete."),
+            "{outcome:?}"
+        );
+        assert_eq!(app.context_used_tokens, 9_000, "nothing was summarised");
+        server.abort();
+    }
+
     /// #408: a worker that does not watch the token (a tool or approval that
     /// ignores it) is waited for. If it finishes within `TURN_EXIT_WAIT`, the
     /// conversation it wrote is what is kept. Idle auto-compaction watches the
