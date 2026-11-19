@@ -86,6 +86,37 @@ The local-binary path does not authenticate the file for you. Verify its origin
 and digest before installing it. The shell installer may still resolve the
 latest release if no `--version` is supplied, even with `--binary`.
 
+### Windows PowerShell 5.1 started from PowerShell 7
+
+`install.ps1` runs under PowerShell 7 (`pwsh`) and under Windows PowerShell 5.1
+(`powershell`). A Windows PowerShell 5.1 started from inside a PowerShell 7
+session inherits PowerShell 7's `PSModulePath` and cannot load its own modules,
+including the one that provides `Get-FileHash`. The installer then fails at the
+checksum step with an error such as:
+
+```
+Download failed: The term 'Get-FileHash' is not recognized as the name of a cmdlet, ...
+Check that release v<version> exists for windows-x86_64:
+```
+
+The release exists; the shell is the problem. The installer stops before it
+extracts the archive, so nothing is installed and an existing install is left
+as it was. Run it in one of these ways instead:
+
+- Run it under PowerShell 7: `pwsh -NoProfile -File .\install.ps1`.
+- Start Windows PowerShell 5.1 from the Start menu or from a Command Prompt that
+  was not itself started from PowerShell 7, then run `.\install.ps1` there.
+- From PowerShell 7, start Windows PowerShell 5.1 without the inherited
+  variable, so it builds its own module path:
+
+  ```powershell
+  $saved = $env:PSModulePath
+  $env:PSModulePath = $null
+  try { powershell -NoProfile -File .\install.ps1 } finally { $env:PSModulePath = $saved }
+  ```
+
+Pass the installer's parameters after `.\install.ps1` in each case.
+
 ### Archive verification
 
 For releases with `SHA256SUMS`, obtain the archive and manifest from the same
