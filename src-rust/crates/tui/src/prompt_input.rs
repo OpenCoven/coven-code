@@ -4229,6 +4229,42 @@ mod tests {
         assert!(!s.is_empty());
     }
 
+    /// A CRLF line ends at its CR (#570). At the end of such a line there
+    /// is nothing to cut; from inside it the cut leaves the CRLF whole.
+    #[test]
+    fn kill_line_stops_before_the_cr_of_a_crlf_line() {
+        let mut s = composer("a\r\nb", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nb");
+        assert!(s.kill_ring.entries.is_empty());
+
+        let mut s = composer("abc\r\nd", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nd");
+        assert_eq!(s.kill_ring.entries, ["bc"]);
+
+        // A line ending in a bare LF is cut up to the LF, as before.
+        let mut s = composer("abc\nd", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\nd");
+        assert_eq!(s.kill_ring.entries, ["bc"]);
+    }
+
+    /// `gE` with only whitespace before the cursor goes to the start of the
+    /// text (#570), as `ge` does. It used to subtract past zero.
+    #[test]
+    fn g_upper_e_after_only_whitespace_moves_to_the_start() {
+        let mut s = vim_composer("  a", 2);
+        s.vim_command("g");
+        s.vim_command("E");
+        assert_eq!(s.cursor, 0);
+
+        let mut s = vim_composer("  a", 2);
+        s.vim_command("g");
+        s.vim_command("e");
+        assert_eq!(s.cursor, 0);
+    }
+
     // ---- handle_paste ---------------------------------------------------
 
     #[test]
