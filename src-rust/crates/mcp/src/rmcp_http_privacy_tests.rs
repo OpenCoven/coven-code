@@ -53,16 +53,24 @@ fn assert_private(error: &anyhow::Error, category: &str) {
             rendered.contains("http-privacy-fixture"),
             "missing fixture name"
         );
-        assert!(rendered.contains(category), "missing failure category");
+        assert!(
+            rendered.contains(category),
+            "missing failure category {category:?} in {rendered:?}"
+        );
     }
 }
 
 #[tokio::test]
 async fn http_refused_initialization_does_not_expose_endpoint() {
     for owned in [true, false] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+        // This assumes nothing listens on port 1, and no test is given it:
+        // binding port 0 picks from the ephemeral range, far above it. A port
+        // freed by dropping a listener is open to any other test, whose
+        // server answers instead of refusing; that reproduces the "missing
+        // failure category" seen under load. The category message prints the
+        // error, should a failure have another cause. (A bound socket that
+        // never listens does not refuse on macOS: the connect hangs.)
+        let address = "127.0.0.1:1";
         let error = initialization_error(
             format!("http://{address}/messages?key={SECRET}#{SECRET}"),
             owned,
