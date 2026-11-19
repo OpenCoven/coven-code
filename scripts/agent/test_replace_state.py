@@ -66,14 +66,28 @@ class ReplaceSectionTests(unittest.TestCase):
         )
         self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\nKeep.\n")
 
-    def test_subsections_before_the_next_action_belong_to_the_section(self):
+    def test_subsection_before_a_next_action_is_refused(self):
         body = (
-            "## Current state: 2026-11-18\n\n### Done\n\n- a\n\n### Next\n\n- b\n\n"
+            "## Current state: 2026-11-18\n\n### Done\n\n- a\n\n"
             "**Next action:** review #1.\n\n### Long-running goal prompt\n\nKeep.\n"
         )
-        self.assertEqual(
-            replace_state.replace_section(body, NEW), NEW + "\n### Long-running goal prompt\n\nKeep.\n"
+        with self.assertRaisesRegex(replace_state.SectionError, "edit it by hand"):
+            replace_state.replace_section(body, NEW)
+
+    def test_later_template_next_action_is_not_the_section_end(self):
+        body = (
+            "## Current state: 2026-11-18\n\nOld, no next action.\n\n### Acceptance\n\n- keep\n\n"
+            "## Template\n\n**Next action:** example.\n"
         )
+        kept = "### Acceptance\n\n- keep\n\n## Template\n\n**Next action:** example.\n"
+        self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\n" + kept)
+
+    def test_next_action_paragraph_ends_at_the_next_block(self):
+        for after in ("   \nKeep.\n", "\t\nKeep.\n", "### Keep\nKeep.\n", "```\ncode\n```\n", "- keep\n", "> keep\n"):
+            body = "## Current state: 2026-11-18\n\nOld.\n\n**Next action:** x\ncontinued.\n" + after
+            out = replace_state.replace_section(body, NEW)
+            self.assertTrue(out.endswith(after), (after, out))
+            self.assertNotIn("continued.", out)
 
     def test_next_action_paragraph_at_end_of_body(self):
         body = "Intro.\n\n" + OLD.rstrip("\n")
@@ -103,6 +117,9 @@ class ReplaceSectionTests(unittest.TestCase):
             "## Current state: 2026-11-19\n\n**Next action:** a.\n\n**Next action:** b.\n",
             "## Current state: 2026-11-19\n\n## Inner\n\n**Next action:** a.\n",
             "## Current state: 2026-11-19\n\n---\n\n**Next action:** a.\n",
+            "## Current state: 2026-11-19\n\n### Done\n\n**Next action:** a.\n",
+            "## Current state: 2026-11-19\n\n**Next action:** a.\n   \nTrailing.\n",
+            "## Current state: 2026-11-19\n\n**Next action:** a.\n- list\n",
         )
         for section in bad:
             # normalize_section itself, not only the second-rewrite guard behind it.
@@ -110,7 +127,7 @@ class ReplaceSectionTests(unittest.TestCase):
                 replace_state.normalize_section(section)
             with self.assertRaises(replace_state.SectionError, msg=section):
                 replace_state.replace_section(OLD, section)
-        ok = "## Current state: 2026-11-19\n\n### Done\n\n```\n## fenced\n```\n\n**Next action:** a.\n"
+        ok = "## Current state: 2026-11-19\n\n- done\n\n```\n## fenced\n```\n\n**Next action:** a.\n"
         self.assertTrue(replace_state.replace_section(OLD, ok).startswith(ok))
 
     def test_every_result_survives_a_second_rewrite(self):
@@ -129,6 +146,12 @@ class ReplaceSectionTests(unittest.TestCase):
         for body in ("## Current state: 2026-11-18 (sweep v4)\n\nOld.\n", "### Current state\n\nOld.\n"):
             with self.assertRaisesRegex(replace_state.SectionError, "another form"):
                 replace_state.replace_section(body, NEW, insert=True)
+
+    def test_fence_closes_only_on_its_own_marker(self):
+        body = OLD + "\n````\n```\n## Current state: 2026-01-01\n```\n~~~\n````\n"
+        out = replace_state.replace_section(body, NEW)
+        self.assertTrue(out.startswith(NEW))
+        self.assertIn("## Current state: 2026-01-01", out)
 
     def test_fenced_example_heading_is_not_counted(self):
         body = OLD + "\n```\n## Current state: 2026-01-01\n```\n"

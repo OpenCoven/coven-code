@@ -111,6 +111,7 @@ class GatesDryRunTests(unittest.TestCase):
         self.assertEqual(self.dry_run(str(self.worktree)).returncode, 2)
         self.assertEqual(self.dry_run(str(self.out), str(self.out)).returncode, 2)
         self.assertEqual(self.dry_run(str(self.worktree), "-x").returncode, 2)
+        self.assertEqual(self.dry_run(str(self.worktree), str(self.worktree / "gates")).returncode, 2)
         (self.worktree / ".github" / "workflows" / "rust-ci.yml").write_text("no pin\n")
         result = self.dry_run(str(self.worktree), str(self.out))
         self.assertEqual(result.returncode, 2)
@@ -207,6 +208,14 @@ class GatesRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("install the toolchain", result.stderr)
         self.assertFalse(self.out.exists())
+
+    def test_stale_logs_from_an_earlier_run_are_removed(self):
+        self.out.mkdir()
+        (self.out / "fmt.log").write_text("old\n")
+        result = self.gates(ONLY_TESTS="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.out / "fmt.log").exists())
+        self.assertTrue((self.out / "test.log").exists())
 
     def test_only_tests_runs_two_gates(self):
         result = self.gates(ONLY_TESTS="1")

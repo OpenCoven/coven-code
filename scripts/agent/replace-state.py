@@ -5,15 +5,18 @@ usage: replace-state.py <issue> <section-file> [--apply] [--insert] [--to-end]
                         [--repo OWNER/NAME] [--out-dir DIR]
 
 The section file must start with its own "## Current state: YYYY-MM-DD"
-heading and end with one paragraph that starts with "**Next action:**"; it
-may hold "###" or deeper headings but no "#"/"##" heading, "<details" or
-"---" line. That keeps its end findable, so every later run replaces exactly
-it. A result that a second run would cut differently is refused.
+heading and end with one paragraph that starts with "**Next action:**". It
+may hold no other heading, "<details" or "---" line. That keeps its end
+findable, so every later run replaces exactly it. A result that a second run
+would cut differently is refused.
 
 The old section starts at its heading and ends:
-- after its first "**Next action:**" paragraph, if it has one before the next
-  "#" or "##" heading, "<details" line or "---" rule;
-- otherwise at the first of those, or at a "###" to "######" heading;
+- after its "**Next action:**" paragraph, if that comes before any heading,
+  "<details" line or "---" rule. The paragraph ends at a blank or
+  whitespace-only line or at a line that starts another block (heading,
+  list item, quote, table, HTML, rule or code fence);
+- otherwise at the first heading, "<details" line or "---" rule. A "###"
+  heading followed by a "**Next action:**" line is refused as ambiguous;
 - otherwise, with --to-end only, at the end of the body, taking any plain
   text after it too. Without --to-end that is an error, so unmarked text
   after an old section is never lost by accident.
@@ -24,8 +27,9 @@ By default it only previews: it prints a unified diff and writes
 <issue>.<UTC time>.before.md and .after.md into --out-dir (default: the
 current directory, refused when that is inside a git work tree, where the
 copies could be committed by accident). Earlier copies are never overwritten.
---apply also writes the new body with `gh api -X PATCH`, after checking that
-the body has not changed since it was read. --insert puts the section at the top of a body
+--apply also writes the new body with `gh api -X PATCH`. It re-reads the body
+just before writing and refuses if it changed; GitHub offers no atomic check,
+so a concurrent edit in that last second can still be overwritten. --insert puts the section at the top of a body
 that has none; without it, a missing section is an error.
 
 Exit status: 0 on success (or no change), 1 when the body or the section's
@@ -44,19 +48,61 @@ import sys
 DEFAULT_REPO = "OpenCoven/coven-code"
 HEADING = re.compile(r"^## Current state: \d{4}-\d{2}-\d{2}[ \t]*$", re.M)
 NEXT_ACTION = re.compile(r"\*\*Next action:\*\*")
-HARD_STOP = re.compile(r"#{1,2}\s|<details\b|(-{3,}|\*{3,}|_{3,})\s*$")
-SOFT_STOP = re.compile(r"#{3,6}\s")
-FENCE = re.compile(r" {0,3}(```|~~~)")
-ANY_STATE_HEADING = re.compile(r"#{1,6}\s*Current state\b", re.I)
+# Lines that end a section: any heading, an HTML block such as <details>, a rule.
+HARD_STOP = re.compile(r" {0,3}(#{1,2}\s|<details\b|(-{3,}|\*{3,}|_{3,})\s*$)")
+SOFT_STOP = re.compile(r" {0,3}#{3,6}\s")
+# Lines that start a new Markdown block, and so end the paragraph before them.
+BLOCK_START = re.compile(
+    r" {0,3}(#{1,6}\s|<|>|\||[-*+]\s|\d+[.)]\s|(-{3,}|\*{3,}|_{3,})\s*$|`{3,}|~{3,})"
+)
+FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})")
+ANY_STATE_HEADING = re.compile(r" {0,3}#{1,6}\s*Current state\b", re.I)
 
 
 class SectionError(Exception):
     pass
 
 
+def markers(text):
+    """Yield (offset, line) for each line of text outside fenced code blocks.
+
+    A fence closes only on the character it opened with, at least as long.
+    """
+    offset = 0
+    fence = None
+    for line in text.splitlines(True):
+        opened = FENCE_OPEN.match(line)
+        if fence is None and opened:
+            fence = opened.group(1)
+        elif fence is not None:
+            closing = opened.group(1) if opened else ""
+            if (
+                closing
+                and closing[0] == fence[0]
+                and len(closing) >= len(fence)
+                and line.strip() == closing
+            ):
+                fence = None
+        else:
+            yield offset, line
+        offset += len(line)
+
+
+def paragraph_end(text, start):
+    """Offset of the first line after the paragraph that starts at start."""
+    offset = start
+    first = True
+    for line in text[start:].splitlines(True):
+        if not first and (line.strip() == "" or BLOCK_START.match(line)):
+            return offset
+        first = False
+        offset += len(line)
+    return len(text)
+
+
 def normalize_section(text):
     """Check the new section so that a later run finds exactly where it ends."""
-    text = text.replace("\r\n", "\n").strip("\n")
+    text = text.replace("\r\n", "\n").strip()
     first, _, body = text.partition("\n")
     if not HEADING.fullmatch(first):
         raise SectionError(
@@ -64,14 +110,14 @@ def normalize_section(text):
         )
     actions = []
     for offset, line in markers(body):
-        if HARD_STOP.match(line) or ANY_STATE_HEADING.match(line):
+        if HARD_STOP.match(line) or SOFT_STOP.match(line) or ANY_STATE_HEADING.match(line):
             raise SectionError(
-                "the section file may hold only ### or deeper headings, and no <details> "
+                "the section file may hold no heading after its own, and no <details> "
                 f"or --- line: {line.strip()!r}"
             )
         if NEXT_ACTION.match(line):
             actions.append(offset)
-    if len(actions) != 1 or "\n\n" in body[actions[0]:]:
+    if len(actions) != 1 or paragraph_end(body, actions[0]) != len(body):
         raise SectionError(
             "the section file must end with exactly one paragraph that starts with "
             "**Next action:**, so that a later run knows where the section ends"
@@ -79,36 +125,23 @@ def normalize_section(text):
     return text + "\n"
 
 
-def markers(text):
-    """Yield (offset, line) for each line of text outside fenced code blocks."""
-    offset = 0
-    fenced = False
-    for line in text.splitlines(True):
-        if FENCE.match(line):
-            fenced = not fenced
-        elif not fenced:
-            yield offset, line
-        offset += len(line)
-
-
 def section_end(rest, to_end):
     """Offset in rest (the text after the heading line) where the old section ends."""
-    hard = soft = action = None
+    soft = None
     for offset, line in markers(rest):
         if HARD_STOP.match(line):
-            hard = offset
-            break
+            return soft if soft is not None else offset
+        if NEXT_ACTION.match(line):
+            if soft is not None:
+                raise SectionError(
+                    "the old Current state section has a ### heading before its "
+                    "**Next action:** line, so its end is unclear; edit it by hand"
+                )
+            return paragraph_end(rest, offset)
         if soft is None and SOFT_STOP.match(line):
             soft = offset
-        if action is None and NEXT_ACTION.match(line):
-            action = offset
-    limit = len(rest) if hard is None else hard
-    if action is not None:
-        paragraph_end = rest.find("\n\n", action, limit)
-        return limit if paragraph_end == -1 else paragraph_end
-    for stop in (soft, hard):
-        if stop is not None:
-            return stop
+    if soft is not None:
+        return soft
     if to_end:
         return len(rest)
     raise SectionError(
@@ -198,7 +231,7 @@ def main(argv=None):
     endpoint = f"repos/{args.repo}/issues/{args.issue}"
     try:
         section = args.section_file.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         print(f"replace-state: cannot read {args.section_file}: {error}", file=sys.stderr)
         return 2
     try:

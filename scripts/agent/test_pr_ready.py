@@ -204,6 +204,7 @@ FAKE_GH = textwrap.dedent(
         pulls = json.load(open(os.path.join(root, "pulls.json")))
         print(json.dumps(pulls[min(n, len(pulls) - 1)]))
     elif "/compare/" in endpoint:
+        assert sys.argv[sys.argv.index("--jq") + 1] == "{status, ahead_by, behind_by}", sys.argv
         emit("compare.json")
     elif "/check-runs" in endpoint:
         emit("check-runs.json")

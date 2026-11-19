@@ -46,6 +46,8 @@ for arg in "$1" "$2"; do case "$arg" in -*) usage ;; esac; done
 WORKTREE="$(cd "$1" 2>/dev/null && pwd -P)" || { echo "gates: no such worktree: $1" >&2; exit 2; }
 [ -d "$WORKTREE/src-rust" ] || { echo "gates: $WORKTREE has no src-rust directory" >&2; exit 2; }
 case "$2" in /*) OUT="$2" ;; *) OUT="$PWD/$2" ;; esac
+# Inside the worktree the logs would show up in identity.txt's git status.
+case "$OUT/" in "$WORKTREE"/*) echo "gates: put <outdir> outside the worktree" >&2; exit 2 ;; esac
 
 TOOLCHAIN="${COVEN_TOOLCHAIN:-}"
 if [ -z "$TOOLCHAIN" ]; then
@@ -76,6 +78,8 @@ else
   mkdir -p "$OUT" || exit 2
   SCRATCH_HOME="$(mktemp -d "$OUT/home.XXXXXX")" || exit 2
   trap 'rm -rf "$SCRATCH_HOME"' EXIT
+  # Logs from an earlier run into the same outdir would look current.
+  rm -f "$OUT"/*.log
   : >"$OUT/summary.txt"
   {
     echo "head $(git -C "$WORKTREE" rev-parse HEAD) tree $(git -C "$WORKTREE" rev-parse 'HEAD^{tree}')"
