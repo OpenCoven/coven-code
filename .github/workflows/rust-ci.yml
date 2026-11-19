@@ -1,111 +1,31 @@
+# Throwaway (#568 evidence). Reverted by the next commit on this branch.
 name: Rust CI
 
 on:
-  pull_request:
-    paths:
-      - 'src-rust/**'
-      - 'scripts/test-headless-schemas.py'
-      - 'scripts/run-coven-contract.py'
-      - 'scripts/test-coven-contract-runner.py'
-      - 'scripts/check-release-version.py'
-      - 'scripts/test-release-version.py'
-      - 'scripts/bump-version.py'
-      - 'install.sh'
-      - 'install.ps1'
-      - 'scripts/*checksums*'
-      - 'scripts/package-release.py'
-      - 'scripts/test-package-release.py'
-      - '.github/workflows/patch-release.yml'
-      - '.github/workflows/release.yml'
-      - '.github/workflows/release-build.yml'
-      - '.github/workflows/rust-ci.yml'
   workflow_dispatch:
-
-concurrency:
-  group: rust-ci-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
 
 jobs:
-  installer-checksums:
-    name: Installer checksum fixtures (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Verify archive contents and packaging rejection paths
-        run: python scripts/test-package-release.py
-      - name: Verify canonical release manifests
-        run: node scripts/generate-release-checksums.test.mjs
-      - name: Verify Bash checksum failure boundaries
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          bash -n install.sh scripts/install-sh-checksums.test.sh
-          bash scripts/install-sh-checksums.test.sh
-      - name: Verify PowerShell checksum failure boundaries
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: ./scripts/install-ps1-checksums.test.ps1
-
-  headless-schemas:
-    name: Headless JSON Schema constraints
+  stress-linux:
+    name: Stress 568 (ubuntu)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Verify release version preflight
-        run: python scripts/test-release-version.py
-
-      - name: Validate runtime fixtures and cross-field constraints
-        run: |
-          python -m pip install jsonschema==4.25.1
-          python scripts/test-headless-schemas.py
-
-  rust:
-    name: Format, lint, and test
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
-        with:
-          components: rustfmt, clippy
-
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
-
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -113,198 +33,25 @@ jobs:
             src-rust/target
           key: rust-ci-cargo-${{ runner.os }}-${{ hashFiles('src-rust/Cargo.lock') }}
           restore-keys: rust-ci-cargo-${{ runner.os }}-
-
-      - name: Check formatting
+      - name: Mutations and stress
         working-directory: src-rust
-        run: cargo fmt --all -- --check
+        run: bash ../.github/stress-568/run.sh linux
 
-      - name: Check workspace
-        working-directory: src-rust
-        run: cargo check --workspace --locked
-
-      - name: Run Clippy
-        working-directory: src-rust
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Run tests
-        working-directory: src-rust
-        run: cargo test --workspace --locked --quiet
-
-      # Allocation/work gates are serial because their counting allocator is
-      # process-global. Wall-clock observations stay opt-in and are not CI gates.
-      - name: Next transcript allocation regressions
-        working-directory: src-rust
-        run: cargo test -p claurst-tui --locked --test next_frame_perf -- --ignored --skip measure_active_frames --test-threads=1
-
-      # Contract-freeze fixtures (coven/docs/ENGINE-CONTRACT.md surfaces,
-      # slash-command registry, default keybindings, Classic TUI baselines).
-      # Already covered by the workspace run above; repeated by name so a
-      # contract break is visible as its own failing step.
-      - name: Contract fixtures
-        working-directory: src-rust
-        run: |
-          cargo test -p claurst --locked --test engine_contract
-          cargo test -p claurst-commands --locked --test slash_command_registry
-          cargo test -p claurst-core --locked --test keybindings_golden
-          cargo test -p claurst-tui --locked --test classic_baselines
-
-  computer-use-macos:
-    name: Check optional computer-use support on macOS
+  stress-macos:
+    name: Stress 568 (macos)
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
-        with:
-          components: clippy
-
-      - name: Check computer-use feature and tests
-        working-directory: src-rust
-        run: cargo clippy --package claurst-tools --all-targets --features computer-use --locked -- -D warnings
-
-      - name: Test computer-use parsing without hardware access
-        working-directory: src-rust
-        run: cargo test --package claurst-tools --features computer-use --locked computer_use::tests
-
-      - name: Test native Chat workspace policy
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - name: Mutations and stress
         working-directory: src-rust
         run: |
           scratch="$(mktemp -d)"
           export COVEN_HOME="$scratch/coven"
           export COVEN_CAVE_HOME="$scratch/cave"
           export COVEN_CODE_HOME="$scratch/code"
-          cargo test --package claurst-tools --locked workspace_scope::tests
-          cargo test --package claurst --locked --test workspace_policy
-
-  coven-contract:
-    name: Coven engine contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
-
-      - name: Install system dependencies (engine + coven)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config libopenblas-dev
-
-      - name: Build the engine
-        working-directory: src-rust
-        run: cargo build -p claurst --locked
-
-      - name: Check out OpenCoven/coven
-        uses: actions/checkout@v5
-        with:
-          repository: OpenCoven/coven
-          path: coven-main
-          persist-credentials: false
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Test reverse-contract guard
-        run: python scripts/test-coven-contract-runner.py
-
-      - name: Build consumer contract test executable
-        working-directory: coven-main
-        run: |
-          cargo test -p coven-cli --bin coven --locked --no-run --message-format=json > "$RUNNER_TEMP/coven-test-artifacts.jsonl"
-
-      - name: Run exact consumer engine contract tests
-        run: |
-          python scripts/run-coven-contract.py \
-            --engine "$GITHUB_WORKSPACE/src-rust/target/debug/coven-code" \
-            --cargo-artifacts "$RUNNER_TEMP/coven-test-artifacts.jsonl"
-
-  windows-foreground:
-    name: Windows foreground command cleanup
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
-
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-rust/target
-          key: rust-ci-windows-foreground-${{ hashFiles('src-rust/Cargo.lock') }}
-          restore-keys: rust-ci-windows-foreground-
-
-      # No other job runs Rust tests on Windows; these cover the cmd.exe
-      # fallbacks that both Bash tools use there, their background tasks and
-      # the worktree post-create command (#373).
-      - name: Test cancelled, timed-out and finished foreground commands
-        working-directory: src-rust
-        run: cargo test -p claurst-tools --locked --test foreground_windows
-
-      # Windows has no workspace sandbox, so a scoped launch must be refused
-      # before any model request (#459). The Linux job covers this in its
-      # workspace run; nothing else builds the engine's tests on Windows.
-      # This step runs even if an earlier step failed. A test file that
-      # compiles to no test passes, so require at least one passed test.
-      - name: Test that a scoped launch is refused without a sandbox
-        if: ${{ !cancelled() }}
-        working-directory: src-rust
-        shell: bash
-        run: |
-          cargo test -p claurst --locked --test workspace_policy_unavailable | tee "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
-          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
-
-      # The Job Object module is Windows-only, so its unit tests run only here.
-      # A filter that matches nothing passes, so require at least one test.
-      - name: Test the Job Object resume decision
-        if: ${{ !cancelled() }}
-        working-directory: src-rust
-        shell: bash
-        run: |
-          cargo test -p claurst-tools --locked --lib windows_job | tee "$RUNNER_TEMP/windows-job-tests.txt"
-          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/windows-job-tests.txt"
-
-      # The formatter and post-create command time limits must stop the
-      # command's whole tree (#373). Their unit tests take a short limit, so
-      # they run here rather than in the integration test above. This step
-      # runs even if an earlier step failed, and requires tests from each
-      # module.
-      - name: Test formatter and post-create command time limits
-        if: ${{ !cancelled() }}
-        working-directory: src-rust
-        shell: bash
-        run: |
-          for module in formatter worktree; do
-            cargo test -p claurst-tools --locked --lib "$module::tests" | tee "$RUNNER_TEMP/$module-tests.txt"
-            grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/$module-tests.txt"
-          done
-
-      # cmd.exe must get a command's double quotes exactly as written (#517).
-      # Each of these five crates hands a command line to cmd.exe and has a
-      # test file for it. This step runs even if an earlier step failed, tries
-      # every crate, and requires tests from each.
-      - name: Test that cmd.exe gets a command's quotes as written
-        if: ${{ !cancelled() }}
-        working-directory: src-rust
-        shell: bash
-        run: |
-          failed=0
-          for package in claurst-core claurst-plugins claurst-tools claurst-query claurst-commands; do
-            cargo test -p "$package" --locked --test windows_cmd_quotes | tee "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
-            grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
-          done
-          exit "$failed"
+          bash ../.github/stress-568/run.sh macos
