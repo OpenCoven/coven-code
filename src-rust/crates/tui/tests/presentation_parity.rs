@@ -918,6 +918,9 @@ fn next_draws_permission_requests_itself_unless_another_surface_is_open() {
     // With another input-owning surface open, Classic's precedence applies.
     app.help_overlay.visible = true;
     assert!(claurst_tui::next::delegates_to_classic(&app));
+    // The turn is still running, so the status line shows its elapsed time;
+    // on a busy host the two draws can fall either side of a second.
+    app.turn_start = None;
     assert_eq!(
         draw(&app, UiRenderer::Next, 120, 40),
         draw(&app, UiRenderer::Classic, 120, 40)
@@ -943,6 +946,9 @@ fn next_hands_every_input_owning_surface_to_classic() {
         );
         open(&mut app);
         assert!(claurst_tui::next::delegates_to_classic(&app), "{name}");
+        // The turn is still running, so the status line shows its elapsed
+        // time; on a busy host the two draws can fall either side of a second.
+        app.turn_start = None;
         assert_eq!(
             draw(&app, UiRenderer::Next, 120, 40),
             draw(&app, UiRenderer::Classic, 120, 40),

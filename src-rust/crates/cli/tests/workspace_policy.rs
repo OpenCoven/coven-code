@@ -13,7 +13,7 @@ use std::{
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 mod workspace_policy_fixture;
@@ -331,6 +331,10 @@ fn stop_mid_command(background: bool) {
             logs(&base, "stop")
         ),
     }
+    // Should the delayed write be found below, these tell a runner that
+    // stalled before the stop from a write that landed after it (#568).
+    let stop_delay = stopped_at.elapsed();
+    let stopped_wall = SystemTime::now();
     // Coven's Stop for a harness run: one SIGKILL to the run's process group
     // (`terminate_unix_process_group` in coven-cli's pty_runner.rs).
     killpg(group_of(&engine.0), Signal::SIGKILL)
@@ -349,11 +353,29 @@ fn stop_mid_command(background: bool) {
     // The shell is gone, so nothing should write now. Outlast the command's
     // own delay anyway before looking for its write.
     thread::sleep((stopped_at + Duration::from_secs(6)).saturating_duration_since(Instant::now()));
-    assert!(
-        !late.exists(),
-        "a stopped scoped run still wrote after its delay\n{}",
-        logs(&base, "stop")
-    );
+    if late.exists() {
+        // The cause of one hosted failure here is not established (#568):
+        // say whether the write landed before the stop or after it.
+        let dated = fs::metadata(&late)
+            .and_then(|meta| meta.modified())
+            .map(|written| written.duration_since(stopped_wall));
+        let (when, stalled) = match dated {
+            Ok(Ok(after)) => (format!("{after:?} after the stop"), false),
+            Ok(Err(before)) => (format!("{:?} before the stop", before.duration()), true),
+            Err(error) => (format!("at an unknown time ({error})"), false),
+        };
+        panic!(
+            "a stopped scoped run still wrote after its delay: the stop came {stop_delay:?} \
+             after the test read the shell's PID, and the write is dated {when}{}\n{}",
+            if stalled {
+                "; the test runner stalled before the stop, so the host is likely too busy \
+                 to run this test"
+            } else {
+                ""
+            },
+            logs(&base, "stop")
+        );
+    }
     let frames = frames(&base, "stop");
     assert_eq!(
         admission(&frames),

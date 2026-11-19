@@ -2422,14 +2422,34 @@ mod tests {
 
     #[tokio::test]
     async fn bind_callback_listener_reuses_redirect_port() {
-        let (listener, authority, callback_path) =
-            bind_callback_listener("http://127.0.0.1:14555/callback")
+        // A fixed port collides with any other process that holds it, such
+        // as a second copy of this binary. A port from `oauth_port_alloc` is
+        // freed before the bind, so another test can take it in between: try
+        // a fresh port, at most three times, and only for a bind error.
+        let mut attempts = 0;
+        let (listener, authority, callback_path, redirect_port) = loop {
+            attempts += 1;
+            let redirect_port = oauth_port_alloc().expect("free port");
+            match bind_callback_listener(&format!("http://127.0.0.1:{redirect_port}/callback"))
                 .await
-                .expect("listener should bind");
+            {
+                Ok((listener, authority, callback_path)) => {
+                    break (listener, authority, callback_path, redirect_port)
+                }
+                Err(error)
+                    if attempts < 3
+                        && error
+                            .to_string()
+                            .starts_with("Failed to bind OAuth callback listener") => {}
+                Err(error) => {
+                    panic!("listener should bind on attempt {attempts} of 3: {error:#}")
+                }
+            }
+        };
         let port = listener.local_addr().expect("listener addr").port();
-        assert_eq!(authority, "127.0.0.1:14555");
+        assert_eq!(authority, format!("127.0.0.1:{redirect_port}"));
         assert_eq!(callback_path, "/callback");
-        assert_eq!(port, 14555);
+        assert_eq!(port, redirect_port);
         drop(listener);
     }
 
@@ -2757,17 +2777,37 @@ mod plugin_session_tests {
     async fn plugin_revocation_releases_pending_oauth_callback_listener() {
         let _home = test_support::TokenHomeGuard::new();
         let root = tempfile::tempdir().unwrap();
-        let (plugin, session) = session(root.path(), "http://127.0.0.1:1/token");
-        let redirect_uri = session.redirect_uri.clone();
-        let (opened, ready) = oneshot::channel();
-        let task = tokio::spawn(run_mcp_auth_session_with(session, move |_| {
-            let _ = opened.send(());
-            Ok(())
-        }));
-        timeout(Duration::from_secs(2), ready)
-            .await
-            .unwrap()
-            .unwrap();
+        // `session` takes its callback port from `oauth_port_alloc`, which
+        // frees it before the flow binds it, so on a busy host another test
+        // can take it in between. The flow then fails to bind and drops the
+        // opener without calling it, and the scenario runs again on a fresh
+        // port, at most three times, and only for that bind error.
+        let mut attempts = 0;
+        let (plugin, task, redirect_uri) = loop {
+            attempts += 1;
+            let (plugin, session) = session(root.path(), "http://127.0.0.1:1/token");
+            let redirect_uri = session.redirect_uri.clone();
+            let (opened, ready) = oneshot::channel();
+            let task = tokio::spawn(run_mcp_auth_session_with(session, move |_| {
+                let _ = opened.send(());
+                Ok(())
+            }));
+            if timeout(Duration::from_secs(2), ready)
+                .await
+                .unwrap()
+                .is_ok()
+            {
+                break (plugin, task, redirect_uri);
+            }
+            let error = task.await.unwrap().unwrap_err();
+            assert!(
+                attempts < 3
+                    && error
+                        .to_string()
+                        .starts_with("Failed to bind OAuth callback listener"),
+                "the flow ended before it opened the browser on attempt {attempts} of 3: {error:#}"
+            );
+        };
         plugin.revoke();
         timeout(Duration::from_secs(2), plugin.wait_retired())
             .await
@@ -2775,10 +2815,30 @@ mod plugin_session_tests {
             .unwrap();
         let error = task.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("revoked"));
-        assert!(
-            bind_callback_listener(&redirect_uri).await.is_ok(),
-            "callback socket must be released when retirement completes"
+        // The flow's listener is gone once the callback address can be bound
+        // again; a listener the flow kept would hold it for good. The port is
+        // free once retirement completes, so another test in this process may
+        // bind it first and hold it for a while: retry until that test lets
+        // go, as `valid_callback_exchanges_once_persists_and_cannot_replay`
+        // does.
+        let redirect_url = url::Url::parse(&redirect_uri).unwrap();
+        let callback_address = (
+            redirect_url.host_str().unwrap(),
+            redirect_url.port().unwrap(),
         );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let rebound = TcpListener::bind(callback_address).await;
+            if rebound.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "callback socket must be released when retirement completes; \
+                 it is still in use 10s later: {rebound:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(get_mcp_token("fixture").is_none());
     }
 
