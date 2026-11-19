@@ -9,11 +9,12 @@ so it never drops original issue text. The old section must:
 - be the body's only "## Current state: YYYY-MM-DD" line, after a blank
   line, with no code fence or HTML anywhere before it;
 - hold, after its heading, only plain lines (paragraphs, lists, tables) up to
-  a single-line "**Next action:**" paragraph, followed by a blank line or the
-  end of the body. A heading of any kind (including setext), a rule, a code
-  fence, HTML anywhere in a line, a link or footnote definition, or a lone
-  carriage return is refused, as is a Next action paragraph that runs on to
-  a second line or text after it that starts indented.
+  a single-line "**Next action:**" paragraph, with a blank line before it and
+  a blank line or the end of the body after it. A line that starts a heading
+  (ATX or setext), a rule or a code fence, HTML anywhere in a line, "]:"
+  anywhere (a link or footnote definition, even in a quote or list), or a
+  lone carriage return is refused, as is text right after the section that
+  starts indented.
 The old section ends after that Next action line. Everything after it (the
 original report, acceptance, prompts) is kept byte for byte.
 
@@ -56,6 +57,9 @@ RISKY = re.compile(
 )
 # HTML anywhere in a line: a tag, comment, declaration or processing instruction.
 HTML = re.compile(r"<[A-Za-z!/?]|-->")
+# A link or footnote definition applies to the whole body, even inside a quote
+# or list item, so any "]:" is refused.
+DEFINITION = re.compile(r"\]\s*:")
 
 
 class SectionError(Exception):
@@ -70,7 +74,7 @@ def lines_of(text):
 
 
 def risky(line):
-    return bool(RISKY.match(line) or HTML.search(line))
+    return bool(RISKY.match(line) or HTML.search(line) or DEFINITION.search(line))
 
 
 def section_lines(lines, start, what):
@@ -78,8 +82,17 @@ def section_lines(lines, start, what):
     for index in range(start + 1, len(lines)):
         line = lines[index]
         if NEXT_ACTION.match(line):
-            if HTML.search(line):
-                raise SectionError(f"{what}'s **Next action:** line holds HTML; edit it by hand")
+            if HTML.search(line) or DEFINITION.search(line):
+                raise SectionError(
+                    f"{what}'s **Next action:** line holds HTML or a definition; edit it by hand"
+                )
+            if lines[index - 1].strip():
+                # Without a blank line it continues a list item or paragraph,
+                # which can then join the text after the section.
+                raise SectionError(
+                    f"{what}'s **Next action:** line does not follow a blank line; "
+                    "edit it by hand"
+                )
             following = lines[index + 1] if index + 1 < len(lines) else ""
             if following.strip():
                 raise SectionError(

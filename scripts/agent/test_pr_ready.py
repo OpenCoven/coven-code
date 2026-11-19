@@ -189,6 +189,11 @@ class VerdictTests(unittest.TestCase):
             "NOT READY: workflow TUI Tests: no run on the head yet",
         )
         self.assertEqual(verdict(checks=[run(1, "a")], required=["Rust CI"]), "READY")
+        dispatched = [workflow(120, "TUI Tests", 12, event="workflow_dispatch")]
+        self.assertEqual(
+            verdict(checks=[run(1, "a")], workflows=WORKFLOWS + dispatched, required=["TUI Tests"]),
+            "NOT READY: workflow TUI Tests: no run on the head yet",
+        )
 
     def test_unstable_is_not_ready_and_has_hooks_is_ready(self):
         self.assertEqual(verdict(p=pull(merge_state="unstable"), checks=[run(1, "a")]), "NOT READY: mergeable_state=unstable")

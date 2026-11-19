@@ -100,6 +100,19 @@ class ReplaceSectionTests(unittest.TestCase):
                 replace_state.normalize_section(NEW.replace("New facts.", line))
             self.refused(OLD.replace("Old facts.", line))
 
+    def test_nested_definitions_are_refused(self):
+        for line in ("> [spec]: https://example.com/spec", "- [x]: url", "> [^1]: note", "text [a] : b"):
+            with self.assertRaises(replace_state.SectionError, msg=line):
+                replace_state.normalize_section(NEW.replace("New facts.", line))
+            self.refused(OLD.replace("Old facts.", line) + "\nSee the [spec].\n")
+
+    def test_next_action_must_follow_a_blank_line(self):
+        joined = "## Current state: 2026-11-19\n\n1. a\n2. b\n**Next action:** y\n"
+        with self.assertRaisesRegex(replace_state.SectionError, "blank line"):
+            replace_state.normalize_section(joined)
+        old = "## Current state: 2026-11-01\n\n- a\n**Next action:** x\n\n- tail item\n"
+        self.refused(old, pattern="blank line")
+
     def test_html_heading_inside_a_line_of_the_old_section_is_refused(self):
         self.refused(OLD.replace("Old facts.", "state <h2>Original report</h2>"))
         self.refused(OLD.replace("Old facts.", "a rule <hr> here"))

@@ -194,7 +194,8 @@ def evaluate(
             reasons.append(f"workflow {name}: {result}")
         lines.append(f"  {result:<16} {name}")
     # Right after a push GitHub may not have created every workflow run yet.
-    present = {run.get("name") for run in workflow_runs}
+    # Only the PR's own runs count; a dispatched run is not the PR's check.
+    present = {run.get("name") for run in workflow_runs if run.get("event") in (None, "pull_request")}
     for name in required:
         if name not in present:
             reasons.append(f"workflow {name}: no run on the head yet")
