@@ -16,7 +16,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
+use unicode_width::UnicodeWidthStr;
 
 use crate::command_palette::{rank_commands, CommandPaletteContext, CommandPaletteEntry};
 
@@ -143,7 +144,8 @@ pub enum DotRepeatAction {
         text: String,
         mode_after_insert: bool,
     },
-    /// Simplified: re-delete the same number of chars.
+    /// Simplified: re-delete the same number of characters (grapheme
+    /// clusters).
     DeleteChars { count: usize },
     /// Change: delete + insert.
     Change { deleted: String, inserted: String },
@@ -159,18 +161,83 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Convert a char-index within `text` to a byte offset.
-fn char_idx_to_byte(text: &str, char_idx: usize) -> usize {
-    text.char_indices()
-        .nth(char_idx)
+// The composer edits by extended grapheme cluster, what a reader sees as one
+// character: a letter with its combining marks, an emoji sequence joined by
+// zero-width joiners, a flag (two regional indicators) or a CRLF. Offsets
+// stay byte offsets into the text.
+
+/// `at`, kept inside `text` and moved back onto a scalar boundary.
+fn scalar_floor(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// Where the cluster that starts at `at`, or that `at` is inside, ends.
+fn cluster_end(text: &str, at: usize) -> usize {
+    GraphemeCursor::new(scalar_floor(text, at), text.len(), true)
+        .next_boundary(text, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(text.len())
+}
+
+/// Where the cluster that ends at `at`, or that `at` is inside, starts.
+fn cluster_before(text: &str, at: usize) -> usize {
+    GraphemeCursor::new(scalar_floor(text, at), text.len(), true)
+        .prev_boundary(text, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
+/// `at`, moved back to the start of the cluster it is inside. An offset
+/// already between two clusters is returned as it is.
+fn cluster_start(text: &str, at: usize) -> usize {
+    let at = scalar_floor(text, at);
+    match GraphemeCursor::new(at, text.len(), true).is_boundary(text, 0) {
+        Ok(false) => cluster_before(text, at),
+        _ => at,
+    }
+}
+
+/// The first scalar of each cluster in `text`. Word motions class a cluster
+/// by it, so a letter keeps its combining marks and an emoji sequence or a
+/// flag counts as one symbol.
+fn cluster_leads(text: &str) -> Vec<char> {
+    text.graphemes(true)
+        .filter_map(|cluster| cluster.chars().next())
+        .collect()
+}
+
+/// `cluster_leads` from `from` on, each with the byte offset of its cluster.
+fn cluster_leads_from(text: &str, from: usize) -> Vec<(usize, char)> {
+    text[from..]
+        .grapheme_indices(true)
+        .filter_map(|(b, cluster)| Some((from + b, cluster.chars().next()?)))
+        .collect()
+}
+
+/// Convert a cluster index within `text` to a byte offset.
+fn cluster_idx_to_byte(text: &str, cluster_idx: usize) -> usize {
+    text.grapheme_indices(true)
+        .nth(cluster_idx)
         .map(|(b, _)| b)
         .unwrap_or(text.len())
+}
+
+/// Terminal cells `text` takes when drawn, counted cluster by cluster as
+/// ratatui places it.
+fn cells(text: &str) -> usize {
+    text.graphemes(true).map(UnicodeWidthStr::width).sum()
 }
 
 /// `w` — start of next word.
 fn motion_w(text: &str, cursor: usize) -> usize {
     let rest = &text[cursor..];
-    let chars: Vec<char> = rest.chars().collect();
+    let chars = cluster_leads(rest);
     let n = chars.len();
     if n == 0 {
         return cursor;
@@ -188,7 +255,7 @@ fn motion_w(text: &str, cursor: usize) -> usize {
     while i < n && chars[i].is_whitespace() {
         i += 1;
     }
-    cursor + char_idx_to_byte(rest, i)
+    cursor + cluster_idx_to_byte(rest, i)
 }
 
 /// `b` — start of previous word.
@@ -197,7 +264,7 @@ fn motion_b(text: &str, cursor: usize) -> usize {
         return 0;
     }
     let before = &text[..cursor];
-    let chars: Vec<char> = before.chars().collect();
+    let chars = cluster_leads(before);
     let n = chars.len();
     if n == 0 {
         return 0;
@@ -218,15 +285,12 @@ fn motion_b(text: &str, cursor: usize) -> usize {
             i -= 1;
         }
     }
-    char_idx_to_byte(before, i)
+    cluster_idx_to_byte(before, i)
 }
 
 /// `e` — end of current/next word.
 fn motion_e(text: &str, cursor: usize) -> usize {
-    let chars: Vec<(usize, char)> = text[cursor..]
-        .char_indices()
-        .map(|(b, c)| (cursor + b, c))
-        .collect();
+    let chars = cluster_leads_from(text, cursor);
     let n = chars.len();
     if n == 0 {
         return cursor;
@@ -255,7 +319,7 @@ fn motion_e(text: &str, cursor: usize) -> usize {
 #[allow(non_snake_case)]
 fn motion_W(text: &str, cursor: usize) -> usize {
     let rest = &text[cursor..];
-    let chars: Vec<char> = rest.chars().collect();
+    let chars = cluster_leads(rest);
     let n = chars.len();
     if n == 0 {
         return cursor;
@@ -267,7 +331,7 @@ fn motion_W(text: &str, cursor: usize) -> usize {
     while i < n && chars[i].is_whitespace() {
         i += 1;
     }
-    cursor + char_idx_to_byte(rest, i)
+    cursor + cluster_idx_to_byte(rest, i)
 }
 
 /// `B` — start of previous WORD.
@@ -277,7 +341,7 @@ fn motion_B(text: &str, cursor: usize) -> usize {
         return 0;
     }
     let before = &text[..cursor];
-    let chars: Vec<char> = before.chars().collect();
+    let chars = cluster_leads(before);
     let n = chars.len();
     let mut i = n;
     while i > 0 && chars[i - 1].is_whitespace() {
@@ -286,16 +350,13 @@ fn motion_B(text: &str, cursor: usize) -> usize {
     while i > 0 && !chars[i - 1].is_whitespace() {
         i -= 1;
     }
-    char_idx_to_byte(before, i)
+    cluster_idx_to_byte(before, i)
 }
 
 /// `E` — end of current/next WORD.
 #[allow(non_snake_case)]
 fn motion_E(text: &str, cursor: usize) -> usize {
-    let chars: Vec<(usize, char)> = text[cursor..]
-        .char_indices()
-        .map(|(b, c)| (cursor + b, c))
-        .collect();
+    let chars = cluster_leads_from(text, cursor);
     let n = chars.len();
     if n == 0 {
         return cursor;
@@ -354,6 +415,7 @@ fn motion_gg(text: &str, line_num: usize) -> usize {
 }
 
 /// `f/F/t/T{char}` — find character in text. Returns new cursor byte offset.
+/// A cluster matches by its first scalar, so the cursor lands on a cluster.
 fn motion_find_char(
     text: &str,
     cursor: usize,
@@ -363,21 +425,15 @@ fn motion_find_char(
 ) -> Option<usize> {
     match kind {
         VimFindKind::F | VimFindKind::T => {
-            let search_start = text[cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(b, _)| cursor + b)?;
+            let search_start = cluster_end(text, cursor);
             let mut hits = 0usize;
-            for (b, c) in text[search_start..].char_indices() {
-                if c == target {
+            for (b, cluster) in text[search_start..].grapheme_indices(true) {
+                if cluster.starts_with(target) {
                     hits += 1;
                     if hits == count {
                         let pos = search_start + b;
                         if matches!(kind, VimFindKind::T) {
-                            return text[cursor..pos]
-                                .char_indices()
-                                .last()
-                                .map(|(lb, _)| cursor + lb);
+                            return Some(cluster_before(text, pos));
                         }
                         return Some(pos);
                     }
@@ -388,16 +444,12 @@ fn motion_find_char(
         VimFindKind::BigF | VimFindKind::BigT => {
             let before = &text[..cursor];
             let mut hits = 0usize;
-            for (b, c) in before.char_indices().rev() {
-                if c == target {
+            for (b, cluster) in before.grapheme_indices(true).rev() {
+                if cluster.starts_with(target) {
                     hits += 1;
                     if hits == count {
                         if matches!(kind, VimFindKind::BigT) {
-                            return text[b..]
-                                .char_indices()
-                                .nth(1)
-                                .map(|(nb, _)| b + nb)
-                                .or(Some(cursor));
+                            return Some(cluster_end(text, b));
                         }
                         return Some(b);
                     }
@@ -440,12 +492,9 @@ fn apply_operator_range(
         VimOperator::Yank => (text.to_string(), from),
         VimOperator::Delete => {
             let new_text = format!("{}{}", &text[..from], &text[to..]);
-            let new_cursor =
-                from.min(
-                    new_text
-                        .len()
-                        .saturating_sub(if new_text.is_empty() { 0 } else { 1 }),
-                );
+            // Normal mode rests on a character: the last one if the text
+            // now ends before `from`.
+            let new_cursor = from.min(cluster_before(&new_text, new_text.len()));
             (new_text, new_cursor)
         }
         VimOperator::Change => {
@@ -488,7 +537,7 @@ pub fn apply_vim_key(
         return false;
     }
 
-    match std::mem::replace(pending, VimPendingState::None) {
+    let modified = match std::mem::replace(pending, VimPendingState::None) {
         VimPendingState::None => vim_idle(mode, text, cursor, key, yank_buf, pending, last_find),
         VimPendingState::Count { digits } => vim_count(
             mode, text, cursor, key, yank_buf, pending, last_find, digits,
@@ -522,20 +571,12 @@ pub fn apply_vim_key(
                     if pos >= text.len() {
                         break;
                     }
-                    let clen = text[pos..]
-                        .chars()
-                        .next()
-                        .map(|ch| ch.len_utf8())
-                        .unwrap_or(1);
-                    text.replace_range(pos..pos + clen, &c.to_string());
+                    let end = cluster_end(text, pos);
+                    text.replace_range(pos..end, &c.to_string());
                     pos += c.len_utf8();
                     modified = true;
                 }
-                *cursor =
-                    (*cursor).min(
-                        text.len()
-                            .saturating_sub(if text.is_empty() { 0 } else { 1 }),
-                    );
+                *cursor = (*cursor).min(cluster_before(text, text.len()));
                 modified
             } else {
                 false
@@ -577,7 +618,11 @@ pub fn apply_vim_key(
         | VimPendingState::JumpMark
         | VimPendingState::MacroRecord
         | VimPendingState::MacroReplay => false,
-    }
+    };
+    // A line end can fall inside a CRLF and a line start can be followed by
+    // a combining mark: the cursor never rests inside a cluster.
+    *cursor = cluster_start(text, *cursor);
+    modified
 }
 
 fn vim_idle(
@@ -648,13 +693,7 @@ fn vim_normal(
         }
         "a" => {
             *mode = VimMode::Insert;
-            if *cursor < text.len() {
-                *cursor = text[*cursor..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(b, _)| *cursor + b)
-                    .unwrap_or(text.len());
-            }
+            *cursor = cluster_end(text, *cursor);
             false
         }
         "I" => {
@@ -677,26 +716,13 @@ fn vim_normal(
         // ---- Simple motions ----
         "h" => {
             for _ in 0..n {
-                if *cursor > 0 {
-                    let prev = text[..*cursor]
-                        .char_indices()
-                        .last()
-                        .map(|(b, _)| b)
-                        .unwrap_or(0);
-                    *cursor = prev;
-                }
+                *cursor = cluster_before(text, *cursor);
             }
             false
         }
         "l" => {
             for _ in 0..n {
-                if *cursor < text.len() {
-                    *cursor = text[*cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(b, _)| *cursor + b)
-                        .unwrap_or(text.len());
-                }
+                *cursor = cluster_end(text, *cursor);
             }
             false
         }
@@ -839,29 +865,17 @@ fn vim_normal(
         // ---- Single-char delete/change shortcuts ----
         "x" => {
             if *cursor < text.len() {
-                let clen = text[*cursor..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1);
-                *yank_buf = text[*cursor..*cursor + clen].to_string();
-                text.drain(*cursor..*cursor + clen);
-                *cursor =
-                    (*cursor).min(
-                        text.len()
-                            .saturating_sub(if text.is_empty() { 0 } else { 1 }),
-                    );
+                let end = cluster_end(text, *cursor);
+                *yank_buf = text[*cursor..end].to_string();
+                text.drain(*cursor..end);
+                *cursor = (*cursor).min(cluster_before(text, text.len()));
                 return true;
             }
             false
         }
         "X" => {
             if *cursor > 0 {
-                let prev = text[..*cursor]
-                    .char_indices()
-                    .last()
-                    .map(|(b, _)| b)
-                    .unwrap_or(0);
+                let prev = cluster_before(text, *cursor);
                 *yank_buf = text[prev..*cursor].to_string();
                 text.drain(prev..*cursor);
                 *cursor = prev;
@@ -893,13 +907,9 @@ fn vim_normal(
         }
         "s" => {
             if *cursor < text.len() {
-                let clen = text[*cursor..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1);
-                *yank_buf = text[*cursor..*cursor + clen].to_string();
-                text.drain(*cursor..*cursor + clen);
+                let end = cluster_end(text, *cursor);
+                *yank_buf = text[*cursor..end].to_string();
+                text.drain(*cursor..end);
                 *mode = VimMode::Insert;
                 return true;
             }
@@ -931,17 +941,10 @@ fn vim_normal(
         "p" => {
             if !yank_buf.is_empty() {
                 let buf = yank_buf.clone();
-                let insert_pos = if *cursor < text.len() {
-                    text[*cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(b, _)| *cursor + b)
-                        .unwrap_or(text.len())
-                } else {
-                    text.len()
-                };
+                let insert_pos = cluster_end(text, *cursor);
                 text.insert_str(insert_pos, &buf);
-                *cursor = (insert_pos + buf.len()).saturating_sub(1);
+                // On the last character pasted.
+                *cursor = cluster_before(text, insert_pos + buf.len());
                 return true;
             }
             false
@@ -950,7 +953,7 @@ fn vim_normal(
             if !yank_buf.is_empty() {
                 let buf = yank_buf.clone();
                 text.insert_str(*cursor, &buf);
-                *cursor = (*cursor + buf.len()).saturating_sub(1);
+                *cursor = cluster_before(text, *cursor + buf.len());
                 return true;
             }
             false
@@ -963,12 +966,8 @@ fn vim_normal(
         // ---- Toggle case ----
         "~" => {
             if *cursor < text.len() {
-                let clen = text[*cursor..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1);
-                let old: String = text[*cursor..*cursor + clen].to_string();
+                let end = cluster_end(text, *cursor);
+                let old: String = text[*cursor..end].to_string();
                 let new: String = old
                     .chars()
                     .map(|c| {
@@ -979,14 +978,8 @@ fn vim_normal(
                         }
                     })
                     .collect();
-                text.replace_range(*cursor..*cursor + clen, &new);
-                if *cursor < text.len() {
-                    *cursor = text[*cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(b, _)| *cursor + b)
-                        .unwrap_or(text.len());
-                }
+                text.replace_range(*cursor..end, &new);
+                *cursor = cluster_end(text, *cursor);
                 return true;
             }
             false
@@ -1085,7 +1078,7 @@ fn vim_g(
                     break;
                 }
                 let before = &text[..*cursor];
-                let chars: Vec<char> = before.chars().collect();
+                let chars = cluster_leads(before);
                 let n = chars.len();
                 let mut i = n;
                 while i > 0 && chars[i - 1].is_whitespace() {
@@ -1100,7 +1093,7 @@ fn vim_g(
                 {
                     i -= 1;
                 }
-                *cursor = char_idx_to_byte(before, i - 1);
+                *cursor = cluster_idx_to_byte(before, i - 1);
             }
             false
         }
@@ -1111,7 +1104,7 @@ fn vim_g(
                     break;
                 }
                 let before = &text[..*cursor];
-                let chars: Vec<char> = before.chars().collect();
+                let chars = cluster_leads(before);
                 let n = chars.len();
                 let mut i = n;
                 while i > 0 && chars[i - 1].is_whitespace() {
@@ -1120,7 +1113,7 @@ fn vim_g(
                 while i > 1 && !chars[i - 2].is_whitespace() {
                     i -= 1;
                 }
-                *cursor = char_idx_to_byte(before, i - 1);
+                *cursor = cluster_idx_to_byte(before, i - 1);
             }
             false
         }
@@ -1219,20 +1212,14 @@ fn vim_operator(
         "h" => {
             let mut p = *cursor;
             for _ in 0..count.max(1) {
-                p = p.saturating_sub(1);
+                p = cluster_before(text, p);
             }
             p
         }
         "l" => {
             let mut p = *cursor;
             for _ in 0..count.max(1) {
-                if p < text.len() {
-                    p = text[p..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(b, _)| p + b)
-                        .unwrap_or(text.len());
-                }
+                p = cluster_end(text, p);
             }
             p
         }
@@ -1305,11 +1292,7 @@ fn vim_operator(
     };
     // Inclusive adjustment for e, E, $
     let to_adj = if matches!(key, "e" | "E" | "$") {
-        text[to..]
-            .char_indices()
-            .nth(1)
-            .map(|(b, _)| to + b)
-            .unwrap_or(text.len())
+        cluster_end(text, to)
     } else {
         to
     };
@@ -2128,52 +2111,39 @@ impl PromptInputState {
         self.insert_char('\n');
     }
 
-    /// Delete the character before cursor.
+    /// Delete the character (grapheme cluster) before cursor.
+    ///
+    /// Typing can leave the cursor inside a cluster, when what was typed
+    /// joins the character after it: then only the part before the cursor
+    /// goes.
     pub fn backspace(&mut self) {
         if self.cursor == 0 || self.mode == InputMode::Readonly {
             return;
         }
-        let prev = self.text[..self.cursor]
-            .char_indices()
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        self.text.remove(prev);
+        let prev = cluster_before(&self.text, self.cursor);
+        self.text.drain(prev..self.cursor);
         self.cursor = prev;
         self.update_token_estimate();
     }
 
-    /// Delete the character at cursor.
+    /// Delete the character (grapheme cluster) at cursor.
     pub fn delete(&mut self) {
         if self.cursor >= self.text.len() || self.mode == InputMode::Readonly {
             return;
         }
-        self.text.remove(self.cursor);
+        let next = cluster_end(&self.text, self.cursor);
+        self.text.drain(self.cursor..next);
         self.update_token_estimate();
     }
 
-    /// Move cursor left.
+    /// Move cursor left by one character (grapheme cluster).
     pub fn move_left(&mut self) {
-        if self.cursor > 0 {
-            let prev = self.text[..self.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.cursor = prev;
-        }
+        self.cursor = cluster_before(&self.text, self.cursor);
     }
 
-    /// Move cursor right.
+    /// Move cursor right by one character (grapheme cluster).
     pub fn move_right(&mut self) {
-        if self.cursor < self.text.len() {
-            let next = self.text[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.text.len());
-            self.cursor = next;
-        }
+        self.cursor = cluster_end(&self.text, self.cursor);
     }
 
     /// Navigate history up (older).
@@ -2273,7 +2243,7 @@ impl PromptInputState {
             return;
         }
         let before = &self.text[..self.cursor];
-        let chars: Vec<char> = before.chars().collect();
+        let chars = cluster_leads(before);
         let mut idx = chars.len();
         while idx > 0 && chars[idx - 1].is_whitespace() {
             idx -= 1;
@@ -2290,7 +2260,7 @@ impl PromptInputState {
                 idx -= 1;
             }
         }
-        let kill_start = char_idx_to_byte(before, idx);
+        let kill_start = cluster_idx_to_byte(before, idx);
         if kill_start < self.cursor {
             let killed = self.text.drain(kill_start..self.cursor).collect::<String>();
             self.kill_ring.push(killed);
@@ -2328,7 +2298,7 @@ impl PromptInputState {
             return;
         }
         let before = &self.text[..self.cursor];
-        let chars: Vec<char> = before.chars().collect();
+        let chars = cluster_leads(before);
         let mut idx = chars.len();
         while idx > 0 && chars[idx - 1].is_whitespace() {
             idx -= 1;
@@ -2345,7 +2315,7 @@ impl PromptInputState {
                 idx -= 1;
             }
         }
-        let delete_start = char_idx_to_byte(before, idx);
+        let delete_start = cluster_idx_to_byte(before, idx);
         if delete_start < self.cursor {
             self.text.drain(delete_start..self.cursor);
             self.cursor = delete_start;
@@ -2360,7 +2330,7 @@ impl PromptInputState {
             return;
         }
         let rest = &self.text[self.cursor..];
-        let chars: Vec<char> = rest.chars().collect();
+        let chars = cluster_leads(rest);
         let mut idx = 0;
         while idx < chars.len() && chars[idx].is_whitespace() {
             idx += 1;
@@ -2377,7 +2347,7 @@ impl PromptInputState {
                 idx += 1;
             }
         }
-        let delete_end = self.cursor + char_idx_to_byte(rest, idx);
+        let delete_end = self.cursor + cluster_idx_to_byte(rest, idx);
         if delete_end > self.cursor {
             self.text.drain(self.cursor..delete_end);
             self.update_token_estimate();
@@ -2391,7 +2361,7 @@ impl PromptInputState {
             return;
         }
         let before = &self.text[..self.cursor];
-        let chars: Vec<char> = before.chars().collect();
+        let chars = cluster_leads(before);
         let mut idx = chars.len();
         while idx > 0 && chars[idx - 1].is_whitespace() {
             idx -= 1;
@@ -2408,7 +2378,7 @@ impl PromptInputState {
                 idx -= 1;
             }
         }
-        self.cursor = char_idx_to_byte(before, idx);
+        self.cursor = cluster_idx_to_byte(before, idx);
     }
 
     /// Alt+F: Jump to next word.
@@ -2417,7 +2387,7 @@ impl PromptInputState {
             return;
         }
         let rest = &self.text[self.cursor..];
-        let chars: Vec<char> = rest.chars().collect();
+        let chars = cluster_leads(rest);
         let mut idx = 0;
         if idx < chars.len() {
             if is_word_char(chars[idx]) {
@@ -2434,7 +2404,7 @@ impl PromptInputState {
         while idx < chars.len() && chars[idx].is_whitespace() {
             idx += 1;
         }
-        self.cursor += char_idx_to_byte(rest, idx);
+        self.cursor += cluster_idx_to_byte(rest, idx);
     }
 
     /// Alt+D: Delete word after cursor.
@@ -2443,7 +2413,7 @@ impl PromptInputState {
             return;
         }
         let rest = &self.text[self.cursor..];
-        let chars: Vec<char> = rest.chars().collect();
+        let chars = cluster_leads(rest);
         let mut idx = 0;
         while idx < chars.len() && chars[idx].is_whitespace() {
             idx += 1;
@@ -2460,7 +2430,7 @@ impl PromptInputState {
                 idx += 1;
             }
         }
-        let delete_end = self.cursor + char_idx_to_byte(rest, idx);
+        let delete_end = self.cursor + cluster_idx_to_byte(rest, idx);
         if delete_end > self.cursor {
             self.text.drain(self.cursor..delete_end);
             self.update_token_estimate();
@@ -2502,6 +2472,9 @@ impl PromptInputState {
             self.vim_pending = VimPendingState::None;
             self.visual_anchor = None;
             self.normalize();
+            // Typing can leave the cursor inside a cluster; Normal mode acts
+            // on whole clusters, so it starts on the edge before it.
+            self.cursor = cluster_start(&self.text, self.cursor);
             return;
         }
 
@@ -2624,18 +2597,10 @@ impl PromptInputState {
                     "p" => {
                         // Paste from register after cursor
                         if let Some(buf) = self.paste_from_register(reg) {
-                            let insert_pos = if self.cursor < self.text.len() {
-                                self.text[self.cursor..]
-                                    .char_indices()
-                                    .nth(1)
-                                    .map(|(b, _)| self.cursor + b)
-                                    .unwrap_or(self.text.len())
-                            } else {
-                                self.text.len()
-                            };
+                            let insert_pos = cluster_end(&self.text, self.cursor);
                             self.push_undo();
                             self.text.insert_str(insert_pos, &buf);
-                            self.cursor = (insert_pos + buf.len()).saturating_sub(1);
+                            self.cursor = cluster_before(&self.text, insert_pos + buf.len());
                             self.vim_pending = VimPendingState::None;
                             self.normalize();
                             return;
@@ -2712,12 +2677,8 @@ impl PromptInputState {
                         self.push_undo();
                         let mut deleted = 0usize;
                         while deleted < count && self.cursor < self.text.len() {
-                            let clen = self.text[self.cursor..]
-                                .chars()
-                                .next()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(1);
-                            self.text.drain(self.cursor..self.cursor + clen);
+                            let end = cluster_end(&self.text, self.cursor);
+                            self.text.drain(self.cursor..end);
                             deleted += 1;
                         }
                         self.normalize();
@@ -2736,13 +2697,8 @@ impl PromptInputState {
                     DotRepeatAction::ReplaceChar { ch } => {
                         if self.cursor < self.text.len() {
                             self.push_undo();
-                            let clen = self.text[self.cursor..]
-                                .chars()
-                                .next()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(1);
-                            self.text
-                                .replace_range(self.cursor..self.cursor + clen, &ch.to_string());
+                            let end = cluster_end(&self.text, self.cursor);
+                            self.text.replace_range(self.cursor..end, &ch.to_string());
                             self.normalize();
                         }
                         return;
@@ -2859,7 +2815,7 @@ impl PromptInputState {
                     "d" | "x" => {
                         self.push_undo();
                         self.yank_buf = self.text[sel_start..sel_end].to_string();
-                        let char_count = self.yank_buf.chars().count();
+                        let char_count = self.yank_buf.graphemes(true).count();
                         self.text.drain(sel_start..sel_end);
                         self.cursor = sel_start.min(self.text.len());
                         self.vim_mode = VimMode::Normal;
@@ -2891,11 +2847,7 @@ impl PromptInputState {
             if let Some(anchor) = self.visual_anchor {
                 let from = anchor.min(self.cursor);
                 let to_excl = anchor.max(self.cursor);
-                let to = self.text[to_excl..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(b, _)| to_excl + b)
-                    .unwrap_or(self.text.len());
+                let to = cluster_end(&self.text, to_excl);
                 match key {
                     "y" => {
                         self.yank_buf = self.text[from..to].to_string();
@@ -2907,7 +2859,7 @@ impl PromptInputState {
                     "d" | "x" => {
                         self.push_undo();
                         self.yank_buf = self.text[from..to].to_string();
-                        let char_count = self.yank_buf.chars().count();
+                        let char_count = self.yank_buf.graphemes(true).count();
                         self.text.drain(from..to);
                         self.cursor = from.min(self.text.len());
                         self.vim_mode = VimMode::Normal;
@@ -2937,11 +2889,7 @@ impl PromptInputState {
             if let Some(anchor) = self.visual_anchor {
                 let from = anchor.min(self.cursor);
                 let to_excl = anchor.max(self.cursor);
-                let to = self.text[to_excl..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(b, _)| to_excl + b)
-                    .unwrap_or(self.text.len());
+                let to = cluster_end(&self.text, to_excl);
                 match key {
                     "y" => {
                         self.yank_buf = self.text[from..to].to_string();
@@ -2954,7 +2902,7 @@ impl PromptInputState {
                         self.push_undo();
                         self.yank_buf = self.text[from..to].to_string();
                         // Count chars to delete BEFORE mutating text
-                        let char_count = self.yank_buf.chars().count();
+                        let char_count = self.yank_buf.graphemes(true).count();
                         self.text.drain(from..to);
                         self.cursor = from.min(self.text.len());
                         self.vim_mode = VimMode::Normal;
@@ -3075,14 +3023,8 @@ impl PromptInputState {
     /// Move cursor to the position recorded for mark `name`, if the text still matches.
     pub fn jump_to_mark(&mut self, name: char) {
         if let Some((_saved_text, saved_cursor)) = self.vim_marks.get(&name).cloned() {
-            // Clamp to current text length in case text changed.
-            let target = saved_cursor.min(self.text.len());
-            // Ensure we land on a char boundary.
-            let mut pos = target;
-            while pos > 0 && !self.text.is_char_boundary(pos) {
-                pos -= 1;
-            }
-            self.cursor = pos;
+            // The text may have changed: stay inside it and on a character.
+            self.cursor = cluster_start(&self.text, saved_cursor);
         }
     }
 
@@ -3149,25 +3091,26 @@ impl PromptInputState {
         }
         let start = if skip > 0 {
             // Start after the current character to avoid re-matching same position
-            let next = self.text[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(b, _)| self.cursor + b)
-                .unwrap_or(0);
-            next
+            let next = cluster_end(&self.text, self.cursor);
+            if next < self.text.len() {
+                next
+            } else {
+                0
+            }
         } else {
             self.cursor
         };
         // Search from `start` forward, then wrap around
         let text_lc = self.text.to_lowercase();
         let pat_lc = pattern.to_lowercase();
+        // A match can start with a combining mark: rest on its character.
         if let Some(pos) = text_lc[start..].find(&pat_lc) {
-            self.cursor = start + pos;
+            self.cursor = cluster_start(&self.text, start + pos);
             return;
         }
         // Wrap: search from beginning
         if let Some(pos) = text_lc.find(&pat_lc) {
-            self.cursor = pos;
+            self.cursor = cluster_start(&self.text, pos);
         }
     }
 
@@ -3181,12 +3124,12 @@ impl PromptInputState {
         // Find all occurrences, pick the last one before cursor
         let before = &text_lc[..self.cursor];
         if let Some(pos) = before.rfind(&pat_lc) {
-            self.cursor = pos;
+            self.cursor = cluster_start(&self.text, pos);
             return;
         }
         // Wrap: find last occurrence in whole text
         if let Some(pos) = text_lc.rfind(&pat_lc) {
-            self.cursor = pos;
+            self.cursor = cluster_start(&self.text, pos);
         }
     }
 
@@ -3444,30 +3387,32 @@ impl PromptInputState {
         if width == 0 {
             return (0, 0);
         }
-        let mut byte = 0usize;
+        // Snapped against the whole text, so a cursor between the two halves
+        // of a CRLF counts as being before it.
+        let cursor = cluster_start(&self.text, self.cursor);
         let mut row = 0usize;
-        for line in self.text.split('\n') {
-            let line_end = byte + line.len();
-            if self.cursor <= line_end {
-                let intra_byte = self.cursor - byte;
-                let intra_byte = intra_byte.min(line.len());
-                // walk to char-boundary
-                let mut b = intra_byte;
-                while b > 0 && !line.is_char_boundary(b) {
-                    b -= 1;
-                }
-                let display_col = UnicodeWidthStr::width(&line[..b]);
-                let chunk_idx = if display_col == 0 {
-                    0
+        for (byte, line) in drawn_lines(&self.text) {
+            let rows = wrap_ranges(line, width);
+            if cursor <= byte + line.len() {
+                let at = cursor - byte;
+                // The row the cursor is drawn on: an offset where one row
+                // ends and the next starts belongs to the next.
+                let (index, start) = rows
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, range)| range.start <= at)
+                    .map_or((0, 0), |(index, range)| (index, range.start));
+                let col = cells(&line[start..at]);
+                // After a row that is full to the last cell, the cursor
+                // counts as the start of a row below it.
+                return if col >= width {
+                    (row + index + 1, 0)
                 } else {
-                    display_col / width
+                    (row + index, col)
                 };
-                let chunk_col = display_col % width;
-                return (row + chunk_idx, chunk_col);
             }
-            let chunks = wrap_line(line, width).len().max(1);
-            row += chunks;
-            byte = line_end + 1; // newline
+            row += rows.len();
         }
         (row.saturating_sub(1), 0)
     }
@@ -3505,38 +3450,36 @@ impl PromptInputState {
         if self.text.is_empty() || width == 0 {
             return 1;
         }
-        let mut total = 0usize;
-        for line in self.text.split('\n') {
-            total += wrap_line(line, width).len().max(1);
-        }
-        total.max(1)
+        drawn_lines(&self.text)
+            .map(|(_, line)| wrap_ranges(line, width).len())
+            .sum::<usize>()
+            .max(1)
     }
 
     fn set_cursor_at_visual(&mut self, target_row: usize, target_col: usize, width: usize) {
         if width == 0 {
             return;
         }
-        let mut byte = 0usize;
         let mut row = 0usize;
-        for line in self.text.split('\n').collect::<Vec<_>>() {
-            let chunks = wrap_line(line, width).len().max(1);
-            if target_row < row + chunks {
-                let intra_chunk = target_row - row;
-                let chunk_char_start = intra_chunk * width;
-                let line_chars: Vec<(usize, char)> = line.char_indices().collect();
-                let chunk_chars_len = line_chars.len().saturating_sub(chunk_char_start).min(width);
-                let col = target_col.min(chunk_chars_len);
-                let target_char_idx = chunk_char_start + col;
-                let intra_byte = line_chars
-                    .get(target_char_idx)
-                    .map(|(b, _)| *b)
-                    .unwrap_or(line.len());
-                self.cursor = byte + intra_byte;
+        for (byte, line) in drawn_lines(&self.text) {
+            let rows = wrap_ranges(line, width);
+            if let Some(range) = rows.get(target_row - row) {
+                // The last character edge at or before the target column,
+                // so the cursor never lands inside a wide character.
+                let mut at = range.start;
+                let mut col = 0usize;
+                for cluster in line[range.clone()].graphemes(true) {
+                    col += UnicodeWidthStr::width(cluster);
+                    if col > target_col {
+                        break;
+                    }
+                    at += cluster.len();
+                }
+                self.cursor = byte + at;
                 self.history_pos = None;
                 return;
             }
-            row += chunks;
-            byte += line.len() + 1; // newline
+            row += rows.len();
         }
         self.cursor = self.text.len();
         self.history_pos = None;
@@ -3587,13 +3530,7 @@ pub fn input_height(state: &PromptInputState, text_width: u16) -> u16 {
     } else if text_width == 0 {
         state.text.lines().count().max(1)
     } else {
-        let mut total = 0usize;
-        let logical: Vec<&str> = state.text.split('\n').collect();
-        for line in &logical {
-            let chunks = wrap_line(line, text_width as usize).len().max(1);
-            total += chunks;
-        }
-        total.max(1)
+        state.visual_row_count(text_width as usize)
     };
     // top-line + text rows + breathing room + underline, capped so the prompt
     // never eats more than ~half the screen.
@@ -3607,34 +3544,52 @@ pub fn input_height(state: &PromptInputState, text_width: u16) -> u16 {
     }
 }
 
+/// Each logical line of `text`, with the byte offset it starts at, as the
+/// composer draws it: split on `\n`, leaving out the `\r` of a CRLF as
+/// `str::lines` does. A trailing newline yields a last, empty line, where the
+/// cursor can sit.
+fn drawn_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut next = 0usize;
+    text.split('\n').map(move |line| {
+        let start = next;
+        next += line.len() + 1; // newline
+        let ends_with_newline = next <= text.len();
+        let drawn = match line.strip_suffix('\r') {
+            Some(drawn) if ends_with_newline => drawn,
+            _ => line,
+        };
+        (start, drawn)
+    })
+}
+
+/// The byte range of each visual row of a logical line wrapped to `width`
+/// terminal cells. A grapheme cluster is never split: one that does not fit
+/// starts the next row. Empty input yields a single empty row so the caller
+/// can still place a cursor, and a width of 0 never wraps.
+fn wrap_ranges(line: &str, width: usize) -> Vec<std::ops::Range<usize>> {
+    let mut rows = Vec::new();
+    let mut start = 0usize;
+    let mut used = 0usize;
+    for (at, cluster) in line.grapheme_indices(true) {
+        let cluster_width = UnicodeWidthStr::width(cluster);
+        if width > 0 && used > 0 && used + cluster_width > width {
+            rows.push(start..at);
+            start = at;
+            used = 0;
+        }
+        used += cluster_width;
+    }
+    rows.push(start..line.len());
+    rows
+}
+
 /// Wrap a logical line into visual chunks of `width` terminal cells. Empty
 /// input yields a single empty chunk so the caller can still place a cursor.
 pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![line.to_string()];
-    }
-    if line.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-
-    for ch in line.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if current_width > 0 && current_width + ch_width > width {
-            out.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push(ch);
-        current_width += ch_width;
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-
-    out
+    wrap_ranges(line, width)
+        .into_iter()
+        .map(|row| line[row].to_string())
+        .collect()
 }
 
 /// Render the prompt input widget in the same low-chrome style as Coven Code:
@@ -3775,63 +3730,38 @@ pub fn render_prompt_input(
     };
 
     // Wrap each logical line into visual rows that fit `available_width`,
-    // and remember the (logical_idx, intra_line_display_col) for each row
-    // so we can later compute where the cursor lives.
+    // and remember the (logical_idx, byte offset in that line) each row
+    // starts at so we can later compute where the cursor lives.
     let mut visual_rows: Vec<(usize, usize, String)> = Vec::new();
     for (li, line_text) in logical_lines.iter().enumerate() {
-        let chunks = wrap_line(line_text, available_width.max(1));
-        let mut col_offset = 0usize;
-        for chunk in chunks {
-            let chunk_len = UnicodeWidthStr::width(chunk.as_str());
-            visual_rows.push((li, col_offset, chunk));
-            col_offset += chunk_len;
+        for row in wrap_ranges(line_text, available_width.max(1)) {
+            visual_rows.push((li, row.start, line_text[row].to_string()));
         }
     }
 
-    // Compute cursor's visual (row, col) within `visual_rows`.
-    // We map state.cursor (a byte offset into state.text) to
-    // (logical_line, display column).
-    let cursor_pos: Option<(usize, usize)> = if focused && !state.text.is_empty() {
-        let mut byte_idx = 0usize;
-        let mut found: Option<(usize, usize)> = None;
-        'outer: for (li, line_text) in logical_lines.iter().enumerate() {
-            let line_bytes = line_text.len();
-            // The +1 accounts for the '\n' between logical lines (last line has no trailing \n).
-            let line_end_byte = byte_idx + line_bytes;
-            if state.cursor <= line_end_byte {
-                let intra_byte = state.cursor - byte_idx;
-                let display_col = UnicodeWidthStr::width(&line_text[..intra_byte.min(line_bytes)]);
-                found = Some((li, display_col));
-                break 'outer;
-            }
-            byte_idx = line_end_byte + 1; // newline
-        }
-        // Fallback: cursor at end of text.
-        found.or_else(|| {
-            let li = logical_lines.len().saturating_sub(1);
-            let col = logical_lines
-                .get(li)
-                .map(|s| UnicodeWidthStr::width(s.as_str()))
-                .unwrap_or(0);
-            Some((li, col))
-        })
-    } else if focused && state.text.is_empty() {
-        Some((0, 0))
+    // Map state.cursor (a byte offset into state.text) to (logical_line,
+    // byte offset in that line). A cursor inside a character is drawn at its
+    // start.
+    let cursor_pos: Option<(usize, usize)> = if focused {
+        let cursor = cluster_start(&state.text, state.cursor);
+        let before = &state.text[..cursor];
+        let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+        Some((before.matches('\n').count(), cursor - line_start))
     } else {
         None
     };
 
-    let cursor_visual: Option<(usize, usize)> = cursor_pos.and_then(|(li, col)| {
-        // Find the visual row whose logical_idx == li and contains `col`.
+    let cursor_visual: Option<(usize, usize)> = cursor_pos.and_then(|(li, at)| {
+        // Find the visual row whose logical_idx == li and contains `at`.
         let mut last_match: Option<(usize, usize)> = None;
-        for (vi, (row_li, row_col_start, chunk)) in visual_rows.iter().enumerate() {
+        for (vi, (row_li, row_start, chunk)) in visual_rows.iter().enumerate() {
             if *row_li != li {
                 continue;
             }
-            let chunk_len = UnicodeWidthStr::width(chunk.as_str());
-            let row_col_end = row_col_start + chunk_len;
-            if col >= *row_col_start && col <= row_col_end {
-                last_match = Some((vi, col - row_col_start));
+            if at >= *row_start && at <= row_start + chunk.len() {
+                // The column counts cells the way the row is drawn.
+                let drawn = chunk.get(..at - row_start).unwrap_or(chunk);
+                last_match = Some((vi, cells(drawn)));
             }
         }
         last_match
@@ -5904,5 +5834,563 @@ mod tests {
         s.accept_suggestion();
         assert_eq!(s.text, "@src/main.rs more text");
         assert_eq!(s.cursor, "@src/main.rs".len());
+    }
+
+    // ---- Grapheme clusters (#410) ---------------------------------------
+
+    // One user-perceived character each, written as escapes so no invisible
+    // character hides in this file.
+    /// Three emoji joined by zero-width joiners.
+    const FAMILY: &str = "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    /// Two regional indicators each.
+    const FLAG_JP: &str = "\u{1F1EF}\u{1F1F5}";
+    const FLAG_DE: &str = "\u{1F1E9}\u{1F1EA}";
+    /// A base letter and a combining mark.
+    const E_ACUTE: &str = "e\u{301}";
+    const A_TWO_MARKS: &str = "a\u{308}\u{304}";
+    const CRLF: &str = "\r\n";
+    const CLUSTERS: [&str; 5] = [FAMILY, FLAG_JP, E_ACUTE, A_TWO_MARKS, CRLF];
+    /// The clusters that stay on one line.
+    const DRAWN_CLUSTERS: [&str; 4] = [FAMILY, FLAG_JP, E_ACUTE, A_TWO_MARKS];
+
+    fn composer(text: &str, cursor: usize) -> PromptInputState {
+        let mut s = PromptInputState::new();
+        s.text = text.to_string();
+        s.cursor = cursor;
+        s
+    }
+
+    fn vim_composer(text: &str, cursor: usize) -> PromptInputState {
+        let mut s = composer(text, cursor);
+        s.vim_enabled = true;
+        s.vim_mode = VimMode::Normal;
+        s
+    }
+
+    /// The cursor after each of `keys`, sent in order.
+    fn vim_cursors(s: &mut PromptInputState, keys: &[&str]) -> Vec<usize> {
+        keys.iter()
+            .map(|key| {
+                s.vim_command(key);
+                s.cursor
+            })
+            .collect()
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_grapheme_cluster() {
+        for cluster in CLUSTERS {
+            let mut s = composer(&format!("a{cluster}b"), 1 + cluster.len());
+            s.backspace();
+            assert_eq!((s.text.as_str(), s.cursor), ("ab", 1), "{cluster:?}");
+            assert_eq!(s.cursor_visual_pos(40), (0, 1), "{cluster:?}");
+        }
+    }
+
+    #[test]
+    fn delete_removes_a_whole_grapheme_cluster() {
+        for cluster in CLUSTERS {
+            let mut s = composer(&format!("a{cluster}b"), 1);
+            s.delete();
+            assert_eq!((s.text.as_str(), s.cursor), ("ab", 1), "{cluster:?}");
+            assert_eq!(s.cursor_visual_pos(40), (0, 1), "{cluster:?}");
+        }
+    }
+
+    #[test]
+    fn left_and_right_step_over_a_whole_grapheme_cluster() {
+        for cluster in CLUSTERS {
+            let text = format!("a{cluster}b");
+            let after = 1 + cluster.len();
+            let mut s = composer(&text, text.len());
+            let mut seen = Vec::new();
+            for _ in 0..4 {
+                s.move_left();
+                seen.push(s.cursor);
+            }
+            assert_eq!(seen, [after, 1, 0, 0], "left over {cluster:?}");
+            seen.clear();
+            for _ in 0..4 {
+                s.move_right();
+                seen.push(s.cursor);
+            }
+            assert_eq!(
+                seen,
+                [1, after, text.len(), text.len()],
+                "right over {cluster:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adjacent_flags_are_edited_one_flag_at_a_time() {
+        let both = format!("{FLAG_JP}{FLAG_DE}");
+        let mut s = composer(&both, both.len());
+        s.backspace();
+        assert_eq!((s.text.as_str(), s.cursor), (FLAG_JP, FLAG_JP.len()));
+
+        let mut s = composer(&both, 0);
+        s.move_right();
+        assert_eq!(s.cursor, FLAG_JP.len());
+        s.move_left();
+        s.delete();
+        assert_eq!((s.text.as_str(), s.cursor), (FLAG_DE, 0));
+    }
+
+    #[test]
+    fn cursor_column_counts_each_cluster_once() {
+        for cluster in DRAWN_CLUSTERS {
+            let cells = UnicodeWidthStr::width(cluster);
+            let text = format!("a{cluster}b");
+            let mut s = composer(&text, text.len());
+            assert_eq!(s.cursor_visual_pos(40), (0, cells + 2), "{cluster:?}");
+            s.move_left();
+            assert_eq!(s.cursor_visual_pos(40), (0, cells + 1), "{cluster:?}");
+            s.move_left();
+            assert_eq!(s.cursor_visual_pos(40), (0, 1), "{cluster:?}");
+            s.move_right();
+            assert_eq!(s.cursor_visual_pos(40), (0, cells + 1), "{cluster:?}");
+        }
+    }
+
+    #[test]
+    fn word_motions_keep_a_letter_and_its_mark_in_one_word() {
+        // "café bar" with a decomposed é: the mark is not a word character
+        // on its own.
+        let text = format!("caf{E_ACUTE} bar");
+        let bar = text.len() - "bar".len();
+        let mut s = composer(&text, text.len());
+        s.move_word_backward();
+        assert_eq!(s.cursor, bar);
+        s.move_word_backward();
+        assert_eq!(s.cursor, 0);
+        s.move_word_forward();
+        assert_eq!(s.cursor, bar);
+        assert_eq!(s.cursor_visual_pos(40), (0, 5));
+        s.move_word_forward();
+        assert_eq!(s.cursor, text.len());
+    }
+
+    #[test]
+    fn word_deletes_keep_a_letter_and_its_mark_together() {
+        let word = format!("caf{E_ACUTE}");
+
+        let mut s = composer(&format!("x {word}"), 2 + word.len());
+        s.delete_word_backward();
+        assert_eq!((s.text.as_str(), s.cursor), ("x ", 2));
+
+        let mut s = composer(&format!("x {word}"), 2 + word.len());
+        s.kill_word_backward();
+        assert_eq!((s.text.as_str(), s.cursor), ("x ", 2));
+        assert_eq!(s.kill_ring.get_current(), Some(word.as_str()));
+
+        let mut s = composer(&format!("{word} x"), 0);
+        s.delete_word_forward();
+        assert_eq!((s.text.as_str(), s.cursor), (" x", 0));
+
+        let mut s = composer(&format!("{word} x"), 0);
+        s.delete_word_at_cursor();
+        assert_eq!((s.text.as_str(), s.cursor), (" x", 0));
+    }
+
+    #[test]
+    fn word_motions_beside_an_emoji_or_flag_stop_at_its_edges() {
+        for cluster in [FAMILY, FLAG_JP] {
+            let text = format!("hi{cluster}yo");
+            let after = 2 + cluster.len();
+
+            let mut s = composer(&text, text.len());
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                s.move_word_backward();
+                seen.push(s.cursor);
+            }
+            assert_eq!(seen, [after, 2, 0], "backward over {cluster:?}");
+            seen.clear();
+            for _ in 0..3 {
+                s.move_word_forward();
+                seen.push(s.cursor);
+            }
+            assert_eq!(seen, [2, after, text.len()], "forward over {cluster:?}");
+
+            let mut s = composer(&text, after);
+            s.delete_word_backward();
+            assert_eq!((s.text.as_str(), s.cursor), ("hiyo", 2), "{cluster:?}");
+            let mut s = composer(&text, 2);
+            s.delete_word_forward();
+            assert_eq!((s.text.as_str(), s.cursor), ("hiyo", 2), "{cluster:?}");
+        }
+    }
+
+    #[test]
+    fn wrapping_never_splits_a_cluster() {
+        for cluster in DRAWN_CLUSTERS {
+            let line = format!("ab{cluster}{cluster}cd");
+            let len = cluster.len();
+            let edges = [0, 1, 2, 2 + len, 2 + 2 * len, 3 + 2 * len, 4 + 2 * len];
+            for width in 1..=7 {
+                let rows = wrap_line(&line, width);
+                assert_eq!(rows.concat(), line, "{cluster:?} at {width}");
+                let mut end = 0;
+                for row in &rows {
+                    end += row.len();
+                    assert!(edges.contains(&end), "{cluster:?} at {width}: {rows:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_position_follows_the_wrapped_rows() {
+        // The flag is two cells wide and does not fit after "abc" in four
+        // cells, so it starts the second row and leaves a cell unused.
+        let text = format!("abc{FLAG_JP}d");
+        assert_eq!(UnicodeWidthStr::width(FLAG_JP), 2);
+        assert_eq!(
+            wrap_line(&text, 4),
+            ["abc".to_string(), format!("{FLAG_JP}d")]
+        );
+
+        let mut s = composer(&text, text.len());
+        assert_eq!(s.cursor_visual_pos(4), (1, 3));
+        s.move_left();
+        assert_eq!(s.cursor_visual_pos(4), (1, 2));
+        s.move_left();
+        assert_eq!(s.cursor_visual_pos(4), (1, 0));
+        s.move_left();
+        assert_eq!(s.cursor_visual_pos(4), (0, 2));
+    }
+
+    #[test]
+    fn moving_up_and_down_lands_on_a_cluster_edge() {
+        let second = format!("a{FLAG_JP}b");
+        let text = format!("abc\n{second}");
+        let line = "abc\n".len();
+
+        // Column 2 of the second line is the middle of the flag: the cursor
+        // goes to the edge before it.
+        let mut s = composer(&text, 2);
+        assert!(s.move_visual_down(40));
+        assert_eq!(s.cursor, line + 1);
+        assert_eq!(s.cursor_visual_pos(40), (1, 1));
+
+        let mut s = composer(&text, 3);
+        assert!(s.move_visual_down(40));
+        assert_eq!(s.cursor, line + 1 + FLAG_JP.len());
+        assert!(s.move_visual_up(40));
+        assert_eq!(s.cursor, 3);
+    }
+
+    #[test]
+    fn moving_up_and_down_stops_before_a_crlf() {
+        // The CR is not drawn, so column 3 of "ab\r" is past its end: the
+        // cursor goes before the CRLF, never between its two halves.
+        let text = "abcd\nab\r\nx";
+        let second = "abcd\n".len();
+        let mut s = composer(text, 3);
+        assert!(s.move_visual_down(40));
+        assert_eq!(s.cursor, second + 2);
+        assert_eq!(s.cursor_visual_pos(40), (1, 2));
+        assert!(s.move_visual_down(40));
+        assert_eq!(s.cursor, text.len());
+        assert!(s.move_visual_up(40));
+        assert_eq!(s.cursor, second + 1);
+        assert!(s.move_visual_up(40));
+        assert_eq!(s.cursor, 1);
+
+        // A cursor left between the CR and the LF counts as before them.
+        let s = composer(text, second + 3);
+        assert_eq!(s.cursor_visual_pos(40), (1, 2));
+        assert_eq!(s.visual_row_count(2), 4);
+    }
+
+    #[test]
+    fn a_tab_counts_as_the_cells_it_is_drawn_with() {
+        let text = "a\tb";
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        let s = composer(text, 2);
+        render_prompt_input(
+            &s,
+            area,
+            &mut buf,
+            false,
+            InputMode::Default,
+            Color::Blue,
+            false,
+        );
+        let b = (0..20)
+            .find(|x| buf[(*x, 1)].symbol() == "b")
+            .unwrap_or_else(|| panic!("no b drawn"));
+        // 20 cells less the two-cell prompt and the two-cell right margin.
+        let (row, col) = s.cursor_visual_pos(16);
+        assert_eq!((row, col as u16 + 2), (0, b));
+        // Wrapping uses the same count: "a", the tab and "b" take three cells.
+        assert_eq!(wrap_line(text, 2), ["a\t".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn escape_from_insert_mode_starts_normal_mode_on_a_cluster_edge() {
+        // One regional indicator typed before a flag pairs with the flag's
+        // first half, so the cursor is inside a cluster until Escape.
+        let mut s = vim_composer(FLAG_JP, 0);
+        s.vim_command("i");
+        assert_eq!(s.vim_mode, VimMode::Insert);
+        for typed in "zzzz\u{1F1E9}".chars() {
+            s.insert_char(typed);
+        }
+        assert_eq!(s.cursor, "zzzz\u{1F1E9}".len());
+        s.vim_command("Escape");
+        assert_eq!(s.cursor, "zzzz".len());
+        s.vim_command("x");
+        assert_eq!(s.text, "zzzz\u{1F1F5}");
+    }
+
+    #[test]
+    fn rendered_cursor_sits_where_the_next_character_is_drawn() {
+        fn draw(s: &PromptInputState, focused: bool) -> Buffer {
+            let area = Rect::new(0, 0, 20, 4);
+            let mut buf = Buffer::empty(area);
+            render_prompt_input(
+                s,
+                area,
+                &mut buf,
+                focused,
+                InputMode::Default,
+                Color::Blue,
+                false,
+            );
+            buf
+        }
+        for cluster in DRAWN_CLUSTERS {
+            let text = format!("{cluster}{cluster}b");
+            let mut s = composer(&text, text.len());
+            let unfocused = draw(&s, false);
+            let b = (0..20)
+                .find(|x| unfocused[(*x, 1)].symbol() == "b")
+                .unwrap_or_else(|| panic!("no b drawn for {cluster:?}"));
+            let cells = UnicodeWidthStr::width(cluster) as u16;
+            assert_eq!(b, 2 + 2 * cells, "{cluster:?}");
+
+            // Before the b, then before the second cluster.
+            for expected in [b, b - cells] {
+                s.move_left();
+                let focused = draw(&s, true);
+                assert_eq!(focused[(expected, 1)].symbol(), "\u{2588}", "{cluster:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn vim_h_l_x_act_on_whole_clusters() {
+        for cluster in CLUSTERS {
+            let text = format!("a{cluster}b");
+            let after = 1 + cluster.len();
+            let mut s = vim_composer(&text, 0);
+            assert_eq!(
+                vim_cursors(&mut s, &["l", "l", "h", "h"]),
+                [1, after, 1, 0],
+                "{cluster:?}"
+            );
+
+            s.vim_command("l");
+            s.vim_command("x");
+            assert_eq!((s.text.as_str(), s.cursor), ("ab", 1), "x on {cluster:?}");
+            assert_eq!(s.yank_buf, cluster);
+
+            let mut s = vim_composer(&text, after);
+            s.vim_command("X");
+            assert_eq!(
+                (s.text.as_str(), s.cursor),
+                ("ab", 1),
+                "X after {cluster:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vim_x_on_the_last_cluster_leaves_the_cursor_on_the_one_before() {
+        let mut s = vim_composer(&format!("{FLAG_JP}{FLAG_DE}"), FLAG_JP.len());
+        s.vim_command("x");
+        assert_eq!((s.text.as_str(), s.cursor), (FLAG_JP, 0));
+    }
+
+    #[test]
+    fn vim_word_motions_keep_a_letter_and_its_mark_in_one_word() {
+        let text = format!("caf{E_ACUTE} bar");
+        let bar = text.len() - "bar".len();
+        let e_acute = "caf".len();
+
+        let mut s = vim_composer(&text, 0);
+        assert_eq!(
+            vim_cursors(&mut s, &["w", "b", "e", "w", "W", "B"]),
+            [bar, 0, e_acute, bar, text.len(), bar]
+        );
+        // `ge` must not leave the cursor between the e and its mark. Where
+        // it lands otherwise is not what this test is about.
+        s.vim_command("g");
+        s.vim_command("e");
+        assert!(s.cursor < bar, "ge moved back from {bar} to {}", s.cursor);
+        assert_eq!(cluster_start(&text, s.cursor), s.cursor);
+
+        let mut s = vim_composer(&text, 0);
+        s.vim_command("d");
+        s.vim_command("w");
+        assert_eq!((s.text.as_str(), s.cursor), ("bar", 0));
+
+        let mut s = vim_composer(&text, 0);
+        s.vim_command("d");
+        s.vim_command("e");
+        assert_eq!((s.text.as_str(), s.cursor), (" bar", 0));
+    }
+
+    #[test]
+    fn vim_operators_with_h_and_l_take_whole_clusters() {
+        for cluster in CLUSTERS {
+            let text = format!("a{cluster}b");
+            let mut s = vim_composer(&text, 1 + cluster.len());
+            s.vim_command("d");
+            s.vim_command("h");
+            assert_eq!(
+                (s.text.as_str(), s.cursor),
+                ("ab", 1),
+                "dh after {cluster:?}"
+            );
+
+            let mut s = vim_composer(&text, 1);
+            s.vim_command("d");
+            s.vim_command("l");
+            assert_eq!((s.text.as_str(), s.cursor), ("ab", 1), "dl on {cluster:?}");
+        }
+    }
+
+    #[test]
+    fn vim_delete_at_the_end_leaves_the_cursor_on_the_last_cluster() {
+        // Two flags and a b, delete the b: the cursor rests on the second
+        // flag, not inside it.
+        let text = format!("{FLAG_JP}{FLAG_DE}b");
+        let mut s = vim_composer(&text, text.len() - 1);
+        s.vim_command("d");
+        s.vim_command("l");
+        assert_eq!(s.text, format!("{FLAG_JP}{FLAG_DE}"));
+        assert_eq!(s.cursor, FLAG_JP.len());
+    }
+
+    #[test]
+    fn vim_replace_and_toggle_case_take_the_whole_cluster() {
+        let text = format!("{E_ACUTE}b");
+        let mut s = vim_composer(&text, 0);
+        s.vim_command("r");
+        s.vim_command("x");
+        assert_eq!((s.text.as_str(), s.cursor), ("xb", 0));
+
+        let mut s = vim_composer(&text, 0);
+        s.vim_command("~");
+        assert_eq!(s.text, "E\u{301}b");
+        assert_eq!(s.cursor, E_ACUTE.len());
+
+        let mut s = vim_composer(&text, 0);
+        s.vim_command("s");
+        assert_eq!((s.text.as_str(), s.cursor), ("b", 0));
+        assert_eq!(s.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn vim_append_and_paste_go_after_the_whole_cluster() {
+        let mut s = vim_composer(&format!("{FAMILY}b"), 0);
+        s.vim_command("a");
+        assert_eq!(s.cursor, FAMILY.len());
+
+        // The cursor rests on the last pasted cluster.
+        let mut s = vim_composer(&format!("{FAMILY}b"), 0);
+        s.yank_buf = format!("x{E_ACUTE}");
+        s.vim_command("p");
+        assert_eq!(s.text, format!("{FAMILY}x{E_ACUTE}b"));
+        assert_eq!(s.cursor, FAMILY.len() + 1);
+
+        let mut s = vim_composer("ab", 1);
+        s.yank_buf = FLAG_JP.to_string();
+        s.vim_command("P");
+        assert_eq!(s.text, format!("a{FLAG_JP}b"));
+        assert_eq!(s.cursor, 1);
+    }
+
+    #[test]
+    fn vim_find_lands_on_cluster_edges() {
+        let text = format!("a{E_ACUTE}{FLAG_JP}b");
+        let flag = 1 + E_ACUTE.len();
+        let mut s = vim_composer(&text, 0);
+        assert_eq!(vim_cursors(&mut s, &["t", "b"]), [0, flag]);
+        assert_eq!(vim_cursors(&mut s, &["f", "b"]), [flag, text.len() - 1]);
+        assert_eq!(vim_cursors(&mut s, &["T", "a"]), [text.len() - 1, 1]);
+        assert_eq!(
+            vim_cursors(&mut s, &["$", "F", "e"]),
+            [text.len(), text.len(), 1]
+        );
+    }
+
+    #[test]
+    fn vim_visual_selection_includes_the_whole_cluster_under_the_cursor() {
+        for cluster in CLUSTERS {
+            let text = format!("a{cluster}b");
+            let mut s = vim_composer(&text, 0);
+            for key in ["v", "l", "d"] {
+                s.vim_command(key);
+            }
+            assert_eq!((s.text.as_str(), s.cursor), ("b", 0), "{cluster:?}");
+            assert_eq!(s.yank_buf, format!("a{cluster}"));
+        }
+    }
+
+    #[test]
+    fn vim_dot_repeat_deletes_whole_clusters() {
+        let mut s = vim_composer(&format!("{FLAG_JP}{FLAG_DE}{E_ACUTE}b"), 0);
+        s.vim_command("x");
+        s.vim_command(".");
+        assert_eq!(s.text, format!("{E_ACUTE}b"));
+        s.vim_command(".");
+        assert_eq!((s.text.as_str(), s.cursor), ("b", 0));
+    }
+
+    #[test]
+    fn vim_end_of_line_does_not_rest_inside_a_crlf() {
+        let mut s = vim_composer("ab\r\ncd", 0);
+        s.vim_command("$");
+        assert_eq!(s.cursor, 2);
+        s.vim_command("l");
+        assert_eq!(s.cursor, 4);
+    }
+
+    #[test]
+    fn typing_in_front_of_a_character_it_joins_keeps_the_typed_order() {
+        // Each scalar arrives as its own key. The first one typed pairs with
+        // the flag after it, so for one key the cursor is inside a cluster:
+        // it must stay where the typing is.
+        let mut s = composer(FLAG_JP, 0);
+        for scalar in FLAG_DE.chars() {
+            s.insert_char(scalar);
+        }
+        assert_eq!(s.text, format!("{FLAG_DE}{FLAG_JP}"));
+        assert_eq!(s.cursor, FLAG_DE.len());
+
+        // A woman and a joiner typed before a laptop make one emoji with it.
+        let laptop = "\u{1F4BB}";
+        let typed = "\u{1F469}\u{200D}";
+        let mut s = composer(laptop, 0);
+        for scalar in typed.chars() {
+            s.insert_char(scalar);
+        }
+        assert_eq!(
+            (s.text.as_str(), s.cursor),
+            (format!("{typed}{laptop}").as_str(), typed.len())
+        );
+        assert_eq!(s.cursor_visual_pos(40), (0, 0));
+
+        // Backspace takes back what was typed; Delete takes the rest.
+        let mut back = composer(&s.text, s.cursor);
+        back.backspace();
+        assert_eq!((back.text.as_str(), back.cursor), (laptop, 0));
+        s.delete();
+        assert_eq!((s.text.as_str(), s.cursor), (typed, typed.len()));
     }
 }
