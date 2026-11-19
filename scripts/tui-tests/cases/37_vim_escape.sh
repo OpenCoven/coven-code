@@ -9,7 +9,9 @@
 # reads `say hello world`. Without the fix the keys are typed as text. Classic
 # also shows the mode on its status row; Next draws no vim mode, so there the
 # draft is the proof. Each Escape is followed by a pause, so it is not read
-# together with the next key as Alt+key. No provider; nothing listens.
+# together with the next key as Alt+key. An Escape sent before `/vim`, with
+# vim still off, clears any startup notice that would take the first Escape.
+# No provider; nothing listens.
 
 register_case tc_vim_escape
 
@@ -41,8 +43,11 @@ _vim_escape_journey() { # renderer
       if wait_for "-- INSERT --" 10; then _pass "$r: /vim starts vim mode in Insert"
       else _fail "$r: /vim starts vim mode in Insert" "$(tui_capture)"; fi
     fi
-    tui_type "hello"; sleep 0.3
-    tui_keys Escape; sleep 0.5
+    tui_type "hello"
+    # Each key after an Escape waits until the Escape was drawn (Classic) or
+    # for a second (Next), so the two are not read together as Alt+key.
+    wait_for "hello" 10 || true
+    tui_keys Escape; sleep 1
     if [ "$r" = classic ]; then
       if wait_for "-- NORMAL --" 10; then _pass "$r: Escape leaves Insert"
       else _fail "$r: Escape leaves Insert" "$(tui_capture)"; fi
@@ -52,8 +57,9 @@ _vim_escape_journey() { # renderer
       if wait_for "-- INSERT --" 10; then _pass "$r: 0 and i are vim commands and enter Insert"
       else _fail "$r: 0 and i are vim commands and enter Insert" "$(tui_capture)"; fi
     fi
-    tui_type "say "; sleep 0.3
-    tui_keys Escape; sleep 0.5
+    tui_type "say "
+    wait_for "say hello" 10 || true
+    tui_keys Escape; sleep 1
     if [ "$r" = classic ]; then
       if wait_for "-- NORMAL --" 10; then _pass "$r: Escape after an insert before the end leaves Insert"
       else _fail "$r: Escape after an insert before the end leaves Insert" "$(tui_capture)"; fi

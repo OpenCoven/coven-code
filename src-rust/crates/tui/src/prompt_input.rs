@@ -2447,8 +2447,8 @@ impl PromptInputState {
             // dot-repeat: the text from the cursor at entry to the cursor
             // now. It is recorded only when the text before the entry cursor
             // and the text after the cursor are both as they were at entry,
-            // so the edit was that one insertion. After any other edit, such
-            // as a delete before the insert or typing after moving away,
+            // so the net edit was that one insertion. After any other edit,
+            // such as a delete before the insert or typing after moving away,
             // nothing is recorded.
             if self.vim_mode == VimMode::Insert {
                 if let Some((start, before)) = self.vim_insert_start.take() {
@@ -5475,6 +5475,14 @@ mod tests {
         assert_eq!(recorded_insert(&s), Some("xyz"));
         s.vim_command(".");
         assert_eq!(s.text, "axyzxyzb");
+
+        // Offsets are bytes, so multi-byte text around the insert is fine.
+        let mut s = vim_composer("\u{65E5}\u{672C}", 3);
+        s.vim_command("i");
+        s.insert_char('\u{E9}');
+        s.vim_command("Escape");
+        assert_eq!(s.text, "\u{65E5}\u{E9}\u{672C}");
+        assert_eq!(recorded_insert(&s), Some("\u{E9}"));
     }
 
     /// When the cursor left the inserted span, the span from the entry
@@ -6236,6 +6244,7 @@ mod tests {
         }
         assert_eq!(s.cursor, "zzzz\u{1F1E9}".len());
         s.vim_command("Escape");
+        assert_eq!(recorded_insert(&s), Some("zzzz\u{1F1E9}"));
         assert_eq!(s.cursor, "zzzz".len());
         s.vim_command("x");
         assert_eq!(s.text, "zzzz\u{1F1F5}");

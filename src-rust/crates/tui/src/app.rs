@@ -10045,6 +10045,30 @@ role = "Research"
         assert_eq!(app.prompt_input.vim_mode, VimMode::Normal);
     }
 
+    /// With vim on, transcript focus still takes Escape first.
+    #[test]
+    fn escape_returns_focus_from_the_transcript_before_vim_takes_it() {
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.focus = FocusTarget::Transcript;
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.focus, FocusTarget::Input);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, Next's inspector still takes Escape first, through its
+    /// key binding.
+    #[test]
+    fn escape_closes_the_next_inspector_before_vim_takes_it() {
+        let mut app = make_app();
+        app.renderer = crate::application::UiRenderer::Next;
+        app.prompt_input.vim_enabled = true;
+        app.next_shell.inspector = Some(crate::next::InspectorPage::Views);
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.next_shell.inspector.is_none());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
     /// With vim on, a notice still takes Escape first.
     #[test]
     fn escape_dismisses_a_notice_before_vim_takes_it() {
