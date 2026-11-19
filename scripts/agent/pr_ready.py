@@ -314,6 +314,9 @@ def main(argv=None):
     except ApiError as error:
         print(f"pr-ready: {error}", file=sys.stderr)
         return 2
+    except (AttributeError, KeyError, TypeError) as error:
+        print(f"pr-ready: unexpected API response: {error!r}", file=sys.stderr)
+        return 2
     try:
         lines, reasons = evaluate(
             pull,

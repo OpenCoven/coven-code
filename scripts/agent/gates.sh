@@ -81,9 +81,13 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKTREE/src-rust/target}"
 # CI sets no compiler flags; a caller's RUSTFLAGS=--cap-lints=allow would let
 # the -D warnings gates pass. Flags in $CARGO_HOME/config.toml still apply.
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS CARGO_BUILD_RUSTFLAGS
+for var in $(compgen -e); do
+  case "$var" in CARGO_TARGET_*_RUSTFLAGS) unset "$var" ;; esac
+done
 # Colour codes would break the test-count summary.
 export CARGO_TERM_COLOR=never
 COMPUTER_USE="${GATES_COMPUTER_USE:-}"
+case "$COMPUTER_USE" in ""|0|1) ;; *) echo "gates: GATES_COMPUTER_USE must be 0 or 1" >&2; exit 2 ;; esac
 if [ -z "$COMPUTER_USE" ]; then
   if [ "$(uname -s)" = Darwin ]; then COMPUTER_USE=1; else COMPUTER_USE=0; fi
 fi

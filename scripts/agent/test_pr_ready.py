@@ -374,6 +374,13 @@ class ScriptTests(unittest.TestCase):
         result = self.script("7")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
+    def test_pull_that_is_not_an_object_exits_2(self):
+        self.write("pulls.json", [["not", "a", "pull"]])
+        result = self.script("7")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("unexpected API response", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

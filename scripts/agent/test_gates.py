@@ -121,6 +121,7 @@ class GatesDryRunTests(unittest.TestCase):
         sneaky = self.worktree.parent / "elsewhere" / ".." / "wt" / "gates"
         (self.worktree.parent / "elsewhere").mkdir()
         self.assertEqual(self.dry_run(str(self.worktree), str(sneaky)).returncode, 2)
+        self.assertEqual(self.dry_run(str(self.worktree), str(self.out), GATES_COMPUTER_USE="yes").returncode, 2)
         missing = self.worktree.parent / "missing" / ".." / "wt" / "gates"
         self.assertEqual(self.dry_run(str(self.worktree), str(missing)).returncode, 2)
         (self.worktree / ".github" / "workflows" / "rust-ci.yml").write_text("no pin\n")
@@ -133,7 +134,7 @@ FAKE_RUSTUP = textwrap.dedent(
     """\
     #!/bin/sh
     # Stands in for `rustup run <toolchain> cargo <subcommand> ...`.
-    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}" >> "$FAKE_CALLS"
+    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}${CARGO_TARGET_X_RUSTFLAGS-}" >> "$FAKE_CALLS"
     case "$4" in
       clippy) exit "${FAKE_CLIPPY_RC:-0}" ;;
       test)
@@ -249,7 +250,8 @@ class GatesRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
 
     def test_caller_rustflags_are_not_passed_to_cargo(self):
-        self.assertEqual(self.gates(RUSTFLAGS="--cap-lints=allow").returncode, 0)
+        flags = "--cap-lints=allow"
+        self.assertEqual(self.gates(RUSTFLAGS=flags, CARGO_TARGET_X_RUSTFLAGS=flags).returncode, 0)
         for call in self.calls.read_text().splitlines():
             self.assertTrue(call.endswith("RUSTFLAGS=unset"), call)
 

@@ -110,6 +110,22 @@ class ReplaceSectionTests(unittest.TestCase):
                 replace_state.normalize_section(NEW.replace("New facts.", "a\n" + space + "\nb"))
         self.assertEqual(self.replaced(OLD + " \t\nKeep.\n"), NEW + "\n \t\nKeep.\n")
 
+    def test_near_miss_next_action_markers_are_refused(self):
+        tail = "\nOriginal report: crash.\n\n**Next action:** (template) fill in.\n\nKeep.\n"
+        for marker in ("**Next Action:** review", "**Next action**: review", "Next action: review", "- next-action: x"):
+            body = OLD.replace("**Next action:** review #1.", marker) + tail
+            self.assertNotEqual(body, OLD + tail)
+            self.refused(body, pattern="looks like a Next action")
+            with self.assertRaises(replace_state.SectionError):
+                replace_state.normalize_section(NEW.replace("New facts.", marker))
+
+    def test_next_action_in_prose_is_fine(self):
+        body = OLD.replace("Old facts.", "The previous next action is done.") + "\nKeep.\n"
+        self.assertEqual(self.replaced(body), NEW + "\nKeep.\n")
+
+    def test_non_ascii_digits_in_the_heading_do_not_match(self):
+        self.assertIsNone(replace_state.HEADING.fullmatch("## Current state: \u0662\u0660\u0662\u0666-11-19"))
+
     def test_nested_definitions_are_refused(self):
         for line in ("> [spec]: https://example.com/spec", "- [x]: url", "> [^1]: note", "text [a] : b", "Old[^n].", "$$"):
             with self.assertRaises(replace_state.SectionError, msg=line):

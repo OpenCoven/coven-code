@@ -14,7 +14,8 @@ so it never drops original issue text. The old section must:
   (ATX or setext), a rule or a code fence, HTML anywhere in a line, "]:"
   anywhere (a link or footnote definition, even in a quote or list), or a
   lone carriage return is refused, as is text right after the section that
-  starts indented. So are a footnote reference ("[^") and "$$" anywhere.
+  starts indented. So are a footnote reference ("[^") and "$$" anywhere,
+  and a near-miss marker such as "**Next Action:**" or "Next action:".
 The old section ends after that Next action line. Everything after it (the
 original report, acceptance, prompts) is kept byte for byte.
 
@@ -47,9 +48,13 @@ import subprocess
 import sys
 
 DEFAULT_REPO = "OpenCoven/coven-code"
-HEADING = re.compile(r"## Current state: \d{4}-\d{2}-\d{2}[ \t]*")
+HEADING = re.compile(r"## Current state: [0-9]{4}-[0-9]{2}-[0-9]{2}[ \t]*")
 ANY_STATE_HEADING = re.compile(r"\s{0,3}(#{1,6}\s*|<h[1-6][^>]*>\s*)Current state\b", re.I)
 NEXT_ACTION = re.compile(r"\*\*Next action:\*\*")
+# A hand-typed variant ("**Next Action:**", "Next action:") before the exact
+# marker would let the section run on into the original text.
+# Prose such as "the previous next action is done" has no colon and is fine.
+NEAR_NEXT_ACTION = re.compile(r"next[\s_*-]*action\W{0,4}:", re.I)
 # Lines that could start or end a block GitHub renders as structure: ATX and
 # setext headings, rules, code fences, HTML, link and footnote definitions.
 RISKY = re.compile(
@@ -111,6 +116,11 @@ def section_lines(lines, start, what):
                     f"({following.strip()[:60]!r}); edit it by hand"
                 )
             return index
+        if NEAR_NEXT_ACTION.search(line):
+            raise SectionError(
+                f"{what} has {line.strip()[:60]!r}, which looks like a Next action line "
+                "but is not exactly '**Next action:**' at the start; edit it by hand"
+            )
         if risky(line):
             raise SectionError(
                 f"{what} has {line.strip()[:60]!r} before its **Next action:** line, "
@@ -270,7 +280,7 @@ def main(argv=None):
         # The exact original, CRLF and all, so it can be restored byte for byte.
         before_file.write_text(original, encoding="utf-8", newline="")
         after_file.write_text(after, encoding="utf-8", newline="")
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         print(f"replace-state: cannot write the copies: {error}", file=sys.stderr)
         return 2
     sys.stdout.writelines(
