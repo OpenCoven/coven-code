@@ -3030,13 +3030,15 @@ async fn persist_interactive_session(
         let db_path = claurst_core::config::Settings::config_dir().join("sessions.db");
         if let Ok(store) = claurst_core::SqliteSessionStore::open(&db_path) {
             let _ = store.save_session(&session.id, session.title.as_deref(), &session.model);
-            let _ = store.index_messages(
+            if let Err(error) = store.index_messages(
                 &session.id,
                 session
                     .messages
                     .iter()
                     .filter(|msg| pending_uuid.is_none() || msg.uuid.as_deref() != pending_uuid),
-            );
+            ) {
+                warn!(session_id = %session.id, %error, "Failed to index session for search");
+            }
         }
     }
     saved

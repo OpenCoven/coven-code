@@ -4,10 +4,9 @@
 // the default JSONL storage.  Enabled by adding `rusqlite` to the
 // crate's dependencies (already done via `features = ["bundled"]`).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
-
-use rusqlite::OptionalExtension;
 
 use crate::crypto_utils::sha256_hex_str;
 use crate::types::{ContentBlock, Message, MessageContent, Role};
@@ -46,21 +45,29 @@ impl SqliteSessionStore {
                 ON sessions(updated_at);
             ",
         )?;
-        // Best effort: an index this step cannot fix still opens.
-        if let Err(error) = rename_legacy_unknown_message(&conn) {
-            tracing::warn!(%error, "Could not rekey the legacy \"unknown\" session index row");
-        }
 
         Ok(Self { conn })
     }
 
     /// Index a session's messages for search, one row per message.
     ///
-    /// A message with a uuid is stored under it. A message without one (every
-    /// user message) is stored under an id derived from the session, its role,
-    /// its text and how many earlier uuid-less messages in the session have the
-    /// same role and text. Saving the same session again derives the same ids,
-    /// so it adds no rows; the same text sent twice is two rows.
+    /// A message with a uuid is stored under it. A message without one (most
+    /// user messages, tool results included) is stored under an id derived
+    /// from the session, its role, the SHA-256 of its text and how many earlier
+    /// uuid-less messages in the session have the same role and text. Saving
+    /// the same session again, or after it has grown, derives the same ids for
+    /// the messages already indexed, so it adds rows only for new ones; the
+    /// same text sent twice is two rows.
+    ///
+    /// The id follows the text, not the position. After a compaction or a
+    /// rewind, a message whose role and text match one already indexed maps
+    /// onto that row and adds nothing; search still finds the session. A
+    /// message with no text, such as a tool result, is indexed with empty
+    /// content, as an assistant message holding only a tool call already is.
+    ///
+    /// Indexes written before #566 keep their one row with the id "unknown"
+    /// (the first uuid-less message ever indexed). It is not deleted, so its
+    /// session can hold that text twice once it is saved again.
     ///
     /// Best effort per message: every message is tried, and the first error is
     /// returned.
@@ -76,25 +83,27 @@ impl SqliteSessionStore {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            let content = match &message.content {
-                MessageContent::Text(text) => text.clone(),
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
+            let content: Cow<'_, str> = match &message.content {
+                MessageContent::Text(text) => Cow::Borrowed(text),
+                MessageContent::Blocks(blocks) => Cow::Owned(
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
             };
             let id = match message.uuid.as_deref() {
-                Some(uuid) => uuid.to_owned(),
+                Some(uuid) => Cow::Borrowed(uuid),
                 None => {
                     let hash = sha256_hex_str(&content);
                     let occurrence = earlier.entry((role, hash.clone())).or_insert(0);
-                    let id = derived_message_id(session_id, role, &hash, *occurrence);
+                    let id = format!("{session_id}:{role}:{hash}:{occurrence}");
                     *occurrence += 1;
-                    id
+                    Cow::Owned(id)
                 }
             };
             if let Err(error) = self.save_message(session_id, &id, role, &content, None) {
@@ -206,51 +215,6 @@ impl SqliteSessionStore {
     }
 }
 
-/// The index id of the `occurrence`-th uuid-less message (counting from 0)
-/// in `session_id` with this role and text, given the SHA-256 of the text.
-fn derived_message_id(
-    session_id: &str,
-    role: &str,
-    content_hash: &str,
-    occurrence: usize,
-) -> String {
-    format!("{session_id}:{role}:{content_hash}:{occurrence}")
-}
-
-/// Builds before #566 stored every message without a uuid under the id
-/// "unknown", so the index kept only the first such message ever, and no
-/// later one. That row was the first uuid-less message of its session, so
-/// give it the id `index_messages` derives for it: the next save of that
-/// session then finds it instead of adding a second copy. If that id is
-/// already taken the row is left as it is; no row is deleted.
-fn rename_legacy_unknown_message(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let legacy = conn
-        .query_row(
-            "SELECT session_id, role, content FROM messages WHERE id = 'unknown'",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    if let Some((session_id, role, content)) = legacy {
-        conn.execute(
-            "UPDATE OR IGNORE messages SET id = ?1 WHERE id = 'unknown'",
-            rusqlite::params![derived_message_id(
-                &session_id,
-                &role,
-                &sha256_hex_str(&content),
-                0
-            )],
-        )?;
-    }
-    Ok(())
-}
-
 /// Summary row returned by `list_sessions` and `search_sessions`.
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
@@ -276,6 +240,7 @@ fn session_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ToolResultContent;
 
     fn store_with_session() -> (tempfile::TempDir, SqliteSessionStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -423,73 +388,35 @@ mod tests {
             },
         ]);
         answer.uuid = Some("answer-uuid".into());
+        let tool_result = || {
+            Message::user_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-1".into(),
+                content: ToolResultContent::Text("output".into()),
+                is_error: None,
+            }])
+        };
         let messages = vec![
             Message::user("hello"),
             answer,
+            tool_result(),
             Message::user("again"),
+            tool_result(),
             Message::user("hello"),
         ];
-        for _ in 0..2 {
-            store.index_messages("session-1", &messages).unwrap();
+        // Each save holds the whole transcript so far, which grows, and the
+        // last one is saved twice.
+        for end in [1, 3, messages.len(), messages.len()] {
+            store.index_messages("session-1", &messages[..end]).unwrap();
         }
 
         let rows = stored_rows(&store);
         let contents: Vec<_> = rows.iter().map(|(_, content)| content.as_str()).collect();
-        assert_eq!(contents, ["again", "answer text", "hello", "hello"]);
+        assert_eq!(contents, ["", "", "again", "answer text", "hello", "hello"]);
         assert!(rows.iter().any(|(id, _)| id == "answer-uuid"));
         assert!(rows.iter().all(|(id, _)| id != "unknown"));
-        assert_eq!(session_state(&store).1, 4);
+        assert_eq!(session_state(&store).1, 6);
         for text in ["hello", "again", "answer"] {
             assert_eq!(store.search_sessions(text).unwrap().len(), 1, "{text}");
         }
-    }
-
-    #[test]
-    fn open_rekeys_the_legacy_unknown_row_without_losing_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sessions.db");
-        {
-            let store = SqliteSessionStore::open(&path).unwrap();
-            store.save_session("session-1", None, "test-model").unwrap();
-            store
-                .save_message("session-1", "unknown", "user", "first ever", None)
-                .unwrap();
-        }
-
-        let store = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(stored_message_count(&store, "unknown"), 0);
-        store
-            .index_messages(
-                "session-1",
-                &[Message::user("first ever"), Message::user("second")],
-            )
-            .unwrap();
-
-        let contents: Vec<_> = stored_rows(&store)
-            .into_iter()
-            .map(|(_, content)| content)
-            .collect();
-        assert_eq!(contents, ["first ever", "second"]);
-        assert_eq!(session_state(&store).1, 2);
-    }
-
-    #[test]
-    fn open_keeps_the_legacy_unknown_row_when_its_new_id_is_taken() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sessions.db");
-        {
-            let store = SqliteSessionStore::open(&path).unwrap();
-            store.save_session("session-1", None, "test-model").unwrap();
-            store
-                .index_messages("session-1", &[Message::user("first ever")])
-                .unwrap();
-            store
-                .save_message("session-1", "unknown", "user", "first ever", None)
-                .unwrap();
-        }
-
-        let store = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(stored_message_count(&store, "unknown"), 1);
-        assert_eq!(stored_rows(&store).len(), 2);
     }
 }

@@ -158,7 +158,7 @@ fn session_index_worker() {
     assert_eq!(Settings::config_dir(), home);
     let index_path = home.join("sessions.db");
     // An index written by an earlier build: its first user message ever was
-    // stored under the id "unknown".
+    // stored under the id "unknown". That row is kept.
     {
         let index = claurst_core::SqliteSessionStore::open(&index_path).unwrap();
         index.save_session("legacy", None, "fixture-model").unwrap();
@@ -227,7 +227,8 @@ fn session_index_worker() {
         counts,
         [
             ("first".to_owned(), 4),
-            ("legacy".to_owned(), 2),
+            // The kept "unknown" row and one row per message.
+            ("legacy".to_owned(), 3),
             ("second".to_owned(), 1)
         ]
     );
