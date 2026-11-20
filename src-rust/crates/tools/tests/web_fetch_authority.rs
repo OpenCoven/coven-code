@@ -63,9 +63,20 @@ fn webfetch_is_not_advertised_as_an_unrestricted_read() {
 async fn webfetch_requests_network_authority_before_io() {
     let handler = Arc::new(RecordingDenyHandler::default());
     let ctx = context(handler.clone(), PermissionMode::Default);
-    let result = WebFetchTool
-        .execute(json!({"url": "https://example.com/"}), &ctx)
-        .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/denied", listener.local_addr().unwrap());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        WebFetchTool.execute(json!({"url": url}), &ctx),
+    )
+    .await
+    .expect("permission denial must finish before transport");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "denied network authority opened a connection"
+    );
     assert!(result.is_error);
     assert!(result.content.contains("Permission denied"));
     let requests = handler.requests.lock().unwrap();
@@ -109,9 +120,20 @@ async fn manager_backed_default_rejects_unapproved_network_access() {
     )));
     let handler = Arc::new(ManagedAutoPermissionHandler::new(manager));
     let ctx = context(handler, PermissionMode::Default);
-    let result = WebFetchTool
-        .execute(json!({"url": "https://example.com/"}), &ctx)
-        .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/denied", listener.local_addr().unwrap());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        WebFetchTool.execute(json!({"url": url}), &ctx),
+    )
+    .await
+    .expect("permission denial must finish before transport");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "denied network authority opened a connection"
+    );
     assert!(result.is_error);
     assert!(result.content.contains("Permission denied"));
 }
@@ -143,18 +165,11 @@ fn canonical_network_policy_keeps_allow_and_deny_rules() {
 #[tokio::test]
 async fn explicit_network_authority_does_not_allow_loopback_destinations() {
     use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     for host in ["127.0.0.1", "2130706433", "0177.0.0.1", "0x7f000001"] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            let _ = stream.read(&mut request).await.unwrap();
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\nConnection: close\r\n\r\nprivate fixture\n").await.unwrap();
-        });
         let mode = PermissionMode::BypassPermissions;
         let ctx = context(Arc::new(AutoPermissionHandler { mode: mode.clone() }), mode);
         let result = tokio::time::timeout(
@@ -165,9 +180,12 @@ async fn explicit_network_authority_does_not_allow_loopback_destinations() {
             ),
         )
         .await;
-        // The fixture owns the task even when the product denies before IO.
-        server.abort();
-        let _ = server.await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "forbidden destination received a connection"
+        );
         let result = result.expect("bounded local request");
         assert!(
             result.is_error,
