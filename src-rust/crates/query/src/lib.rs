@@ -3602,8 +3602,6 @@ async fn run_query_loop_inner(
             }
         } else if stop == "end_turn" || stop == "tool_use" {
             // Proactive auto-compact (original path, used when reactive compact is off).
-            let compaction_required =
-                compact::should_auto_compact(usage.input_tokens, &config.model, &compact_state);
             let original_messages = messages.clone();
             let compaction_result = {
                 let compaction = compact::auto_compact_if_needed(
@@ -3633,7 +3631,7 @@ async fn run_query_loop_inner(
                     .await;
                     return QueryOutcome::Cancelled;
                 }
-                Some(Some(new_messages)) => {
+                Some(compact::AutoCompactOutcome::Compacted(new_messages)) => {
                     require_goal_work!(assistant_msg);
                     *messages = new_messages;
                     if let Some(ref tx) = event_tx {
@@ -3644,7 +3642,7 @@ async fn run_query_loop_inner(
                             .await;
                     }
                 }
-                Some(None) if compaction_required => {
+                Some(compact::AutoCompactOutcome::Failed) => {
                     *messages = original_messages;
                     require_goal_work!(assistant_msg);
                     finalize_terminal_assistant_with_unexecuted_tool_results(
@@ -3660,7 +3658,13 @@ async fn run_query_loop_inner(
                         "Auto-compaction failed after a completed response".to_string(),
                     ));
                 }
-                Some(None) => {}
+                // Over the threshold with too few messages to summarise
+                // (#571): nothing changed, so nothing is reported and the
+                // turn goes on exactly as below the threshold.
+                Some(
+                    compact::AutoCompactOutcome::NotNeeded
+                    | compact::AutoCompactOutcome::NothingToCompact,
+                ) => {}
             }
         }
 
@@ -8101,6 +8105,67 @@ mod tests {
         assert!(events
             .iter()
             .all(|event| !matches!(event, QueryEvent::TurnComplete { .. })));
+    }
+
+    /// #571: a response whose usage is over the auto-compact threshold, in a
+    /// history too short to have a head to summarise, is not compacted. The
+    /// turn ends as it would have, and no status claims a compaction.
+    #[tokio::test]
+    async fn a_full_window_in_a_short_history_is_not_reported_as_compacted() {
+        // The proactive path runs only with reactive compaction off.
+        let _feature_gate_lock = REACTIVE_COMPACT_FEATURE_GATE_LOCK.lock().await;
+
+        struct FeatureGateGuard {
+            prior: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for FeatureGateGuard {
+            fn drop(&mut self) {
+                match self.prior.take() {
+                    Some(value) => std::env::set_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT", value),
+                    None => std::env::remove_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT"),
+                }
+            }
+        }
+
+        let _feature_gate = FeatureGateGuard {
+            prior: std::env::var_os("COVEN_CODE_FEATURE_REACTIVE_COMPACT"),
+        };
+        std::env::remove_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT");
+        const FULL_WINDOW_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"full-window\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":190000,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a full answer\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+        let (outcome, events, messages) =
+            run_anthropic_sse(FULL_WINDOW_SSE, Config::default()).await;
+
+        assert!(
+            matches!(&outcome, QueryOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        let statuses: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::Status(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !statuses.iter().any(|text| text.contains("compacted")),
+            "nothing was compacted: {statuses:?}"
+        );
+        let texts: Vec<String> = messages.iter().map(Message::get_all_text).collect();
+        assert_eq!(texts, ["test Anthropic outcome", "a full answer"]);
     }
 
     #[tokio::test]
