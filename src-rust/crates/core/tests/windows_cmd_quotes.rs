@@ -60,3 +60,36 @@ fn shell_command_passes_quotes_as_written() {
         assert_eq!(String::from_utf8_lossy(&output.stdout), printed, "{line}");
     }
 }
+
+/// `start` gets its target through a variable that `cmd.exe` expands after
+/// it has read the line, and a target that would split `start`'s argument
+/// is refused, as is an empty one. What `start` then opens is covered by the callers' tests, in
+/// claurst-tui and claurst-mcp.
+#[test]
+fn shell_start_hands_over_its_target_in_a_variable() {
+    use claurst_core::shell::{start, START_TARGET_VARIABLE};
+    let target = r"C:\temp\safe & %PATH% ^ literal.txt";
+    let shell = start(std::process::Command::new("cmd"), target).unwrap();
+    assert_eq!(shell.get_program(), "cmd");
+    let arguments: Vec<String> = shell
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        arguments,
+        [format!(
+            r#"/D /V:ON /C "start "" "!{START_TARGET_VARIABLE}!"""#
+        )]
+    );
+    assert_eq!(
+        shell.get_envs().collect::<Vec<_>>(),
+        [(
+            std::ffi::OsStr::new(START_TARGET_VARIABLE),
+            Some(std::ffi::OsStr::new(target))
+        )]
+    );
+    for refused in [r#"x" & echo injected & ""#, ""] {
+        let error = start(std::process::Command::new("cmd"), refused).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{refused}");
+    }
+}
