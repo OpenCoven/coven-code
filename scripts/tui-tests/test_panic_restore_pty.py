@@ -13,8 +13,8 @@ import unittest
 HERE = pathlib.Path(__file__).resolve().parent
 
 # Writes what setup_terminal and the panic hook write, in the same order
-# (keyboard pop first, then leave the alternate screen), then misbehaves as
-# BEHAVIOUR says.
+# (title cleared, keyboard pop if flags were pushed, then leave the alternate
+# screen, once per panic), then misbehaves as BEHAVIOUR says.
 FAKE = r'''
 import os, sys, termios, tty
 BEHAVIOUR = {behaviour!r}
@@ -41,16 +41,18 @@ def setup():
 
 def restore():
     termios.tcsetattr(fd, termios.TCSANOW, saved)
-    pop = b"" if BEHAVIOUR == "no-unpushed-pop" and not KEYBOARD else b"\x1b[<1u"
+    pop = b"\x1b[<1u" if KEYBOARD or BEHAVIOUR == "unpushed-pop" else b""
+    title = b"" if BEHAVIOUR == "title-kept" else b"\x1b]0;\x07"
+    if BEHAVIOUR == "title-set-again":
+        title += b"\x1b]0;Coven\x07"
     modes = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l"
     if BEHAVIOUR == "pop-after-leave":
-        write(sys.stdout, b"\x1b[?1049l" + modes + pop + b"\x1b[?25h")
+        write(sys.stdout, title + b"\x1b[?1049l" + modes + pop + b"\x1b[?25h")
     elif BEHAVIOUR == "pop-on-both-screens":
-        write(sys.stdout, pop + b"\x1b[?1049l" + modes + pop + b"\x1b[?25h")
+        # The second pop is the stray one, sent whether or not flags were pushed.
+        write(sys.stdout, title + pop + b"\x1b[?1049l" + modes + b"\x1b[<1u\x1b[?25h")
     else:
-        write(sys.stdout, pop + b"\x1b[?1049l" + modes + b"\x1b[?25h")
-    if BEHAVIOUR == "title-reset":
-        write(sys.stdout, b"\x1b]0;\x07")
+        write(sys.stdout, title + pop + b"\x1b[?1049l" + modes + b"\x1b[?25h")
 
 def message(thread, text):
     write(sys.stderr, b"\nthread '" + thread + b"' (7) panicked at fake.rs:1:1:\n" + text + b"\n")
@@ -77,7 +79,7 @@ elif sys.argv[2] == "resume":
 if BEHAVIOUR == "message-first":
     message(b"main", b"panic-restore: deliberate main-thread panic")
 if BEHAVIOUR != "no-restore":
-    for _ in range(1 if BEHAVIOUR == "single-restore" else setups):
+    for _ in range(setups if BEHAVIOUR == "restore-per-setup" else 1):
         restore()
 if BEHAVIOUR != "message-first":
     message(b"main", b"panic-restore: deliberate main-thread panic")
@@ -114,7 +116,8 @@ class PanicRestoreDriverTests(unittest.TestCase):
         self.assertEqual(failed, [], result.stdout + result.stderr)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ok classic worker: a worker-thread panic does not restore the terminal", result.stdout)
-        self.assertIn("ok next resume: current behaviour: the hook restores once per setup_terminal call (2)",
+        self.assertIn("ok next resume: the hook restores once (2 setup_terminal calls)", result.stdout)
+        self.assertIn("ok classic main without keyboard flags: no keyboard pop is sent when none was pushed",
                       result.stdout)
 
     def test_missing_restore_fails(self):
@@ -159,30 +162,39 @@ class PanicRestoreDriverTests(unittest.TestCase):
         result, failed = self.assert_fails("pop-after-leave", *checks)
         self.assertEqual([line for line in failed if not any(check in line for check in checks)], [])
         # Six runs push flags (two lines each), two of them resume (one more
-        # each), and the five that set up once pop on the main screen. The
-        # opted-out run has nothing to pop off its own stack.
-        self.assertEqual(len(failed), 19, result.stdout)
-        self.assertIn("ok classic main without keyboard flags: current behaviour: "
-                      "a keyboard pop is sent though none was pushed", result.stdout)
+        # each), and all six pop on the main screen (one more each). The
+        # opted-out run sends no pop.
+        self.assertEqual(len(failed), 20, result.stdout)
+        self.assertIn("ok classic main without keyboard flags: no keyboard pop is sent when none was pushed",
+                      result.stdout)
 
     def test_second_pop_on_the_main_screen_fails(self):
         # What suspend_terminal wrote before #410: its own pop, then the
         # restore's.
         checks = ("no keyboard pop is sent on the main screen",
-                  "current behaviour: the hook restores once per setup_terminal call")
+                  "no keyboard pop is sent when none was pushed")
         result, failed = self.assert_fails("pop-on-both-screens", *checks)
         self.assertEqual([line for line in failed if not any(check in line for check in checks)], [])
-        # The five runs that set up once, the opted-out one among them; the
-        # two that resume are caught by the count of pops per restore.
-        self.assertEqual(len(failed), 7, result.stdout)
+        # All seven runs, and the opted-out one sent a pop at all.
+        self.assertEqual(len(failed), 8, result.stdout)
         self.assertIn("FAIL classic main without keyboard flags: no keyboard pop is sent on the main screen",
                       result.stdout)
 
-    def test_each_pinned_behaviour_fails_on_its_own(self):
+    def test_restore_once_per_setup_fails(self):
+        # main before #417: suspend set the terminal up again and chained a
+        # second hook, so a panic after a resume restored twice and the second
+        # pop was sent on the main screen.
+        checks = ("the hook restores once (2 setup_terminal calls)", "no keyboard pop is sent on the main screen")
+        result, failed = self.assert_fails("restore-per-setup", *checks)
+        self.assertEqual([line for line in failed if not any(check in line for check in checks)], [])
+        # The two runs that resume, each failing both.
+        self.assertEqual(len(failed), 4, result.stdout)
+
+    def test_each_restore_detail_fails_on_its_own(self):
         for behaviour, check in (
-            ("no-unpushed-pop", "current behaviour: a keyboard pop is sent though none was pushed"),
-            ("title-reset", "current behaviour: the hook leaves the title set at startup"),
-            ("single-restore", "current behaviour: the hook restores once per setup_terminal call"),
+            ("unpushed-pop", "no keyboard pop is sent when none was pushed"),
+            ("title-kept", "clears the title set at startup before the panic message"),
+            ("title-set-again", "clears the title set at startup before the panic message"),
             ("worker-silent", "current behaviour: a worker-thread panic prints its message onto the live screen"),
         ):
             with self.subTest(behaviour):
