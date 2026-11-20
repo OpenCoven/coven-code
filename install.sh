@@ -233,7 +233,10 @@ install_binary_and_alias() (
   committed=1
 )
 
-mkdir -p "$INSTALL_DIR"
+if ! mkdir -p "$INSTALL_DIR"; then
+  print_message error "Could not create the install directory ${INSTALL_DIR}" >&2
+  exit 1
+fi
 
 if [[ -n "$local_binary" ]]; then
   print_message info "Using local binary: $local_binary"
@@ -295,7 +298,12 @@ if [[ "${SHELL:-}" == */fish ]]; then
   path_check="$path_line"
 fi
 if [[ -n "$shell_rc" ]] && ! grep -qF "$path_check" "$shell_rc" 2>/dev/null; then
-  mkdir -p "$(dirname "$shell_rc")"
+  # Name the directory ourselves: some mkdir builds (uutils on Ubuntu 26.04)
+  # report only "Not a directory" without the path.
+  if ! mkdir -p "$(dirname "$shell_rc")"; then
+    print_message error "Could not create $(dirname "$shell_rc") for ${shell_rc}" >&2
+    exit 1
+  fi
   echo "" >> "$shell_rc"
   echo "# Coven Code" >> "$shell_rc"
   echo "$path_line" >> "$shell_rc"
