@@ -602,7 +602,7 @@
                             <button class="cmd-copy" id="cmd-copy-btn" title="Copy to clipboard">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                             </button>
-                            <span class="cmd-comment" id="cmd-comment-text"># macOS. One-liner installer.</span>
+                            <span class="cmd-comment" id="cmd-comment-text"># macOS. One-liner installer. To replace an existing install that differs, end it with: bash -s -- --force</span>
                             <div class="cmd-line">
                                 <span class="cmd-prompt">$</span>
                                 <span class="cmd-code" id="cmd-code-text">curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash</span>
@@ -636,23 +636,23 @@
             // x86_64 vs aarch64) so each OS only needs one one-liner.
             const commands = {
                 'mac-arm': {
-                    comment: '# macOS. One-liner installer.',
+                    comment: '# macOS. One-liner installer. To replace an existing install that differs, end it with: bash -s -- --force',
                     code: 'curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash'
                 },
                 'mac-intel': {
-                    comment: '# macOS. One-liner installer.',
+                    comment: '# macOS. One-liner installer. To replace an existing install that differs, end it with: bash -s -- --force',
                     code: 'curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash'
                 },
                 'linux-x64': {
-                    comment: '# Linux. One-liner installer.',
+                    comment: '# Linux. One-liner installer. To replace an existing install that differs, end it with: bash -s -- --force',
                     code: 'curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash'
                 },
                 'linux-arm': {
-                    comment: '# Linux. One-liner installer.',
+                    comment: '# Linux. One-liner installer. To replace an existing install that differs, end it with: bash -s -- --force',
                     code: 'curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash'
                 },
                 'windows': {
-                    comment: '# Windows (PowerShell). One-liner installer.',
+                    comment: '# Windows (PowerShell). One-liner installer. To replace an existing install that differs, set COVEN_CODE_INSTALL_FORCE=1 first.',
                     code: 'irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex'
                 },
                 'npm': {
