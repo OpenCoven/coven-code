@@ -57,7 +57,9 @@ EOF
   local install_args=(--version 9.9.9 --install-dir "$install")
   if [[ "$label" == latest ]]; then install_args=(--install-dir "$install"); fi
   set +e
-  HOME="$case_dir/home" SHELL=/bin/false PATH="$fake:/usr/bin:/bin" bash "$ROOT/install.sh" "${install_args[@]}" >"$case_dir/out" 2>&1
+  # The fixture's existing engine differs from the download; consent to
+  # replacing it (#369) so that only the checksum decides.
+  COVEN_CODE_INSTALL_FORCE=1 HOME="$case_dir/home" SHELL=/bin/false PATH="$fake:/usr/bin:/bin" bash "$ROOT/install.sh" "${install_args[@]}" >"$case_dir/out" 2>&1
   status=$?
   set -e
   if [[ "$expect" == pass ]]; then
