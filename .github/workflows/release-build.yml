@@ -86,6 +86,8 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      # The runner is in the key: build output from one image must not be
+      # linked on another, or it can carry that image's glibc symbols.
       - name: Cache cargo registry & build
         uses: actions/cache@v5
         with:
@@ -93,8 +95,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-rust/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-cargo-
+          key: ${{ matrix.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release binary (native)
         if: ${{ !matrix.cross }}
