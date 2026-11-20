@@ -176,7 +176,7 @@ On startup the registry refreshes itself from [models.dev](https://models.dev) i
 
 | Variable | Effect |
 |---|---|
-| `COVEN_CODE_DISABLE_MODELS_FETCH=1` | Skip the network refresh; use only the bundled snapshot + disk cache |
+| `COVEN_CODE_DISABLE_MODELS_FETCH=1` | Skip the network refresh; use only the bundled snapshot + disk cache. `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` does the same, and also turns off the startup release check ([configuration.md](configuration.md#environment-variables)) |
 | `COVEN_CODE_MODELS_URL` / `MODELS_DEV_URL` | Override the models.dev catalog URL |
 | `COVEN_CODE_ENABLE_EXPERIMENTAL_MODELS=1` | Include experimental/preview models in the picker |
 

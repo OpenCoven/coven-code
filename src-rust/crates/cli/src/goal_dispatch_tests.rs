@@ -65,21 +65,31 @@ fn goal_dispatch_recovery_blocks_actual_idle_selector() {
     app.context_window_size = 100;
     app.context_used_tokens = 99;
     app.auto_compact_threshold = 90;
-    assert_eq!(select_idle_compaction(&app, false), Some(99));
+    // Long enough to have a head to summarise (#571).
+    let history: Vec<claurst_core::types::Message> = (0..12)
+        .map(|n| claurst_core::types::Message::user(format!("m {n}")))
+        .collect();
+    assert_eq!(
+        select_idle_compaction(&app, false, &history),
+        Some(IdleCompaction::Start(99))
+    );
     app.open_rate_limit_recovery("limited".into(), Some(60));
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "visible recovery must own idle time"
     );
     app.rate_limit_recovery.request_retry(None);
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "pending retry must own idle time"
     );
     assert!(app.rate_limit_recovery.take_retry_directive().is_some());
-    assert_eq!(select_idle_compaction(&app, false), Some(99));
+    assert_eq!(
+        select_idle_compaction(&app, false, &history),
+        Some(IdleCompaction::Start(99))
+    );
 }
 
 fn context(path: PathBuf) -> ToolContext {
@@ -1352,17 +1362,21 @@ fn goal_dispatch_file_preparation_blocks_idle_compaction() {
     app.context_window_size = 100;
     app.context_used_tokens = 99;
     app.auto_compact_threshold = 90;
+    // Long enough to have a head to summarise (#571).
+    let history: Vec<claurst_core::types::Message> = (0..12)
+        .map(|n| claurst_core::types::Message::user(format!("m {n}")))
+        .collect();
     app.file_injection_dialog
         .show("@large.txt".into(), vec![], vec![], 1, None);
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "file preparation must retain its original owner"
     );
     app.file_injection_dialog.dismiss();
     app.file_injection_force = true;
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "prepared resubmission must retain its owner"
     );

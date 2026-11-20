@@ -81,6 +81,7 @@ fn run_with_input(
         "COVEN_CODE_API_BASE",
         "COVEN_CODE_CLAUDE_BIN",
         "COVEN_PARENT",
+        "COVEN_CODE_ACP_LOG",
     ] {
         command.env_remove(key);
     }
@@ -208,6 +209,34 @@ fn invalid_settings_fail_acp_startup() {
     assert!(!status.success(), "ACP ignored invalid settings: {stderr}");
     assert!(stderr.contains("Failed to load ACP settings"), "{stderr}");
     assert!(stdout.is_empty(), "ACP wrote a response: {stdout}");
+}
+
+/// A saved bypass mode is refused on stderr; the protocol stream carries the
+/// same responses as a start with nothing saved.
+#[test]
+fn saved_bypass_mode_is_refused_on_stderr_without_changing_the_wire() {
+    let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"nonexistent"}}
+"#;
+    let (_status, plain_stdout, plain_stderr) =
+        run_with_input(request, Duration::from_secs(20), None);
+    let (_status, stdout, stderr) = run_with_input(
+        request,
+        Duration::from_secs(20),
+        Some(r#"{"config":{"permission_mode":"bypassPermissions"}}"#),
+    );
+    assert!(
+        stderr.contains("Saved bypass mode not restored"),
+        "the refusal is logged:\n{stderr}"
+    );
+    assert!(
+        !plain_stderr.contains("not restored"),
+        "nothing saved, nothing said:\n{plain_stderr}"
+    );
+    assert_eq!(
+        stdout, plain_stdout,
+        "the saved mode must not change the protocol stream"
+    );
 }
 
 #[test]

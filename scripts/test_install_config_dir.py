@@ -17,7 +17,8 @@ class InstallerConfigDirectoryTests(unittest.TestCase):
         self.home.mkdir()
         self.commands = self.root / "commands"
         self.commands.mkdir()
-        for command in ("uname", "tr", "mkdir", "mktemp", "cp", "chmod", "mv", "ln", "rm", "grep", "dirname"):
+        for command in ("uname", "tr", "mkdir", "mktemp", "cp", "chmod", "mv", "ln", "rm", "grep", "dirname",
+                        "cmp"):
             executable = shutil.which(command)
             self.assertIsNotNone(executable, command)
             (self.commands / command).symlink_to(executable)

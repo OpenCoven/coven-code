@@ -55,12 +55,17 @@ class TerminalObserver:
 
     It retains a current cell grid rather than searching historical printable
     bytes. Resizing invalidates the grid until the engine repaints it.
+
+    Keyboard flags have one stack per screen, as in the kitty keyboard
+    protocol: a push or pop applies to the screen that is current when it
+    arrives, so a pop sent after leaving the alternate screen does not undo
+    a push made on it.
     """
     def __init__(self, cols, rows):
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = ""
         self.modes = {25: True}
-        self.keyboard_depth = 0
+        self.keyboard_depths = {"main": 0, "alternate": 0}
         self.resize(cols, rows)
 
     def resize(self, cols, rows):
@@ -113,11 +118,12 @@ class TerminalObserver:
                     if int(value) == 1049 and final == "h":
                         self.resize(self.cols, self.rows)
             return
+        screen = "alternate" if self.modes.get(1049, False) else "main"
         if final == "u" and params.startswith(">"):
-            self.keyboard_depth += 1
+            self.keyboard_depths[screen] += 1
             return
         if final == "u" and params.startswith("<"):
-            self.keyboard_depth = max(0, self.keyboard_depth - int(params[1:] or "1"))
+            self.keyboard_depths[screen] = max(0, self.keyboard_depths[screen] - int(params[1:] or "1"))
             return
         if intermediate or any(ch not in "0123456789;" for ch in params):
             return
@@ -177,8 +183,9 @@ class TerminalObserver:
                 failures.append(description)
         if not self.modes[25]:
             failures.append("cursor hidden")
-        if self.keyboard_depth:
-            failures.append(f"keyboard stack depth {self.keyboard_depth}")
+        for screen, depth in self.keyboard_depths.items():
+            if depth:
+                failures.append(f"keyboard stack depth {depth} on the {screen} screen")
         return failures
 
 
@@ -187,7 +194,7 @@ def set_size(fd, cols, rows):
 
 
 class Engine:
-    def __init__(self, binary, root, size, fake_failure=False):
+    def __init__(self, binary, root, size, fake_failure=False, ui=None):
         home = os.path.join(root, "home")
         project = os.path.join(root, "project")
         code_home = os.path.join(root, "code")
@@ -215,6 +222,8 @@ class Engine:
             "TERM": "xterm-256color",
             "LANG": "en_US.UTF-8",
         }
+        if ui is not None:
+            env["COVEN_CODE_UI"] = ui
         # A local executable produces a genuine provider error without auth,
         # credentials, or a network request. It reads the owned stdin to EOF.
         if fake_failure:
@@ -384,7 +393,7 @@ def run(binary, report, label, start, steps, fake_failure=False):
             with open(os.path.join(receipts, name + ".json"), "w", encoding="utf-8") as f:
                 json.dump({"label": label, "exit": code, "termios_before": engine.termios_before,
                            "termios_after": engine.termios_after, "mode_failures": failures,
-                           "final_modes": engine.observer.modes, "keyboard_depth": engine.observer.keyboard_depth},
+                           "final_modes": engine.observer.modes, "keyboard_depths": engine.observer.keyboard_depths},
                           f, default=lambda value: list(value), indent=2)
             with open(os.path.join(receipts, name + "-recovery.txt"), "w", encoding="utf-8") as f:
                 f.write(getattr(engine, "recovery_frame", ""))
