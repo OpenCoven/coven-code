@@ -268,6 +268,19 @@ jobs:
           cargo test -p claurst --locked --test workspace_policy_unavailable | tee "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
           grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
 
+      # coven-code must exit when its run is complete while a process that a
+      # background command started still holds the command's output pipes
+      # (#535). On Windows the runtime reads those pipes on its blocking pool.
+      # This step runs even if an earlier step failed, and requires both
+      # tests to pass; a test added to the file needs the count raised.
+      - name: Test that coven-code exits while a background command's descendant runs
+        if: ${{ !cancelled() }}
+        working-directory: src-rust
+        shell: bash
+        run: |
+          cargo test -p claurst --locked --test exit_with_background_task | tee "$RUNNER_TEMP/exit-with-background-task-tests.txt"
+          grep -E 'test result: ok\. 2 passed' "$RUNNER_TEMP/exit-with-background-task-tests.txt"
+
       # The Job Object module is Windows-only, so its unit tests run only here.
       # A filter that matches nothing passes, so require at least one test.
       - name: Test the Job Object resume decision

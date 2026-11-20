@@ -492,8 +492,30 @@ fn abandon_interactive_turn(
     app.take_cancellation_request();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// How long work still on the runtime's blocking pool may take to finish
+/// once the engine is done (#535). The pool also reads child processes'
+/// output pipes, and on Windows such a read ends only when every process
+/// holding the pipe has exited. A process that a background command started
+/// can hold it for as long as it runs; dropping the runtime used to wait for
+/// it, and an exit in that state now takes this long. Saved state and the
+/// output of `--print` and stream-json are complete before `run` returns.
+/// What is left is work started without waiting for it, such as an append
+/// to the prompt history, or, for ACP, a write to stdout that a client which
+/// has stopped reading still holds up.
+const RUNTIME_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    // A panic in `run` would drop the runtime while unwinding, which waits
+    // without a limit; shut it down first, then go on unwinding.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(run())));
+    runtime.shutdown_timeout(RUNTIME_EXIT_GRACE);
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+async fn run() -> anyhow::Result<()> {
     use claurst_tools::workspace_scope;
     use std::path::Path;
     let raw_args: Vec<String> = std::env::args().collect();
