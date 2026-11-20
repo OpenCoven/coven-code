@@ -2311,6 +2311,29 @@ fn settle_queued_permission(
     }
 }
 
+/// Opens the panel for a queued request that still needs an answer, and
+/// keeps the request waiting for it. Next guards every panel against stray
+/// keys (#411). Classic guards a follow-up, a panel opened within
+/// `PERMISSION_ARM_DELAY` of another one in the same turn closing, so a
+/// decision key doubled or repeated for the closed panel cannot decide this
+/// one (#411 decision 17). Any other Classic panel, including a turn's
+/// first, takes keys at once, as before. The rule is
+/// time-based: a writer whose request is queued only once the call before it
+/// has run for longer than the delay opens as a first panel would.
+fn open_permission_panel(
+    app: &mut claurst_tui::app::App,
+    pending_permissions: &mut claurst_tools::PendingPermissionStore,
+    pending: claurst_tools::PendingPermissionRequest,
+    follow_up: bool,
+) {
+    let request = permission_request_from_core(&pending);
+    let guard = follow_up || app.renderer == claurst_tui::application::UiRenderer::Next;
+    app.permission_request = Some(if guard { request.guarded() } else { request });
+    pending_permissions
+        .waiting
+        .insert(pending.tool_use_id.clone(), pending);
+}
+
 fn handle_bridge_permission_response(
     dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -2814,7 +2837,7 @@ async fn compact_idle_conversation(
         result = claurst_query::compact_conversation(client, &original, model) => result,
     };
     match compacted {
-        Ok(compacted) => {
+        Ok(Some(compacted)) => {
             let message = compacted
                 .first()
                 .cloned()
@@ -2825,6 +2848,13 @@ async fn compact_idle_conversation(
                 usage: claurst_core::types::UsageInfo::default(),
             }
         }
+        // `select_idle_compaction` does not start a worker for a history this
+        // short (#571). Should one start anyway, it ends as a failure, not as
+        // a compaction: the history and the context count stay as they were,
+        // and, as after any failure, auto-compaction is off for the session.
+        Ok(None) => claurst_query::QueryOutcome::Error(claurst_core::error::ClaudeError::Other(
+            "Too few messages to compact".to_string(),
+        )),
         Err(err) => claurst_query::QueryOutcome::Error(err),
     }
 }
@@ -2931,7 +2961,10 @@ impl InteractiveQuery {
             // ends the forwarder; joining both keeps the worker's lifetime
             // covering delivery of every event it produced. The buffer is
             // bounded: when it is full the query loop waits for the
-            // forwarder instead of growing it.
+            // forwarder instead of growing it. After a cancel the loop no
+            // longer waits (#572); events it could not queue go to a relay
+            // that holds a sender until they are queued, so the worker still
+            // ends only once the forwarder has taken everything.
             let (turn_tx, turn_rx) =
                 tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
             let forward = forward_scoped_events(turn_rx, self.events, self.generation);
@@ -3037,7 +3070,21 @@ async fn persist_interactive_session(
     saved
 }
 
-fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option<u64> {
+/// What idle auto-compaction does once the context is over its threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleCompaction {
+    /// Summarise the history; the context is this many percent full.
+    Start(u64),
+    /// The history is too short to have a head to summarise (#571), so
+    /// nothing starts; the context is this many percent full.
+    NothingToCompact(u64),
+}
+
+fn select_idle_compaction(
+    app: &claurst_tui::App,
+    query_running: bool,
+    messages: &[claurst_core::types::Message],
+) -> Option<IdleCompaction> {
     if !app.auto_compact_enabled
         || app.context_window_size == 0
         || app.is_streaming
@@ -3052,7 +3099,34 @@ fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option
         return None;
     }
     let used_pct = (app.context_used_tokens as f64 / app.context_window_size as f64 * 100.0) as u64;
-    (used_pct >= u64::from(app.auto_compact_threshold)).then_some(used_pct)
+    if used_pct < u64::from(app.auto_compact_threshold) {
+        return None;
+    }
+    if claurst_query::compact::has_messages_to_compact(messages) {
+        Some(IdleCompaction::Start(used_pct))
+    } else {
+        Some(IdleCompaction::NothingToCompact(used_pct))
+    }
+}
+
+/// The context is over the auto-compact threshold but the history is too
+/// short to summarise (#571). The context count is kept, since nothing was
+/// summarised. The status says so once for each history length: the loop
+/// asks every pass, and a turn that adds messages asks again.
+fn note_nothing_to_compact(
+    app: &mut claurst_tui::App,
+    used_pct: u64,
+    history_len: usize,
+    noted_len: &mut Option<usize>,
+) {
+    if *noted_len == Some(history_len) {
+        return;
+    }
+    *noted_len = Some(history_len);
+    app.status_message = Some(format!(
+        "Context {}% full — too few messages to compact yet.",
+        used_pct
+    ));
 }
 
 #[derive(Debug, Clone)]
@@ -3467,6 +3541,39 @@ fn suspend_job(
     Ok(())
 }
 
+/// `/config appearance` under Next. Everything but `save` stays in memory.
+async fn run_next_appearance_command(
+    app: &mut claurst_tui::App,
+    args: &str,
+    working_dir: &std::path::Path,
+) {
+    use claurst_tui::next::appearance::{
+        parse_appearance_command, run_appearance_command, AppearanceCommand,
+    };
+    let reply = match parse_appearance_command(args) {
+        Err(reason) => reason,
+        Ok(command) => {
+            let save_failure = (command == AppearanceCommand::Save
+                && !app.next_shell.appearance_edits.is_empty())
+            .then(|| Settings::save_appearance_edits(&app.next_shell.appearance_edits).err())
+            .flatten()
+            .map(|error| format!("{error:#}"));
+            let saved = Settings::load_hierarchical(working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            run_appearance_command(
+                app,
+                command,
+                &saved,
+                save_failure,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+                crossterm::terminal::size().unwrap_or((80, 24)),
+            )
+        }
+    };
+    app.push_message(claurst_core::types::Message::assistant(reply));
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -3647,17 +3754,19 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
-    // Classic drops the Next-only defaults, so upgrading an older file must
-    // keep a binding in every context when only they use its chord.
-    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
-        &Settings::config_dir(),
-        claurst_tui::next::NEXT_ONLY_ACTIONS,
-    );
+    // The bindings App::new loaded and resolves keys with.
+    let user_keybindings = app.user_keybindings.clone();
     app.select_renderer(renderer);
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
             std::env::var(name).ok()
         });
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        app.next_shell.apply_layout(
+            settings.next_appearance.layout,
+            crossterm::terminal::size().unwrap_or((80, 24)),
+        );
+    }
     // Next shows the chord that works now; say once which bindings changed.
     if renderer == claurst_tui::application::UiRenderer::Next {
         for notice in claurst_tui::next::key_conflict_notices(&user_keybindings) {
@@ -3914,6 +4023,9 @@ async fn run_interactive(
     let (bg_completion_tx, mut bg_completion_rx) =
         mpsc::unbounded_channel::<claurst_tools::BgTaskCompletion>();
     let mut current_query: Option<(tokio::task::JoinHandle<QueryOutcome>, MessagesArc)> = None;
+    // History length at which idle auto-compaction last found nothing to
+    // compact (#571), so it says so once per length.
+    let mut nothing_to_compact_at: Option<usize> = None;
     // Active effort level (None = use model default / High).
     // Tracks the user's /effort selection; flows into qcfg each turn.
     let mut current_effort: Option<claurst_core::effort::EffortLevel> = None;
@@ -3960,6 +4072,10 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
+    let mut settings_screen_was_open = false;
+    // When the loop last saw a permission panel open, or closed one; cleared
+    // when a turn ends. See `open_permission_panel`.
+    let mut panel_last_open: Option<std::time::Instant> = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -4018,6 +4134,21 @@ async fn run_interactive(
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
         }
+        // `/settings` writes reduceMotion; Next draws the new value when it closes.
+        if renderer == claurst_tui::application::UiRenderer::Next
+            && settings_screen_was_open
+            && !app.settings_screen.visible
+        {
+            let saved = Settings::load_hierarchical(&tool_ctx.working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            claurst_tui::next::appearance::apply_presentation(
+                &mut app,
+                &saved,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+            );
+        }
+        settings_screen_was_open = app.settings_screen.visible;
 
         // Opt-in trace timing separates widget/layout work from completed draw
         // (including backend diff and terminal writes). No content is recorded.
@@ -4225,6 +4356,15 @@ async fn run_interactive(
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(&cmd_name, &cmd_args, &mut cmd_ctx) {
                                 app.show_command_error(error);
                                 continue;
+                            }
+                            if renderer == claurst_tui::application::UiRenderer::Next {
+                                if let Some(args) =
+                                    claurst_tui::next::appearance::appearance_args(&cmd_name, &cmd_args)
+                                {
+                                    run_next_appearance_command(&mut app, args, &tool_ctx.working_dir)
+                                        .await;
+                                    continue;
+                                }
                             }
                             let canonical_path = claurst_commands::canonical_catalog_path(&cmd_name, &cmd_args)
                                 .or_else(|| app.canonical_command_path(&cmd_name, &cmd_args));
@@ -4443,7 +4583,7 @@ async fn run_interactive(
                                         .map(|title| claurst_tui::terminal_title_topic(renderer, title));
                                     claurst_tui::update_terminal_title(title.as_deref());
                                     app.status_message =
-                                        Some(format!("Resumed session {}.", &session.id[..8]));
+                                        Some(format!("Resumed session {}.", claurst_core::truncate::short_id(&session.id)));
                                 }
                                 Some(CommandResult::RenameSession(title)) => {
                                     session.title = Some(title.clone());
@@ -5081,6 +5221,7 @@ async fn run_interactive(
                                 None
                             };
                             app.permission_request = None;
+                            panel_last_open = Some(std::time::Instant::now());
 
                             if let Some(prefix) = bash_prefix {
                                 app.bash_prefix_allowlist.insert(prefix);
@@ -5202,14 +5343,22 @@ async fn run_interactive(
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
-                Event::Resize(_, _) => {
-                    // Terminal resize - will be handled on next draw
+                // The next draw lays out for the new size; Next's layout
+                // setting decides first whether the inspector fits.
+                Event::Resize(width, height)
+                    if app.renderer == claurst_tui::application::UiRenderer::Next =>
+                {
+                    app.next_shell.follow_layout((width, height));
                 }
                 _ => {}
             }
         }
 
         if app.permission_request.is_none() {
+            // A panel opening within the arming delay of the last one closing
+            // is a follow-up: a key meant for the closed panel can still come.
+            let follow_up = panel_last_open
+                .is_some_and(|seen| seen.elapsed() < claurst_tui::dialogs::PERMISSION_ARM_DELAY);
             loop {
                 let next_pending = pending_permissions.lock().queue.pop_front();
                 let Some(pending) = next_pending else {
@@ -5244,26 +5393,20 @@ async fn run_interactive(
 
                 match reevaluated {
                     Some(claurst_core::permissions::PermissionDecision::Ask { .. }) | None => {
-                        let tool_use_id = pending.tool_use_id.clone();
-                        let request = permission_request_from_core(&pending);
-                        // Next guards approvals against stray keys (#411);
-                        // Classic keeps its existing dialog behavior.
-                        app.permission_request = Some(
-                            if app.renderer == claurst_tui::application::UiRenderer::Next {
-                                request.guarded()
-                            } else {
-                                request
-                            },
+                        open_permission_panel(
+                            &mut app,
+                            &mut pending_permissions.lock(),
+                            pending,
+                            follow_up,
                         );
-                        pending_permissions
-                            .lock()
-                            .waiting
-                            .insert(tool_use_id, pending);
                         break;
                     }
                     Some(decision) => settle_queued_permission(&mut app, pending, decision),
                 }
             }
+        }
+        if app.permission_request.is_some() {
+            panel_last_open = Some(std::time::Instant::now());
         }
         app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
@@ -5402,7 +5545,21 @@ async fn run_interactive(
         // Auto-compact: when enabled and context usage reaches the configured
         // threshold with no query running, summarize through the dedicated
         // no-tools compaction path instead of starting an agentic turn.
-        if let Some(used_pct) = select_idle_compaction(&app, current_query.is_some()) {
+        let idle_compaction = select_idle_compaction(&app, current_query.is_some(), &messages);
+        if idle_compaction.is_none() {
+            // A turn, a cleared conversation or a lower count: say it again
+            // the next time there is nothing to compact.
+            nothing_to_compact_at = None;
+        }
+        if let Some(IdleCompaction::NothingToCompact(used_pct)) = idle_compaction {
+            note_nothing_to_compact(
+                &mut app,
+                used_pct,
+                messages.len(),
+                &mut nothing_to_compact_at,
+            );
+        }
+        if let Some(IdleCompaction::Start(used_pct)) = idle_compaction {
             app.auto_compact_running = true;
             app.status_message = Some(format!("Context {}% full — auto-compacting…", used_pct));
 
@@ -5550,6 +5707,7 @@ async fn run_interactive(
                         );
                         if let Some((call_id, allowed)) = decided {
                             app.record_permission_decision(&call_id, allowed);
+                            panel_last_open = Some(std::time::Instant::now());
                         }
                     }
                     Ok(TuiBridgeEvent::SessionNameUpdate { title }) => {
@@ -6060,6 +6218,9 @@ async fn run_interactive(
         // Sync messages from a task seen finished before the drain above.
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
+                // The next turn's first panel is not a follow-up of this
+                // turn's last one, however soon it opens.
+                panel_last_open = None;
                 // Get the outcome and handle errors
                 let query_outcome = handle.await;
                 match &query_outcome {
@@ -7561,6 +7722,114 @@ mod tests {
         server.abort();
     }
 
+    /// #571: idle compaction of a history too short to summarise is not a
+    /// finished compaction. No request is sent, the conversation is as it
+    /// was, and the status neither says it completed nor zeroes the count.
+    #[tokio::test]
+    async fn idle_compaction_of_a_short_history_is_not_reported_as_complete() {
+        let (client, mut requests, server) = compaction_fixture(true).await;
+        let history: Vec<_> = compactable_history().into_iter().take(11).collect();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        assert_eq!(
+            serde_json::to_value(&*messages.lock().await).unwrap(),
+            serde_json::to_value(&history).unwrap(),
+            "the conversation is unchanged"
+        );
+        assert!(requests.try_recv().is_err(), "no summary request was sent");
+
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        app.context_used_tokens = 9_000;
+        finish_idle_compaction(&mut app, Some(&outcome));
+        assert_ne!(
+            app.status_message.as_deref(),
+            Some("Auto-compact complete."),
+            "{outcome:?}"
+        );
+        assert_eq!(app.context_used_tokens, 9_000, "nothing was summarised");
+        server.abort();
+    }
+
+    /// #571: the worker is not started for a short history, but one that is
+    /// ends as a failure, the same as any other failed compaction.
+    #[tokio::test]
+    async fn an_idle_compaction_worker_given_a_short_history_fails() {
+        let (client, _requests, server) = compaction_fixture(true).await;
+        let history: Vec<_> = compactable_history().into_iter().take(11).collect();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::Error(_)),
+            "{outcome:?}"
+        );
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        finish_idle_compaction(&mut app, Some(&outcome));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Auto-compact failed and was disabled for this session.")
+        );
+        assert!(!app.auto_compact_enabled);
+        server.abort();
+    }
+
+    /// An App whose context is 95% full, over its 90% auto-compact threshold.
+    fn app_with_a_full_context() -> claurst_tui::App {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_threshold = 90;
+        app.context_window_size = 200_000;
+        app.context_used_tokens = 190_000;
+        app
+    }
+
+    /// #571: over the threshold, idle auto-compaction starts only when the
+    /// history has a head to summarise, that is more than 11 messages.
+    #[test]
+    fn idle_compaction_starts_only_with_a_head_to_summarise() {
+        let mut app = app_with_a_full_context();
+        let history = compactable_history();
+        assert_eq!(
+            select_idle_compaction(&app, false, &history[..11]),
+            Some(IdleCompaction::NothingToCompact(95))
+        );
+        assert_eq!(
+            select_idle_compaction(&app, false, &history[..12]),
+            Some(IdleCompaction::Start(95))
+        );
+        app.context_used_tokens = 100_000;
+        assert_eq!(select_idle_compaction(&app, false, &history[..11]), None);
+    }
+
+    /// #571: a full context in a short history is reported once for each
+    /// history length.
+    #[test]
+    fn nothing_to_compact_is_said_once_per_history_length() {
+        let mut app = app_with_a_full_context();
+        let mut noted = None;
+        note_nothing_to_compact(&mut app, 95, 9, &mut noted);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Context 95% full — too few messages to compact yet.")
+        );
+        app.status_message = None;
+        note_nothing_to_compact(&mut app, 95, 9, &mut noted);
+        assert_eq!(app.status_message, None, "not repeated on every pass");
+        note_nothing_to_compact(&mut app, 96, 11, &mut noted);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Context 96% full — too few messages to compact yet."),
+            "a turn that added messages is reported again"
+        );
+    }
+
     /// #408: a worker that does not watch the token (a tool or approval that
     /// ignores it) is waited for. If it finishes within `TURN_EXIT_WAIT`, the
     /// conversation it wrote is what is kept. Idle auto-compaction watches the
@@ -7775,6 +8044,54 @@ mod tests {
             },
             rx,
         )
+    }
+
+    /// Decision 17 of #411: Classic guards a follow-up panel the way Next
+    /// guards every panel, and leaves its first panel as it was.
+    #[test]
+    fn classic_guards_only_a_follow_up_panel_and_next_guards_every_panel() {
+        use claurst_tui::application::UiRenderer;
+        use claurst_tui::dialogs::{handle_permission_key_at, PERMISSION_ARM_DELAY};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        for (renderer, follow_up, guarded) in [
+            (UiRenderer::Classic, false, false),
+            (UiRenderer::Classic, true, true),
+            (UiRenderer::Next, false, true),
+            (UiRenderer::Next, true, true),
+        ] {
+            let tag = format!("{renderer:?}, follow-up: {follow_up}");
+            let mut app = claurst_tui::App::new(
+                claurst_core::config::Config::default(),
+                claurst_core::cost::CostTracker::new(),
+            );
+            app.renderer = renderer;
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            let (pending, _decision) = bridge_permission_fixture("perm-follow-up");
+            open_permission_panel(&mut app, &mut store, pending, follow_up);
+            assert!(store.waiting.contains_key("perm-follow-up"), "{tag}");
+            let Some(panel) = app.permission_request.as_mut() else {
+                panic!("{tag}: no panel opened");
+            };
+            assert_eq!(panel.arming, guarded, "{tag}");
+            let focused = panel.options[panel.selected_option].key;
+            assert_eq!(focused, if guarded { 'n' } else { 'y' }, "{tag}");
+
+            // A y that reaches the panel as it opens decides it only when
+            // the panel is not guarded.
+            let opened = panel.quiet_since;
+            assert_eq!(
+                handle_permission_key_at(panel, y, opened),
+                !guarded,
+                "{tag}"
+            );
+            if guarded {
+                // A y after a quiet gap still allows it.
+                let armed = opened + PERMISSION_ARM_DELAY;
+                assert!(handle_permission_key_at(panel, y, armed), "{tag}");
+                assert_eq!(panel.options[panel.selected_option].key, 'y', "{tag}");
+            }
+        }
     }
 
     #[test]
