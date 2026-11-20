@@ -4,7 +4,12 @@
 // the default JSONL storage.  Enabled by adding `rusqlite` to the
 // crate's dependencies (already done via `features = ["bundled"]`).
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
+
+use crate::crypto_utils::sha256_hex_str;
+use crate::types::{ContentBlock, Message, MessageContent, Role};
 
 /// A persistent SQLite session + message store.
 pub struct SqliteSessionStore {
@@ -42,6 +47,73 @@ impl SqliteSessionStore {
         )?;
 
         Ok(Self { conn })
+    }
+
+    /// Index a session's messages for search, one row per message.
+    ///
+    /// A message with a uuid is stored under it. That id is unique across the
+    /// whole index, so a message copied with its uuid into another session (a
+    /// branch) stays indexed under the session that stored it first. A message without one (most
+    /// user messages, tool results included) is stored under an id derived
+    /// from the session, its role, the SHA-256 of its text and how many earlier
+    /// uuid-less messages in the session have the same role and text. Saving
+    /// the same session again, or after it has grown, derives the same ids for
+    /// the messages already indexed, so it adds rows only for new ones; the
+    /// same text sent twice is two rows.
+    ///
+    /// The id follows the text, not the position. After a compaction or a
+    /// rewind, a message whose role and text match one already indexed maps
+    /// onto that row and adds nothing; search still finds the session. Rows
+    /// are never removed here, so text later rewound away stays findable. A
+    /// message with no text, such as a tool result, is indexed with empty
+    /// content, as an assistant message holding only a tool call already is.
+    ///
+    /// Indexes written before #566 keep their one row with the id "unknown"
+    /// (the first uuid-less message ever indexed). It is not deleted, so its
+    /// session can hold that text twice once it is saved again.
+    ///
+    /// Best effort per message: every message is tried, and the first error is
+    /// returned.
+    pub fn index_messages<'a>(
+        &self,
+        session_id: &str,
+        messages: impl IntoIterator<Item = &'a Message>,
+    ) -> anyhow::Result<()> {
+        let mut earlier: HashMap<(&str, String), usize> = HashMap::new();
+        let mut first_error = None;
+        for message in messages {
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            let content: Cow<'_, str> = match &message.content {
+                MessageContent::Text(text) => Cow::Borrowed(text),
+                MessageContent::Blocks(blocks) => Cow::Owned(
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+            };
+            let id = match message.uuid.as_deref() {
+                Some(uuid) => Cow::Borrowed(uuid),
+                None => {
+                    let hash = sha256_hex_str(&content);
+                    let occurrence = earlier.entry((role, hash.clone())).or_insert(0);
+                    let id = format!("{session_id}:{role}:{hash}:{occurrence}");
+                    *occurrence += 1;
+                    Cow::Owned(id)
+                }
+            };
+            if let Err(error) = self.save_message(session_id, &id, role, &content, None) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Insert or replace a session record.  `created_at` is preserved on
@@ -171,6 +243,7 @@ fn session_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ToolResultContent;
 
     fn store_with_session() -> (tempfile::TempDir, SqliteSessionStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -292,5 +365,61 @@ mod tests {
             stored_message,
             ("user".to_owned(), "original content".to_owned(), Some(0.25))
         );
+    }
+
+    fn stored_rows(store: &SqliteSessionStore) -> Vec<(String, String)> {
+        let mut statement = store
+            .conn
+            .prepare("SELECT id, content FROM messages ORDER BY content, id")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn index_messages_keeps_each_message_once_across_saves() {
+        let (_dir, store) = store_with_session();
+        let mut answer = Message::assistant_blocks(vec![
+            ContentBlock::Text {
+                text: "answer".into(),
+            },
+            ContentBlock::Text {
+                text: "text".into(),
+            },
+        ]);
+        answer.uuid = Some("answer-uuid".into());
+        let tool_result = || {
+            Message::user_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-1".into(),
+                content: ToolResultContent::Text("output".into()),
+                is_error: None,
+            }])
+        };
+        let messages = [
+            Message::user("hello"),
+            answer,
+            tool_result(),
+            Message::user("again"),
+            tool_result(),
+            Message::user("hello"),
+        ];
+        // Each save holds the whole transcript so far, which grows, and the
+        // last one is saved twice.
+        for end in [1, 3, messages.len(), messages.len()] {
+            store.index_messages("session-1", &messages[..end]).unwrap();
+        }
+
+        let rows = stored_rows(&store);
+        let contents: Vec<_> = rows.iter().map(|(_, content)| content.as_str()).collect();
+        assert_eq!(contents, ["", "", "again", "answer text", "hello", "hello"]);
+        assert!(rows.iter().any(|(id, _)| id == "answer-uuid"));
+        assert!(rows.iter().all(|(id, _)| id != "unknown"));
+        assert_eq!(session_state(&store).1, 6);
+        for text in ["hello", "again", "answer"] {
+            assert_eq!(store.search_sessions(text).unwrap().len(), 1, "{text}");
+        }
     }
 }

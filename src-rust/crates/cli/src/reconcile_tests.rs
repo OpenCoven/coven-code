@@ -510,7 +510,13 @@ async fn an_open_rewind_holds_compaction_and_cuts_at_the_chosen_message() {
         cli.app.context_window_size = 100;
         cli.app.context_used_tokens = 99;
         cli.app.auto_compact_threshold = 90;
-        assert_eq!(select_idle_compaction(&cli.app, false), Some(99), "{case}");
+        // Long enough to have a head to summarise (#571).
+        let compactable: Vec<Message> = (0..12).map(|n| Message::user(format!("m {n}"))).collect();
+        assert_eq!(
+            select_idle_compaction(&cli.app, false, &compactable),
+            Some(IdleCompaction::Start(99)),
+            "{case}"
+        );
 
         // `/rewind`, as the loop runs it: the App's intercept, then the
         // `CommandResult::OpenRewindOverlay` arm.
@@ -518,7 +524,7 @@ async fn an_open_rewind_holds_compaction_and_cuts_at_the_chosen_message() {
         cli.app.replace_messages(cli.messages.clone());
         cli.app.open_rewind_flow();
         assert_eq!(
-            select_idle_compaction(&cli.app, false),
+            select_idle_compaction(&cli.app, false, &compactable),
             None,
             "{case}: compaction started under the rewind"
         );
