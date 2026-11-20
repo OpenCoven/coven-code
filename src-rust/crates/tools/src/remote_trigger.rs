@@ -94,7 +94,7 @@ impl Tool for RemoteTriggerTool {
             Err(e) => return ToolResult::error(format!("HTTP error: {e}")),
         };
 
-        let target_prefix = &params.session_id[..params.session_id.len().min(8)];
+        let target_prefix = claurst_core::truncate::short_id(&params.session_id);
 
         if resp.status().is_success() {
             match resp.json::<Value>().await {
