@@ -37,12 +37,17 @@ jobs:
             os: windows-latest
             artifact: coven-code-windows-x86_64
             ext: .exe
+          # A Linux archive can need any glibc symbol of the image that links it
+          # (docs/installation.md), and ubuntu-latest moves to each new Ubuntu
+          # release. The x86_64 row links on the runner, so it names the image.
+          # The aarch64 row links inside the cross image; it names the same
+          # runner so both Linux archives build on one known host.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             artifact: coven-code-linux-x86_64
             ext: ""
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             artifact: coven-code-linux-aarch64
             ext: ""
             cross: true
@@ -81,6 +86,8 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      # The runner is in the key: build output from one image must not be
+      # linked on another, or it can carry that image's glibc symbols.
       - name: Cache cargo registry & build
         uses: actions/cache@v5
         with:
@@ -88,8 +95,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-rust/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-cargo-
+          key: ${{ matrix.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release binary (native)
         if: ${{ !matrix.cross }}

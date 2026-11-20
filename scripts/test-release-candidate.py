@@ -79,6 +79,19 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn('        if: inputs.upload\n        uses: actions/upload-artifact@', build)
         self.assertIn('name: ${{ matrix.artifact }}\n', build)
 
+    def test_linux_archives_build_on_a_named_ubuntu_image(self):
+        # ubuntu-latest moves to each new Ubuntu release, and the x86_64 archive
+        # needs the glibc of the image that links it (docs/installation.md).
+        build = job(BUILD, 'build')
+        rows = {artifact: runner for runner, artifact in
+                re.findall(r'\n\s+os: (\S+)\n\s+artifact: (\S+)', build)}
+        linux = {artifact: runner for artifact, runner in rows.items() if '-linux-' in artifact}
+        self.assertEqual(linux, {'coven-code-linux-x86_64': 'ubuntu-24.04',
+                                 'coven-code-linux-aarch64': 'ubuntu-24.04'})
+        # A cache saved on one image must not restore onto another.
+        self.assertIn("key: ${{ matrix.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}\n", build)
+        self.assertIn('restore-keys: ${{ matrix.os }}-${{ matrix.target }}-cargo-\n', build)
+
     def test_packaging_commands_are_the_release_commands(self):
         for command in ('python scripts/package-release.py artifacts release',
                         'node scripts/generate-release-checksums.mjs release'):
