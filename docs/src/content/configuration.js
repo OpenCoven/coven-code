@@ -94,6 +94,22 @@ export function render() {
   }
 }</code></pre>
 
+    <h2>Next Appearance</h2>
+    <p><code>nextAppearance</code> changes how the Next renderer (<code>COVEN_CODE_UI=next</code>) draws, and nothing else: no value reaches permissions, providers, identity or stored state. Classic ignores it. An invalid value falls back to its default and stays in the file, and so does any key this version does not know.</p>
+    <table>
+      <thead><tr><th>Key</th><th>Values</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>theme</code></td><td><code>auto</code>, <code>dark</code>, <code>light</code></td><td><code>auto</code></td></tr>
+        <tr><td><code>colorMode</code></td><td><code>auto</code>, <code>truecolor</code>, <code>256</code>, <code>16</code>, <code>none</code></td><td><code>auto</code></td></tr>
+        <tr><td><code>glyphs</code></td><td><code>auto</code>, <code>unicode</code>, <code>ascii</code></td><td><code>auto</code></td></tr>
+        <tr><td><code>density</code></td><td><code>comfortable</code>, <code>compact</code></td><td><code>comfortable</code></td></tr>
+        <tr><td><code>layout</code></td><td><code>focus</code>, <code>work</code>, <code>inspect</code></td><td><code>focus</code></td></tr>
+        <tr><td><code>hints</code></td><td><code>true</code>, <code>false</code></td><td><code>false</code></td></tr>
+      </tbody>
+    </table>
+    <p>The top-level <code>reduceMotion</code> setting makes Next's activity indicator static. The <code>work</code> and <code>inspect</code> layouts open the inspector only while the terminal is 120x32 or larger.</p>
+    <p>Under Next, <code>/config appearance</code> (or <code>/settings appearance</code>) lists these settings. <code>/config appearance &lt;setting&gt; &lt;value&gt;</code> previews one at once without writing anything; <code>save</code> keeps the preview, <code>revert</code> drops it, and <code>reset</code> previews the defaults. A save changes only the settings you previewed; every other setting keeps its effect, and keys this version does not know are kept. A settings file that cannot be read as settings is refused and left alone. Project settings can set these keys too and win inside that folder; a save tells you when one does.</p>
+
     <h2>Memory Retention</h2>
     <p>AGENTS.md frontmatter supports lifecycle fields for hosted review memory. <code>expires_at</code> uses <code>YYYY-MM-DD</code> and always wins over retention defaults. <code>retention_class</code> can be <code>standard</code> (no automatic expiry), <code>short_lived</code> (30 days from <code>created_at</code>), <code>security</code> (90 days), or <code>legal_hold</code> (no automatic expiry and requires <code>--force</code> for operator expiry/deletion).</p>
     <p>Operators can run <code>coven-code memory list</code>, <code>expire</code>, <code>redact</code>, <code>delete</code>, <code>conflicts</code>, <code>resolve-conflict</code>, and <code>ledger --json</code>. Redaction and deletion write tombstone stubs; the audit ledger exports ids, timestamps, reasons, and provenance without original removed content.</p>

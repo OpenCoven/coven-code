@@ -14,6 +14,17 @@ pub fn truncate_text(text: &str, max_chars: usize) -> String {
     format!("{}… (truncated)", &text[..end])
 }
 
+/// An id shortened for display: its first 8 characters, or all of it when it
+/// is shorter. Session ids come from `--session-id` and need not be UUIDs, so
+/// they can be shorter than 8 bytes or have a multibyte character across byte
+/// 8; this never cuts inside a character.
+pub fn short_id(id: &str) -> &str {
+    match id.char_indices().nth(8) {
+        Some((end, _)) => &id[..end],
+        None => id,
+    }
+}
+
 /// Truncate a list of lines to at most `max_lines`.
 /// If truncated, appends a `"… N more lines"` indicator.
 pub fn truncate_lines(lines: &[String], max_lines: usize) -> (Vec<String>, bool) {
@@ -93,6 +104,17 @@ mod tests {
         let t = truncate_text("hello world", 5);
         assert!(t.starts_with("hello"));
         assert!(t.contains("truncated"));
+    }
+
+    #[test]
+    fn short_id_keeps_eight_characters_without_splitting_one() {
+        assert_eq!(short_id(""), "");
+        assert_eq!(short_id("ab"), "ab");
+        assert_eq!(short_id("abcdefgé"), "abcdefgé");
+        assert_eq!(short_id("abcdefgéh"), "abcdefgé");
+        assert_eq!(short_id("日本語セッション"), "日本語セッション");
+        assert_eq!(short_id("日本語セッション名"), "日本語セッション");
+        assert_eq!(short_id("0f8e2c1a-7b6d-4e5f-9a8b-1c2d3e4f5a6b"), "0f8e2c1a");
     }
 
     #[test]
