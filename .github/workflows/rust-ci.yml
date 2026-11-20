@@ -229,7 +229,7 @@ jobs:
   windows-foreground:
     name: Windows foreground command cleanup
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -307,17 +307,30 @@ jobs:
           done
 
       # cmd.exe must get a command's double quotes exactly as written (#517).
-      # Each of these five crates hands a command line to cmd.exe and has a
-      # test file for it. This step runs even if an earlier step failed, tries
-      # every crate, and requires tests from each.
+      # Each of these six crates hands a command line to cmd.exe and has a
+      # test file for it; claurst-mcp's opens a URL with `start`. This step
+      # runs even if an earlier step failed, tries every crate, and requires
+      # tests from each.
       - name: Test that cmd.exe gets a command's quotes as written
         if: ${{ !cancelled() }}
         working-directory: src-rust
         shell: bash
         run: |
           failed=0
-          for package in claurst-core claurst-plugins claurst-tools claurst-query claurst-commands; do
+          for package in claurst-core claurst-plugins claurst-tools claurst-query claurst-commands claurst-mcp; do
             cargo test -p "$package" --locked --test windows_cmd_quotes | tee "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
             grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
           done
           exit "$failed"
+
+      # The terminal opens the keybindings file with `cmd.exe /C start`, which
+      # must get the file's path whole (#517). The test is in the terminal
+      # crate's unit tests, so it runs here by module. This step runs even if
+      # an earlier step failed, and requires at least one passed test.
+      - name: Test that the terminal opens a file by its whole path
+        if: ${{ !cancelled() }}
+        working-directory: src-rust
+        shell: bash
+        run: |
+          cargo test -p claurst-tui --locked --lib app::windows_open_tests | tee "$RUNNER_TEMP/tui-windows-open-tests.txt"
+          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/tui-windows-open-tests.txt"
