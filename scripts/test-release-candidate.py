@@ -79,6 +79,15 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn('        if: inputs.upload\n        uses: actions/upload-artifact@', build)
         self.assertIn('name: ${{ matrix.artifact }}\n', build)
 
+    def test_linux_archives_build_on_a_named_ubuntu_image(self):
+        # ubuntu-latest moves to each new Ubuntu release and would raise the
+        # glibc the Linux archives need (docs/installation.md).
+        rows = {artifact: runner for runner, artifact in
+                re.findall(r'\n\s+os: (\S+)\n\s+artifact: (\S+)', job(BUILD, 'build'))}
+        linux = {artifact: runner for artifact, runner in rows.items() if '-linux-' in artifact}
+        self.assertEqual(linux, {'coven-code-linux-x86_64': 'ubuntu-24.04',
+                                 'coven-code-linux-aarch64': 'ubuntu-24.04'})
+
     def test_packaging_commands_are_the_release_commands(self):
         for command in ('python scripts/package-release.py artifacts release',
                         'node scripts/generate-release-checksums.mjs release'):
