@@ -2961,7 +2961,10 @@ impl InteractiveQuery {
             // ends the forwarder; joining both keeps the worker's lifetime
             // covering delivery of every event it produced. The buffer is
             // bounded: when it is full the query loop waits for the
-            // forwarder instead of growing it.
+            // forwarder instead of growing it. After a cancel the loop no
+            // longer waits (#572); events it could not queue go to a relay
+            // that holds a sender until they are queued, so the worker still
+            // ends only once the forwarder has taken everything.
             let (turn_tx, turn_rx) =
                 tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
             let forward = forward_scoped_events(turn_rx, self.events, self.generation);
@@ -4580,7 +4583,7 @@ async fn run_interactive(
                                         .map(|title| claurst_tui::terminal_title_topic(renderer, title));
                                     claurst_tui::update_terminal_title(title.as_deref());
                                     app.status_message =
-                                        Some(format!("Resumed session {}.", &session.id[..8]));
+                                        Some(format!("Resumed session {}.", claurst_core::truncate::short_id(&session.id)));
                                 }
                                 Some(CommandResult::RenameSession(title)) => {
                                     session.title = Some(title.clone());
