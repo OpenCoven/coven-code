@@ -109,6 +109,18 @@ fn settings_save_only_edited_child() {
     // session: a project file replaces the theme even when it leaves it out.
     let plain = project.parent().unwrap().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
+    // The project search walks up past the scratch folder from here; on
+    // Windows the temp folder sits under the user's profile.
+    for dir in plain.ancestors().skip(1) {
+        for name in ["settings.json", "settings.jsonc"] {
+            let stray = dir.join(".coven-code").join(name);
+            assert!(
+                !stray.exists(),
+                "{} would act as project settings for this test",
+                stray.display()
+            );
+        }
+    }
 
     // No user settings file yet; the session runs in the project folder.
     let _ = std::fs::remove_file(&file);
