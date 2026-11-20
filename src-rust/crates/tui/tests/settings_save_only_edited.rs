@@ -105,11 +105,15 @@ fn settings_save_only_edited_child() {
     )
     .unwrap();
 
-    // No user settings file yet.
+    // A folder without project settings, so the shared theme reaches the
+    // session: a project file replaces the theme even when it leaves it out.
+    let plain = project.parent().unwrap().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+
+    // No user settings file yet; the session runs in the project folder.
     let _ = std::fs::remove_file(&file);
     let mut config = session_config(&project);
     assert_eq!(config.custom_system_prompt.as_deref(), Some(PROJECT_PROMPT));
-    assert!(matches!(config.theme, Theme::Light), "shared theme applies");
     edit_through_screen(&mut config, 4321);
     let raw = std::fs::read_to_string(&file).unwrap();
     let saved = Settings::load_sync().unwrap();
@@ -124,13 +128,16 @@ fn settings_save_only_edited_child() {
     assert_eq!(config.model.as_deref(), Some(CLI_MODEL));
     assert_eq!(config.custom_system_prompt.as_deref(), Some(PROJECT_PROMPT));
 
-    // Values already in the user file stay as they were saved.
+    // Values already in the user file stay as they were saved; the session
+    // runs outside the project and gets the shared theme.
     std::fs::write(
         &file,
         r#"{"config": {"model": "saved-model", "append_system_prompt": "saved append", "max_tokens": 1000}}"#,
     )
     .unwrap();
-    let mut config = session_config(&project);
+    let mut config = session_config(&plain);
+    assert!(matches!(config.theme, Theme::Light), "shared theme applies");
+    assert_eq!(config.model.as_deref(), Some(CLI_MODEL));
     edit_through_screen(&mut config, 8765);
     let raw = std::fs::read_to_string(&file).unwrap();
     let saved = Settings::load_sync().unwrap();
@@ -141,8 +148,9 @@ fn settings_save_only_edited_child() {
         saved.config.append_system_prompt.as_deref(),
         Some("saved append")
     );
-    assert_eq!(saved.config.custom_system_prompt, None);
     assert_no_session_values(&raw, &saved);
+    // The session keeps the shared theme it started with.
+    assert!(matches!(config.theme, Theme::Light));
     println!("settings-save-only-edited-fixture-complete");
 }
 
