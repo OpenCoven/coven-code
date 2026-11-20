@@ -5739,6 +5739,15 @@ impl App {
                 self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
             }
 
+            // ---- ESC: vim leaves Insert, Visual, a pending command or the
+            // `:` and `/` lines (#569). Everything above takes Escape first:
+            // modals and overlays, notices, key bindings, transcript focus
+            // and a running turn's cancel.
+            KeyCode::Esc if self.prompt_input.vim_enabled => {
+                self.prompt_input.vim_command("Escape");
+                self.refresh_prompt_input();
+            }
+
             // ---- Quit / cancel ----------------------------------------
             // Accept both 'c' and 'C' so Shift+Ctrl+C also triggers copy
             // (issue #149 follow-up).
@@ -9988,6 +9997,107 @@ role = "Research"
         assert!(app.intercept_slash_command("vim"));
         assert!(app.prompt_input.vim_enabled);
         assert!(app.intercept_slash_command("vim"));
+        assert!(!app.prompt_input.vim_enabled);
+    }
+
+    /// Escape reaches vim from the composer in both renderers (#569). It
+    /// leaves Insert, so `0` and `i` are vim commands, and leaving an insert
+    /// made before the end of the text does not panic.
+    #[test]
+    fn escape_takes_vim_out_of_insert_in_both_renderers() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        for renderer in [
+            crate::application::UiRenderer::Classic,
+            crate::application::UiRenderer::Next,
+        ] {
+            let mut app = make_app();
+            app.renderer = renderer;
+            assert!(app.intercept_slash_command("vim"));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+            for c in "ab".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            for c in "0ix".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            assert_eq!(app.prompt_input.text, "xab", "{renderer:?}");
+            // Visual mode is left the same way.
+            app.handle_key_event(press_key(KeyCode::Char('v'), KeyModifiers::NONE));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Visual, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+        }
+    }
+
+    /// With vim on, a running turn still takes Escape first; the next
+    /// Escape goes to vim.
+    #[test]
+    fn escape_cancels_a_running_turn_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.is_streaming = true;
+        app.handle_key_event(esc);
+        assert!(!app.is_streaming);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+        app.handle_key_event(esc);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Normal);
+    }
+
+    /// With vim on, transcript focus still takes Escape first.
+    #[test]
+    fn escape_returns_focus_from_the_transcript_before_vim_takes_it() {
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.focus = FocusTarget::Transcript;
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.focus, FocusTarget::Input);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, Next's inspector still takes Escape first, through its
+    /// key binding.
+    #[test]
+    fn escape_closes_the_next_inspector_before_vim_takes_it() {
+        let mut app = make_app();
+        app.renderer = crate::application::UiRenderer::Next;
+        app.prompt_input.vim_enabled = true;
+        app.next_shell.inspector = Some(crate::next::InspectorPage::Views);
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.next_shell.inspector.is_none());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, a notice still takes Escape first.
+    #[test]
+    fn escape_dismisses_a_notice_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.notifications.push(
+            crate::notifications::NotificationKind::Info,
+            "a notice".to_string(),
+            None,
+        );
+        app.handle_key_event(esc);
+        assert!(app.notifications.is_empty());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim off, Escape on an idle composer still changes nothing, as
+    /// before vim took Escape.
+    #[test]
+    fn escape_without_vim_leaves_the_idle_composer_alone() {
+        let mut app = make_app();
+        app.set_prompt_text("draft".to_string());
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.prompt_input.text, "draft");
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
         assert!(!app.prompt_input.vim_enabled);
     }
 
