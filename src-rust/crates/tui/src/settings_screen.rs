@@ -221,54 +221,65 @@ impl SettingsScreen {
         self.edit_value.clear();
     }
 
-    /// Apply all pending changes to settings and persist them.
+    /// Apply all pending changes to the session and save them.
+    ///
+    /// `config` is the session's live config: it holds this start's CLI
+    /// flags, a resumed session's model and values from shared and project
+    /// settings. Only the edited fields go to the user's settings file.
     pub fn apply_and_save(&mut self, config: &mut Config) {
-        for (field, value) in &self.pending_changes {
-            match field.as_str() {
-                "max_tokens" => {
-                    if let Ok(n) = value.parse::<u32>() {
-                        config.max_tokens = Some(n);
-                    }
+        let changes = std::mem::take(&mut self.pending_changes);
+        for (field, value) in &changes {
+            if apply_edit(config, field, value) {
+                match field.as_str() {
+                    "compact_threshold" => self.compact_threshold = value.clone(),
+                    "fileAutocompleteLimit" => self.file_autocomplete_limit = value.clone(),
+                    "fileInjectionMaxSize" => self.file_injection_max_size = value.clone(),
+                    _ => {}
                 }
-                "output_style" => {
-                    config.output_style = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.clone())
-                    };
-                }
-                "compact_threshold" => {
-                    if let Ok(n) = value.parse::<f32>() {
-                        config.compact_threshold = n;
-                        self.compact_threshold = value.clone();
-                    }
-                }
-                "fileAutocompleteLimit" => {
-                    if let Ok(n) = value.parse::<usize>() {
-                        config.file_autocomplete_limit = n;
-                        self.file_autocomplete_limit = value.clone();
-                    }
-                }
-                "fileInjectionMaxSize" => {
-                    if let Ok(n) = value.parse::<usize>() {
-                        config.file_injection_max_size = n;
-                        self.file_injection_max_size = value.clone();
-                    }
-                }
-                _ => {}
             }
         }
-        // The session's mode can come from a flag or a keystroke, and a start
-        // without `--permission-mode` runs in the saved one, so saving these
-        // fields must not save the session's mode along with them. The saved
-        // mode is read now: it may have changed since this screen opened.
-        let saved_mode = Settings::load_sync()
-            .map(|saved| saved.config.permission_mode)
-            .unwrap_or_else(|_| self.settings_snapshot.config.permission_mode.clone());
-        self.settings_snapshot.config = config.clone();
-        self.settings_snapshot.config.permission_mode = saved_mode;
-        let _ = self.settings_snapshot.save_sync();
-        self.pending_changes.clear();
+        self.save_edit(|settings| {
+            for (field, value) in &changes {
+                apply_edit(&mut settings.config, field, value);
+            }
+        });
+    }
+
+    /// Make one edit to the user's settings file and leave the rest of it as
+    /// it is on disk now, which may differ from when this screen opened. A
+    /// file that cannot be read as settings is not written. The snapshot then
+    /// holds what was saved, so the screen shows it.
+    fn save_edit(&mut self, edit: impl Fn(&mut Settings)) {
+        match Settings::load_sync() {
+            Ok(mut saved) => {
+                edit(&mut saved);
+                let _ = saved.save_sync();
+                self.settings_snapshot = saved;
+            }
+            Err(_) => edit(&mut self.settings_snapshot),
+        }
+    }
+}
+
+/// Set one edited field on `config`. Returns false when the value is not
+/// valid for the field, leaving `config` as it was.
+fn apply_edit(config: &mut Config, field: &str, value: &str) -> bool {
+    match field {
+        "max_tokens" => value.parse().map(|n| config.max_tokens = Some(n)).is_ok(),
+        "output_style" => {
+            config.output_style = (!value.is_empty()).then(|| value.to_string());
+            true
+        }
+        "compact_threshold" => value.parse().map(|n| config.compact_threshold = n).is_ok(),
+        "fileAutocompleteLimit" => value
+            .parse()
+            .map(|n| config.file_autocomplete_limit = n)
+            .is_ok(),
+        "fileInjectionMaxSize" => value
+            .parse()
+            .map(|n| config.file_injection_max_size = n)
+            .is_ok(),
+        _ => false,
     }
 }
 
@@ -846,77 +857,63 @@ fn toggle_or_cycle_current(screen: &mut SettingsScreen) {
                 match entry.key {
                     "auto_compact" => {
                         screen.auto_compact = new_value;
-                        screen.settings_snapshot.auto_compact = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.auto_compact = new_value);
                     }
                     "notifications" => {
                         screen.notifications = new_value;
-                        screen.settings_snapshot.notifications = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.notifications = new_value);
                     }
                     "show_turn_duration" => {
                         screen.show_turn_duration = new_value;
-                        screen.settings_snapshot.show_turn_duration = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.show_turn_duration = new_value);
                     }
                     "reduce_motion" => {
                         screen.reduce_motion = new_value;
-                        screen.settings_snapshot.reduce_motion = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.reduce_motion = new_value);
                     }
                     "terminal_progress_bar" => {
                         screen.terminal_progress_bar = new_value;
-                        screen.settings_snapshot.terminal_progress_bar = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.terminal_progress_bar = new_value);
                     }
                     "verbose" => {
                         screen.verbose = new_value;
-                        screen.settings_snapshot.config.verbose = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.config.verbose = new_value);
                     }
                     "cursor_blink_enabled" => {
                         screen.cursor_blink_enabled = new_value;
-                        screen.settings_snapshot.config.cursor_blink_enabled = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.config.cursor_blink_enabled = new_value);
                     }
                     "auto_copy_enabled" => {
                         screen.auto_copy_enabled = new_value;
-                        screen.settings_snapshot.auto_copy_on_highlight = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.auto_copy_on_highlight = new_value);
                     }
                     "show_cwd" => {
                         screen.show_cwd = new_value;
-                        screen.settings_snapshot.show_cwd = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.show_cwd = new_value);
                     }
                     "show_git_branch" => {
                         screen.show_git_branch = new_value;
-                        screen.settings_snapshot.show_git_branch = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.show_git_branch = new_value);
                     }
                     "auto_commits" => {
                         screen.auto_commits = new_value;
-                        screen.settings_snapshot.config.auto_commits =
-                            if new_value { Some(true) } else { None };
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| {
+                            s.config.auto_commits = if new_value { Some(true) } else { None }
+                        });
                     }
                     "disable_claude_mds" => {
                         screen.disable_claude_mds = new_value;
-                        screen.settings_snapshot.config.disable_claude_mds = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.config.disable_claude_mds = new_value);
                     }
                     "fileInjectionEnabled" => {
                         screen.file_injection_enabled = new_value;
-                        screen.settings_snapshot.config.file_injection_enabled = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.config.file_injection_enabled = new_value);
                     }
                     "fileAutocompleteShowHiddenFiles" => {
                         screen.file_autocomplete_show_hidden_files = new_value;
-                        screen
-                            .settings_snapshot
-                            .config
-                            .file_autocomplete_show_hidden_files = new_value;
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| {
+                            s.config.file_autocomplete_show_hidden_files = new_value
+                        });
                     }
                     _ => {}
                 }
@@ -929,17 +926,17 @@ fn toggle_or_cycle_current(screen: &mut SettingsScreen) {
                 match entry.key {
                     "output_style" => {
                         screen.output_style = new_value.to_string();
-                        screen.settings_snapshot.config.output_style = Some(new_value.to_string());
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| s.config.output_style = Some(new_value.to_string()));
                     }
                     "output_format" => {
                         screen.output_format = new_value.to_string();
-                        screen.settings_snapshot.config.output_format = match new_value {
-                            "json" => claurst_core::config::OutputFormat::Json,
-                            "stream_json" => claurst_core::config::OutputFormat::StreamJson,
-                            _ => claurst_core::config::OutputFormat::Text,
-                        };
-                        let _ = screen.settings_snapshot.save_sync();
+                        screen.save_edit(|s| {
+                            s.config.output_format = match new_value {
+                                "json" => claurst_core::config::OutputFormat::Json,
+                                "stream_json" => claurst_core::config::OutputFormat::StreamJson,
+                                _ => claurst_core::config::OutputFormat::Text,
+                            }
+                        });
                     }
                     _ => {}
                 }
