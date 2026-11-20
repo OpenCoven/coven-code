@@ -84,7 +84,7 @@ mime = "0.3"
 urlencoding = "2"
 open = "5"
 qrcode = "0.14"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 icy_sixel = "0.5"
 image = { version = "0.25", features = ["png", "jpeg"] }
 
