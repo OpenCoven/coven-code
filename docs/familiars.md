@@ -169,7 +169,7 @@ access = "read-only"
 
 `~/.coven/familiars.toml` is **owned by the Coven daemon** when it is running. In that mode coven-code treats the roster as read-only and directs all edits to the daemon.
 
-**Standalone mode** (no daemon socket at `~/.coven/coven.sock`) is different: coven-code owns the file and can write it directly.
+**Standalone mode** (no daemon socket at `$COVEN_HOME/coven.sock`, default `~/.coven/coven.sock`) is different: coven-code owns the file and can write it directly.
 
 - **First-run bootstrap.** Press **F2** with no familiars configured and coven-code writes a starter `~/.coven/familiars.toml` (a `read-only` guide and a `full`-access builder) and opens the switcher so you have something to pick and a template to edit.
 - **Create / rename / remove** from the prompt:
