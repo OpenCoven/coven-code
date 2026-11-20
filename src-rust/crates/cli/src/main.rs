@@ -4205,6 +4205,7 @@ async fn run_interactive(
             None
         };
 
+        let auto_submit = synthetic_event.is_some();
         let evt_opt: Option<Event> = if let Some(e) = synthetic_event {
             Some(e)
         } else if let Some(k) = app.take_pending_key() {
@@ -4263,8 +4264,10 @@ async fn run_interactive(
                     // `any_modal_open` also counts passive banners that render
                     // as overlays but never take a keystroke, and those would
                     // silently eat Enter and strand the conversation.
-                    let any_dialog_open = app.any_blocking_modal_open();
-                    if key.code == KeyCode::Enter && app.is_streaming && !any_dialog_open {
+                    let submit_enter = key.code == KeyCode::Enter
+                        && !app.any_blocking_modal_open()
+                        && (auto_submit || !app.vim_line_open());
+                    if submit_enter && app.is_streaming {
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
                         let input = app.take_input();
@@ -4285,7 +4288,7 @@ async fn run_interactive(
                         }
                         continue;
                     }
-                    if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
+                    if submit_enter && !app.is_streaming {
                         // A plain Enter on an empty prompt opens the latest completed
                         // response reader. Route it through App before take_input(),
                         // which would otherwise consume the key as a no-op.

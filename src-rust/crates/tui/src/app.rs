@@ -4479,11 +4479,14 @@ impl App {
             && self.next_shell.inspector.is_some()
             && context == KeyContext::Chat
             && self.prompt_input.suggestions.is_empty();
-        let contexts = if inspector_layer {
-            vec![KeyContext::Inspector, context]
-        } else {
-            vec![context]
-        };
+        let mut contexts = Vec::with_capacity(3);
+        if inspector_layer {
+            contexts.push(KeyContext::Inspector);
+        }
+        if context == KeyContext::Chat && self.vim_line_open() {
+            contexts.push(KeyContext::VimLine);
+        }
+        contexts.push(context);
         let result = match key_event_to_keystroke(&key) {
             Some(stroke) => self.keybindings.process_layered(stroke, &contexts),
             None => {
@@ -5598,6 +5601,7 @@ impl App {
         // empty and no typeahead item is selected. This must run before the
         // user keybinding resolver, which normally claims Enter as submit.
         if key.code == KeyCode::Enter
+            && !self.vim_line_open()
             && !self.is_streaming
             && self.prompt_input.text.is_empty()
             && self.prompt_input.suggestion_index.is_none()
@@ -5621,6 +5625,7 @@ impl App {
             KeybindingResult::Action(action) => return self.handle_keybinding_action(&action),
             KeybindingResult::Pending => return false,
             KeybindingResult::NoMatch if had_pending_chord => return false,
+            KeybindingResult::Unbound if self.vim_line_open() => return false,
             KeybindingResult::Unbound | KeybindingResult::NoMatch => {}
         }
 
@@ -5704,12 +5709,7 @@ impl App {
         if key.code == KeyCode::Char('v')
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::SUPER))
-            && !matches!(
-                self.prompt_input.vim_mode,
-                crate::prompt_input::VimMode::Normal
-                    | crate::prompt_input::VimMode::Visual
-                    | crate::prompt_input::VimMode::VisualBlock
-            )
+            && !self.vim_blocks_clipboard_paste()
         {
             use crate::image_paste::{
                 read_clipboard_image, read_clipboard_text, read_primary_text,
@@ -6166,6 +6166,16 @@ impl App {
         }
 
         false
+    }
+
+    /// An open Vim command or search line owns the user's Enter before the CLI
+    /// takes the draft for immediate or queued submission.
+    pub fn vim_line_open(&self) -> bool {
+        self.prompt_input.vim_enabled
+            && matches!(
+                self.prompt_input.vim_mode,
+                VimMode::Command | VimMode::Search
+            )
     }
 
     fn current_key_context(&self) -> KeyContext {
@@ -6699,6 +6709,18 @@ impl App {
             "openSearch" => {
                 self.global_search.open();
                 self.refresh_global_search();
+                false
+            }
+            "vimLineAccept" | "vimLineBackspace" if self.vim_line_open() => {
+                self.prompt_input.vim_command(if action == "vimLineAccept" {
+                    "Enter"
+                } else {
+                    "Backspace"
+                });
+                if std::mem::take(&mut self.prompt_input.vim_quit_requested) {
+                    self.should_exit = true;
+                }
+                self.refresh_prompt_input();
                 false
             }
             "submit" if !self.is_streaming => {
@@ -7353,16 +7375,19 @@ impl App {
         }
     }
 
+    fn vim_blocks_clipboard_paste(&self) -> bool {
+        self.prompt_input.vim_enabled
+            && matches!(
+                self.prompt_input.vim_mode,
+                VimMode::Normal | VimMode::Visual | VimMode::VisualBlock
+            )
+    }
+
     fn prompt_can_accept_selection_paste(&self) -> bool {
         !self.is_streaming
             && self.permission_request.is_none()
             && !self.history_search_overlay.visible
-            && !matches!(
-                self.prompt_input.vim_mode,
-                crate::prompt_input::VimMode::Normal
-                    | crate::prompt_input::VimMode::Visual
-                    | crate::prompt_input::VimMode::VisualBlock
-            )
+            && !self.vim_blocks_clipboard_paste()
     }
 
     fn paste_primary_into_prompt(&mut self) -> bool {
@@ -7447,7 +7472,7 @@ impl App {
         // paste-burst capture while it is open.
         !self.is_streaming
             && !self.any_blocking_modal_open()
-            && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
+            && (!self.prompt_input.vim_enabled || self.prompt_input.vim_mode == VimMode::Insert)
     }
 
     /// Take the next key event saved by `try_detect_paste_burst` when
@@ -8545,11 +8570,6 @@ impl App {
                         // -------------------------------------------------------------------
 
                         let should_submit = self.handle_key_event(key);
-                        // Honour `:q`/`:wq` from vim command-line mode
-                        if self.prompt_input.vim_quit_requested {
-                            self.prompt_input.vim_quit_requested = false;
-                            self.should_exit = true;
-                        }
                         if self.should_exit {
                             return Ok(None);
                         }
@@ -10019,6 +10039,44 @@ role = "Research"
         assert!(app.prompt_input.vim_enabled);
         assert!(app.intercept_slash_command("vim"));
         assert!(!app.prompt_input.vim_enabled);
+    }
+
+    #[test]
+    fn vim_command_and_search_own_enter_and_backspace() {
+        let mut app = make_app();
+        assert!(app.intercept_slash_command("vim"));
+        app.set_prompt_text("alpha beta".to_owned());
+        let key = |app: &mut App, code| app.handle_key_event(press_key(code, KeyModifiers::NONE));
+        assert!(key(&mut app, KeyCode::Enter), "Insert submits the draft");
+        key(&mut app, KeyCode::Esc);
+        for c in "/betx".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Char('a'));
+        assert!(!key(&mut app, KeyCode::Enter));
+        assert_eq!(app.prompt_input.cursor, 6);
+        assert_eq!(app.prompt_input.text, "alpha beta");
+        for c in ":qx".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Backspace);
+        assert!(!key(&mut app, KeyCode::Enter));
+        assert!(app.should_exit);
+        assert_eq!(app.prompt_input.text, "alpha beta");
+    }
+
+    #[test]
+    fn disabling_vim_from_normal_restores_paste() {
+        let mut app = make_app();
+        assert!(app.intercept_slash_command("vim"));
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Normal);
+        assert!(!app.prompt_is_accepting_text());
+        assert!(!app.prompt_can_accept_selection_paste());
+        assert!(app.intercept_slash_command("vim"));
+        assert!(app.prompt_is_accepting_text());
+        assert!(app.prompt_can_accept_selection_paste());
     }
 
     /// Escape reaches vim from the composer in both renderers (#569). It
