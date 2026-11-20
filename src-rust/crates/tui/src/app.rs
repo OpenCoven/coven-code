@@ -827,6 +827,11 @@ pub struct App {
     // ---- Visual mode indicators -------------------------------------------
     /// Plan mode — input border turns blue, [PLAN] shown in status bar.
     pub plan_mode: bool,
+    /// Whether the launch, not the saved settings, chose the session's
+    /// permission mode (`--permission-mode`, `--dangerously-skip-permissions`,
+    /// a GitHub context or a scoped workspace). A reload of the saved settings
+    /// (`/config import`) then keeps the session's mode, as a start does.
+    pub permission_mode_from_launch: bool,
     /// "While you were away" summary text shown on the welcome screen.
     pub away_summary: Option<String>,
     /// When streaming stalled (used to turn the spinner red after 3 s).
@@ -1408,6 +1413,7 @@ impl App {
             file_history: None,
             current_turn: None,
             plan_mode: false,
+            permission_mode_from_launch: false,
             away_summary: None,
             stall_start: None,
             settings_screen: SettingsScreen::new(),
@@ -1739,7 +1745,9 @@ impl App {
                 let new_config = new_settings.effective_config();
                 let result_message = claurst_core::summarize_import_result(&result, &paths);
                 let imported_mcp = result.imported_fields.iter().any(|f| f == "mcpServers");
-                self.config = new_config.clone();
+                let session_mode = self.config.permission_mode.clone();
+                self.config = new_config;
+                self.config.permission_mode = self.permission_mode_after_reload(session_mode);
                 self.model_name = self.config.effective_model().to_string();
                 self.cost_tracker.set_model(&self.model_name);
                 self.refresh_context_window_size();
@@ -1767,6 +1775,39 @@ impl App {
                 self.import_config_dialog.close();
             }
         }
+    }
+
+    /// The session's permission mode once the saved settings, now in
+    /// `self.config`, have been reloaded, under the rule a start follows. A
+    /// mode chosen at launch stays. Otherwise a saved `acceptEdits` or `plan`
+    /// applies. A saved bypass mode is never restored and a saved `default`
+    /// cannot be told apart from nothing saved, so both leave the session's
+    /// mode as it is: a reload never loosens it to `default` or to bypass.
+    /// Each reload that changes the mode or refuses a saved bypass says so.
+    fn permission_mode_after_reload(
+        &mut self,
+        session_mode: claurst_core::config::PermissionMode,
+    ) -> claurst_core::config::PermissionMode {
+        use claurst_core::config::PermissionMode;
+        if self.permission_mode_from_launch {
+            return session_mode;
+        }
+        let saved = self.config.permission_mode.clone();
+        let restored = saved.restored_from_settings();
+        let refused = restored.mode != saved;
+        let mode = if refused || saved == PermissionMode::Default {
+            session_mode.clone()
+        } else {
+            restored.mode
+        };
+        // A session already in bypass, chosen in the session, was not refused.
+        if mode != session_mode || (refused && session_mode != saved) {
+            if let Some(notice) = restored.notice {
+                self.notifications
+                    .push(NotificationKind::Warning, notice.to_string(), Some(30));
+            }
+        }
+        mode
     }
 
     pub(crate) fn current_user_turn_index(&self) -> Option<usize> {

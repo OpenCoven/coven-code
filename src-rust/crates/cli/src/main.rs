@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use clap::{ArgAction, Parser, ValueEnum};
 use claurst_core::types::ToolDefinition;
 use claurst_core::{
-    config::{Config, PermissionMode, Settings},
+    config::{Config, PermissionMode, RestoredPermissionMode, Settings},
     constants::APP_VERSION,
     context::ContextBuilder,
     cost::CostTracker,
@@ -354,17 +354,6 @@ impl From<CliPermissionMode> for PermissionMode {
     }
 }
 
-/// The permission mode a start runs in, and what an interactive session
-/// should say about the saved mode.
-#[derive(Debug, PartialEq, Eq)]
-struct StartupPermissionMode {
-    mode: PermissionMode,
-    /// What to show once when the saved mode decided `mode` or was refused,
-    /// short enough for the one-row notification both renderers draw. Always
-    /// `None` for a headless run, which prints nothing extra.
-    notice: Option<&'static str>,
-}
-
 /// Decide the permission mode for a start without
 /// `--dangerously-skip-permissions`.
 ///
@@ -373,34 +362,24 @@ struct StartupPermissionMode {
 /// `/config set permission-mode` lasts across restarts. Two limits keep a
 /// settings file from loosening approvals unseen: a saved bypass mode is
 /// never restored, and a headless run, which has nowhere to say what it
-/// restored, keeps `default`.
+/// restored, keeps `default`. The notice is always `None` for a headless
+/// run, which prints nothing extra.
 fn permission_mode_for_invocation(
     flag: Option<CliPermissionMode>,
     saved: &PermissionMode,
     has_github_context: bool,
     is_headless: bool,
-) -> StartupPermissionMode {
-    let (mode, notice) = if has_github_context {
-        (PermissionMode::BypassPermissions, None)
+) -> RestoredPermissionMode {
+    let mode = if has_github_context {
+        PermissionMode::BypassPermissions
     } else if let Some(flag) = flag {
-        (flag.into(), None)
+        flag.into()
     } else if is_headless {
-        (PermissionMode::Default, None)
+        PermissionMode::Default
     } else {
-        match saved {
-            PermissionMode::Default => (PermissionMode::Default, None),
-            PermissionMode::AcceptEdits => (
-                PermissionMode::AcceptEdits,
-                Some("Saved accept-edits mode restored"),
-            ),
-            PermissionMode::Plan => (PermissionMode::Plan, Some("Saved plan mode restored")),
-            PermissionMode::BypassPermissions => (
-                PermissionMode::Default,
-                Some("Saved bypass mode not restored"),
-            ),
-        }
+        return saved.restored_from_settings();
     };
-    StartupPermissionMode { mode, notice }
+    RestoredPermissionMode { mode, notice: None }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -768,6 +747,12 @@ async fn run() -> anyhow::Result<()> {
         config.hosted_review.allow_auto_memory_persistence = false;
     }
     let mut permission_mode_notice = None;
+    // Whether the launch, not the saved settings, chose the session's mode.
+    // A later reload of the settings (`/config import`) then keeps it.
+    let permission_mode_from_launch = cli.dangerously_skip_permissions
+        || cli.permission_mode.is_some()
+        || github_context.is_some()
+        || scoped_workspace.is_some();
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
         #[cfg(unix)]
@@ -1260,6 +1245,7 @@ async fn run() -> anyhow::Result<()> {
         user_question_rx,
         diagnostic_log,
         permission_mode_notice,
+        permission_mode_from_launch,
     )
     .await;
 
@@ -3604,6 +3590,7 @@ async fn run_interactive(
     >,
     diagnostic_log: Option<diagnostics::DiagnosticLog>,
     permission_mode_notice: Option<&'static str>,
+    permission_mode_from_launch: bool,
 ) -> anyhow::Result<()> {
     use claurst_bridge::{BridgeOutbound, TuiBridgeEvent};
     use claurst_commands::{execute_command, CommandContext, CommandResult};
@@ -3714,6 +3701,7 @@ async fn run_interactive(
     let mut terminal = setup_terminal(renderer)?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
+    app.permission_mode_from_launch = permission_mode_from_launch;
     // What the saved permission mode did to this session, said once in a
     // notification, which both renderers draw. The newest notification is
     // the one shown, so this goes in before the renderer warning and outlasts
@@ -8732,8 +8720,8 @@ mod tests {
         PermissionMode::Plan,
     ];
 
-    fn startup_mode(mode: PermissionMode) -> StartupPermissionMode {
-        StartupPermissionMode { mode, notice: None }
+    fn startup_mode(mode: PermissionMode) -> RestoredPermissionMode {
+        RestoredPermissionMode { mode, notice: None }
     }
 
     /// Classic and Next each draw a notification on one row of a 52-column
