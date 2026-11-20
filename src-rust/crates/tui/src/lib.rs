@@ -31,6 +31,7 @@ use quiet_backend::QuietBackend;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
+use std::sync::{Mutex, Once};
 
 fn env_flag_is_enabled(value: &str) -> bool {
     !matches!(
@@ -261,33 +262,109 @@ pub use file_injection_dialog::{
 // Terminal initialization / teardown helpers (public API)
 // ---------------------------------------------------------------------------
 
-/// Restore terminal capabilities (keyboard enhancement, alternate screen, mouse capture, bracketed paste).
-/// Used by both restore_terminal and the panic hook.
+/// What setup took, so it is given back once (#417).
+#[derive(Clone, Copy)]
+struct TakenTerminal {
+    /// The thread that set the terminal up. Tokio worker threads also run the
+    /// process-wide panic hook (Tokio catches the panic, but the hook still
+    /// fires), so only a panic on this thread restores; otherwise a panicking
+    /// background task would destroy the live TUI.
+    owner: std::thread::ThreadId,
+    /// Whether setup pushed keyboard flags, so restore pops only what it pushed.
+    keyboard_pushed: bool,
+}
+
+/// `Some` from setup until the terminal is given back. Restoring while it is
+/// `None` writes nothing: a successful `/login` restores before the normal
+/// exit restores again, and a panic after either must not restore at all.
+static TAKEN_TERMINAL: Mutex<Option<TakenTerminal>> = Mutex::new(None);
+
+/// The panic hook is installed once per process. Suspend and a failed login
+/// set the terminal up again; chaining a hook each time made a later panic
+/// restore once per setup, with every pop after the first sent on the main
+/// screen.
+static PANIC_HOOK: Once = Once::new();
+
+/// The lock is never held while writing, so a panic cannot poison it; a
+/// poisoned one is used as is.
+fn taken_terminal() -> std::sync::MutexGuard<'static, Option<TakenTerminal>> {
+    TAKEN_TERMINAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Record whether the terminal has keyboard flags pushed, if it is taken.
+fn set_keyboard_pushed(pushed: bool) {
+    if let Some(taken) = taken_terminal().as_mut() {
+        taken.keyboard_pushed = pushed;
+    }
+}
+
+/// Record that this thread has the terminal, with no keyboard flags pushed
+/// yet, and install the panic hook that gives it back if it is not installed.
+/// The hook is built on the first call, so it writes to the first caller's
+/// `writer()`; the product always passes stdout.
+fn take_terminal<W: io::Write + 'static>(writer: fn() -> W) {
+    PANIC_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let taken = *taken_terminal();
+            if let Some(taken) = taken.filter(|t| t.owner == std::thread::current().id()) {
+                // Best-effort restore: ignore errors, we're already unwinding.
+                let mut out = writer();
+                let _ = disable_raw_mode();
+                let _ = restore_terminal_cleanup(&mut out, taken.keyboard_pushed);
+                let _ = execute!(out, crossterm::cursor::Show);
+                *taken_terminal() = None;
+            }
+            previous(panic_info);
+        }));
+    });
+    *taken_terminal() = Some(TakenTerminal {
+        owner: std::thread::current().id(),
+        keyboard_pushed: false,
+    });
+}
+
+/// Restore terminal capabilities (title, keyboard enhancement, alternate
+/// screen, mouse capture, bracketed paste). Used by both restore_terminal and
+/// the panic hook.
 ///
 /// The keyboard flags are popped first. A terminal that implements the kitty
 /// keyboard protocol keeps one flag stack per screen and setup pushed on the
 /// alternate one, so a pop sent after leaving it lands on the main screen's
 /// stack: the alternate stack then keeps one entry per run, and the next
 /// full-screen program that sets no flags itself gets every key as an escape
-/// code.
-fn restore_terminal_cleanup(out: &mut impl io::Write) -> io::Result<()> {
-    #[cfg(not(target_os = "windows"))]
-    execute!(
-        out,
-        PopKeyboardEnhancementFlags,
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-    )?;
+/// code. Once the pop is written it is recorded, so a restore that fails
+/// after it and is tried again does not pop a second time.
+fn restore_terminal_cleanup(out: &mut impl io::Write, keyboard_pushed: bool) -> io::Result<()> {
+    // Restore the original title by clearing it (terminals fall back to default).
+    let _ = execute!(out, crossterm::terminal::SetTitle(""));
 
-    // On Windows, KeyboardEnhancementFlags may not have been pushed
-    // (conhost / older terminals reject the escape).  Pop is harmless
-    // whether it succeeded or not — ignore errors on restore.
+    #[cfg(not(target_os = "windows"))]
+    {
+        if keyboard_pushed {
+            execute!(out, PopKeyboardEnhancementFlags)?;
+            set_keyboard_pushed(false);
+        }
+        execute!(
+            out,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+        )?;
+    }
+
+    // On Windows, crossterm 0.29 never sends the pop: the command reports no
+    // ANSI support there, so `execute!` takes the WinAPI path, which always
+    // returns `Unsupported`. The error is ignored so cleanup goes on; nothing
+    // was pushed (see `setup_terminal`).
     #[cfg(target_os = "windows")]
     {
-        // Pop may fail on legacy Windows conhost where the push was a no-op;
-        // do it best-effort so cleanup never errors out the process.
-        let _ = execute!(out, PopKeyboardEnhancementFlags);
+        if keyboard_pushed {
+            let _ = execute!(out, PopKeyboardEnhancementFlags);
+            set_keyboard_pushed(false);
+        }
         execute!(out, LeaveAlternateScreen, DisableMouseCapture)?;
     }
 
@@ -296,30 +373,15 @@ fn restore_terminal_cleanup(out: &mut impl io::Write) -> io::Result<()> {
 
 /// Set up the terminal for TUI mode (raw mode + alternate screen + mouse capture).
 ///
-/// Also installs a panic hook that restores the terminal before printing the
-/// panic message.  Without this, any panic in rendering code leaves the
-/// terminal in raw mode with mouse capture enabled — the user sees garbage
-/// input until they run `reset`.
+/// Also installs, once per process, a panic hook that restores the terminal
+/// before printing the panic message.  Without this, any panic in rendering
+/// code leaves the terminal in raw mode with mouse capture enabled — the user
+/// sees garbage input until they run `reset`.
 pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTerminal> {
-    // Chain on top of any existing hook (e.g. from a previous call or test harness).
-    // Only restore the terminal when the panic originates on the main thread.
-    // Tokio worker threads also trigger this process-wide hook (Tokio catches
-    // the panic internally but the hook still fires), so without this guard any
-    // panicking background task would destroy the live TUI display while the
-    // main render loop is still running.
-    let main_thread_id = std::thread::current().id();
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        if std::thread::current().id() == main_thread_id {
-            // Best-effort restore — ignore errors, we're already unwinding.
-            let _ = disable_raw_mode();
-            let _ = restore_terminal_cleanup(&mut io::stdout());
-            let _ = execute!(io::stdout(), crossterm::cursor::Show);
-        }
-        original_hook(panic_info);
-    }));
-
     enable_raw_mode()?;
+    let keyboard = should_push_keyboard_enhancement_for_process();
+    // From here on there is something to give back, even if a write below fails.
+    take_terminal(io::stdout);
     let mut stdout = io::stdout();
 
     #[cfg(not(target_os = "windows"))]
@@ -330,7 +392,7 @@ pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTermin
             EnableMouseCapture,
             EnableBracketedPaste,
         )?;
-        if should_push_keyboard_enhancement_for_process() {
+        if keyboard {
             execute!(
                 stdout,
                 PushKeyboardEnhancementFlags(
@@ -338,28 +400,30 @@ pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTermin
                         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
                 ),
             )?;
+            set_keyboard_pushed(true);
         }
     }
 
-    // On Windows, keyboard enhancement is best-effort: conhost and older
-    // terminal builds do not support the kitty keyboard protocol.
-    // crossterm 0.29 improved detection but may still reject in some
-    // configurations.  Warn the user when it fails, then continue.
+    // On Windows, crossterm 0.29 never sends the keyboard enhancement push,
+    // whatever the terminal: the command reports no ANSI support there, so
+    // `execute!` takes the WinAPI path, which always returns `Unsupported`
+    // ("Keyboard progressive enhancement not implemented for the legacy
+    // Windows API"). The error is ignored without a warning, so the TUI
+    // starts without the kitty keyboard protocol.
     #[cfg(target_os = "windows")]
     {
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        // Kitty keyboard protocol is unsupported on legacy Windows conhost;
-        // best-effort — modern Windows Terminal accepts it, conhost returns
-        // "Keyboard progressive enhancement not implemented for the legacy
-        // Windows API" which we ignore so the TUI can still start.
-        if should_push_keyboard_enhancement_for_process() {
-            let _ = execute!(
+        if keyboard
+            && execute!(
                 stdout,
                 PushKeyboardEnhancementFlags(
                     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
                 ),
-            );
+            )
+            .is_ok()
+        {
+            set_keyboard_pushed(true);
         }
     }
 
@@ -371,15 +435,21 @@ pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTermin
     Ok(terminal)
 }
 
-/// Restore the terminal to its original state.
-pub fn restore_terminal(terminal: &mut AppTerminal) -> io::Result<()> {
+/// Restore the terminal to its original state. Once it has been restored,
+/// calling this again writes nothing until the next setup.
+pub fn restore_terminal<W: io::Write>(
+    terminal: &mut Terminal<QuietBackend<CrosstermBackend<W>>>,
+) -> io::Result<()> {
+    let taken = *taken_terminal();
+    let Some(taken) = taken else {
+        return Ok(());
+    };
     disable_raw_mode()?;
-    // Restore the original title by clearing it (terminals fall back to default).
-    let _ = execute!(terminal.backend_mut(), crossterm::terminal::SetTitle(""),);
-    restore_terminal_cleanup(&mut io::stdout())?;
+    restore_terminal_cleanup(terminal.backend_mut(), taken.keyboard_pushed)?;
     // Never skip this as "already shown": the user keeps this cursor.
     terminal.backend_mut().forget_terminal_state();
     terminal.show_cursor()?;
+    *taken_terminal() = None;
     Ok(())
 }
 
@@ -546,8 +616,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn restore_pops_keyboard_flags_before_leaving_the_alternate_screen() {
+        let _serial = serial();
         let mut written = Vec::new();
-        restore_terminal_cleanup(&mut written).unwrap();
+        restore_terminal_cleanup(&mut written, true).unwrap();
         let written = String::from_utf8(written).unwrap();
 
         let pop = written.find("\x1b[<1u");
@@ -561,6 +632,202 @@ mod tests {
             1,
             "one keyboard pop, none after leaving: {written:?}"
         );
+    }
+
+    /// Unix only, as above.
+    #[cfg(unix)]
+    #[test]
+    fn restore_pops_nothing_when_setup_pushed_nothing() {
+        let _serial = serial();
+        let mut written = Vec::new();
+        restore_terminal_cleanup(&mut written, false).unwrap();
+        let written = String::from_utf8(written).unwrap();
+
+        assert!(
+            written.starts_with("\x1b]0;\x07"),
+            "title cleared first: {written:?}"
+        );
+        assert!(written.contains("\x1b[?1049l"), "{written:?}");
+        assert!(!written.contains("\x1b[<"), "no keyboard pop: {written:?}");
+    }
+
+    /// The restore tests share the process-wide record of who has the terminal.
+    /// The panic hook keeps the writer of the first `take_terminal` call, so
+    /// every test passes `|| ThreadWire`.
+    #[cfg(unix)]
+    static TAKEN_TERMINAL_TESTS: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        TAKEN_TERMINAL_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(unix)]
+    thread_local! {
+        static WIRE: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Writes to this thread's `WIRE`, so a test reads what the panic hook,
+    /// which runs on the panicking thread, wrote.
+    #[cfg(unix)]
+    struct ThreadWire;
+
+    #[cfg(unix)]
+    impl io::Write for ThreadWire {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            WIRE.with(|wire| wire.borrow_mut().extend_from_slice(buf));
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn take_wire() -> String {
+        String::from_utf8(WIRE.with(|wire| std::mem::take(&mut *wire.borrow_mut()))).unwrap()
+    }
+
+    /// A suspend sets the terminal up a second time (#417). Unix only, as above.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_after_two_setups_restores_once() {
+        let _serial = serial();
+        take_wire();
+        take_terminal(|| ThreadWire);
+        set_keyboard_pushed(true);
+        take_terminal(|| ThreadWire);
+        set_keyboard_pushed(true);
+
+        let panicked = std::panic::catch_unwind(|| panic!("deliberate panic")).is_err();
+        let written = take_wire();
+
+        assert!(panicked);
+        assert_eq!(
+            written.matches("\x1b[?1049l").count(),
+            1,
+            "one restore: {written:?}"
+        );
+        assert_eq!(
+            written.matches("\x1b[<").count(),
+            1,
+            "one keyboard pop: {written:?}"
+        );
+        assert_eq!(
+            written.matches("\x1b[?25h").count(),
+            1,
+            "cursor shown once: {written:?}"
+        );
+
+        // A panic after the terminal was given back writes nothing.
+        let panicked = std::panic::catch_unwind(|| panic!("deliberate panic")).is_err();
+        assert!(panicked);
+        assert_eq!(take_wire(), "");
+    }
+
+    /// A successful `/login` restores, then the normal exit restores again
+    /// (#417). Unix only, as above.
+    #[cfg(unix)]
+    #[test]
+    fn restoring_twice_writes_the_restore_once() {
+        let _serial = serial();
+        let mut terminal = fixed_terminal(ThreadWire);
+        take_wire();
+        take_terminal(|| ThreadWire);
+        set_keyboard_pushed(true);
+
+        restore_terminal(&mut terminal).unwrap();
+        let first = take_wire();
+        restore_terminal(&mut terminal).unwrap();
+        let second = take_wire();
+
+        assert_eq!(first.matches("\x1b[?1049l").count(), 1, "{first:?}");
+        assert_eq!(first.matches("\x1b[<").count(), 1, "{first:?}");
+        assert_eq!(second, "", "the second restore writes nothing");
+
+        // Nor does a panic after it.
+        let panicked = std::panic::catch_unwind(|| panic!("deliberate panic")).is_err();
+        assert!(panicked);
+        assert_eq!(take_wire(), "");
+    }
+
+    /// Writes to `WIRE` but refuses to leave the alternate screen.
+    #[cfg(unix)]
+    struct RefusesToLeave;
+
+    #[cfg(unix)]
+    impl io::Write for RefusesToLeave {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf.windows(8).any(|seq| seq == b"\x1b[?1049l") {
+                return Err(io::Error::other("refused"));
+            }
+            io::Write::write(&mut ThreadWire, buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn fixed_terminal<W: io::Write>(out: W) -> Terminal<QuietBackend<CrosstermBackend<W>>> {
+        let backend = QuietBackend::new(CrosstermBackend::new(out), false);
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 20, 4)),
+        };
+        Terminal::with_options(backend, options).unwrap()
+    }
+
+    /// `/login` ignores a failed restore, and the exit restores again. Unix
+    /// only, as above.
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_tried_again_after_failing_pops_once() {
+        let _serial = serial();
+        take_wire();
+        take_terminal(|| ThreadWire);
+        set_keyboard_pushed(true);
+
+        assert!(restore_terminal(&mut fixed_terminal(RefusesToLeave)).is_err());
+        restore_terminal(&mut fixed_terminal(ThreadWire)).unwrap();
+        let written = take_wire();
+
+        assert_eq!(
+            written.matches("\x1b[<").count(),
+            1,
+            "one keyboard pop: {written:?}"
+        );
+        assert_eq!(written.matches("\x1b[?1049l").count(), 1, "{written:?}");
+        assert!(taken_terminal().is_none(), "given back");
+    }
+
+    /// Tokio worker threads run the same hook. Unix only, as above.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_on_another_thread_leaves_the_terminal_alone() {
+        let _serial = serial();
+        take_wire();
+        take_terminal(|| ThreadWire);
+        set_keyboard_pushed(true);
+
+        let written = std::thread::spawn(|| {
+            let panicked = std::panic::catch_unwind(|| panic!("deliberate worker panic")).is_err();
+            (panicked, take_wire())
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(
+            written,
+            (true, String::new()),
+            "the worker restores nothing"
+        );
+        let owner = taken_terminal().map(|taken| taken.owner);
+        assert_eq!(owner, Some(std::thread::current().id()), "still taken");
+        *taken_terminal() = None;
     }
 
     // ---- input helpers ---------------------------------------------------

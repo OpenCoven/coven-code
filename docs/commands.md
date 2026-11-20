@@ -1107,9 +1107,12 @@ Enable or disable sandboxed execution of shell commands. When sandbox mode is on
 ## Coven Substrate
 
 These commands integrate Coven Code with the local Coven daemon
-(`~/.coven/coven.sock`, contract `coven.daemon.v1`). They degrade
+(the socket `$COVEN_HOME/coven.sock`, or `~/.coven/coven.sock` when
+`COVEN_HOME` is unset or empty; contract `coven.daemon.v1`). They degrade
 gracefully when the daemon is absent — the daemon makes coven-code
-richer; it is not required.
+richer; it is not required. Coven Code has a daemon client only on Unix
+platforms (macOS, Linux); on Windows it never connects, so the commands that
+need the daemon report it as absent.
 
 ### /coven
 
@@ -1191,8 +1194,11 @@ the slash invocation acts as the confirmation).
 
 #### Offline behaviour
 
-When `~/.coven/coven.sock` is missing, every `/coven` subcommand
-returns the same hint:
+When the daemon socket is missing, `/coven` and `/coven status` name
+the path they checked:
+`Coven daemon socket not found at <path>.`
+followed by `Start it with /coven daemon start (or coven daemon start).`
+The other subcommands that need the daemon return:
 `Coven daemon offline. Try /coven daemon start.`
 The rest of coven-code keeps working — you just lose substrate
 integration.
@@ -1210,7 +1216,7 @@ for the canonical error code list.
 ### /handoff
 
 Hand off the current session context to a Coven familiar. Sends the
-recent transcript to `~/.coven/coven.sock` as a new session under
+recent transcript to the Coven daemon (see [Coven Substrate](#coven-substrate)) as a new session under
 the named familiar, returning the session id.
 
 ```
