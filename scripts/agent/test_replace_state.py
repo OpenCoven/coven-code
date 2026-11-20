@@ -249,6 +249,19 @@ class ReplaceSectionTests(unittest.TestCase):
             once = self.replaced(body, insert=True)
             self.assertEqual(self.replaced(once, other), once.replace("New facts.", "Newer facts."), body)
 
+    def test_structure_inside_a_quote_or_list_is_refused(self):
+        # A quoted or listed heading is still original text that a section
+        # with no marker would otherwise run over.
+        for line in (
+            "> ## Original report", "- ## Original report", "1. ## Original report",
+            "> > ### Done", "  * #### Notes", "2) ## Steps", "> ```", "- ~~~", "> ---",
+        ):
+            body = f"## Current state: 2026-11-18\n\nOld.\n\n{line}\n> crash\n\n**Next action:** x.\n\nKeep.\n"
+            self.refused(body, pattern="edit it by hand")
+        for line in ("> quoted text", "- item", "1. step", "- `code` in a list", "-1 is a number"):
+            body = f"## Current state: 2026-11-18\n\nOld.\n\n{line}\n\n**Next action:** x.\n\nKeep.\n"
+            self.assertEqual(self.replaced(body), NEW + "\nKeep.\n", line)
+
     def test_random_bodies_either_refuse_or_keep_prefix_and_tail(self):
         import random
 

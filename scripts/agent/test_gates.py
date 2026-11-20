@@ -134,7 +134,7 @@ FAKE_RUSTUP = textwrap.dedent(
     """\
     #!/bin/sh
     # Stands in for `rustup run <toolchain> cargo <subcommand> ...`.
-    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}${CARGO_TARGET_X_RUSTFLAGS-}${CARGO_TARGET_X_RUNNER-}${XDG_CACHE_HOME-}${CARGO_PROFILE_TEST_DEBUG_ASSERTIONS-}${COVEN_HOME-}${COVEN_CODE_TEST_HOME-}" >> "$FAKE_CALLS"
+    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}${CARGO_TARGET_X_RUSTFLAGS-}${CARGO_TARGET_X_RUNNER-}${XDG_CACHE_HOME-}${CARGO_PROFILE_TEST_DEBUG_ASSERTIONS-}${COVEN_HOME-}${COVEN_CODE_TEST_HOME-}${RUSTC_BOOTSTRAP-}${RUSTC_WORKSPACE_WRAPPER-}${CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER-}${CARGO_BUILD_RUSTDOCFLAGS-}" >> "$FAKE_CALLS"
     case "$4" in
       clippy) exit "${FAKE_CLIPPY_RC:-0}" ;;
       test)
@@ -273,6 +273,11 @@ class GatesRunTests(unittest.TestCase):
             XDG_CACHE_HOME="/real/cache",
             COVEN_HOME="/real/home",
             COVEN_CODE_TEST_HOME="/real/test-home",
+            # Lets #![feature] code build on the stable pin, which CI rejects.
+            RUSTC_BOOTSTRAP="1",
+            RUSTC_WORKSPACE_WRAPPER="/real/wrapper",
+            CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="/real/wrapper",
+            CARGO_BUILD_RUSTDOCFLAGS=flags,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for call in self.calls.read_text().splitlines():

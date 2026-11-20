@@ -4,14 +4,16 @@
 usage: replace-state.py <issue> <section-file> [--apply] [--insert]
                         [--repo OWNER/NAME] [--out-dir DIR]
 
-It replaces only a section whose end is certain, and refuses anything else,
-so it never drops original issue text. The old section must:
+It replaces only a section whose end it can find, and refuses anything else
+rather than guess. One limit remains (below): a section with no marker at all.
+The old section must:
 - be the body's only "## Current state: YYYY-MM-DD" line, after a blank
   line, with no code fence or HTML anywhere before it;
 - hold, after its heading, only plain lines (paragraphs, lists, tables) up to
   a single-line "**Next action:**" paragraph, with a blank line before it and
   a blank line or the end of the body after it. A line that starts a heading
-  (ATX or setext), a rule or a code fence, HTML anywhere in a line, "]:"
+  (ATX or setext), a rule or a code fence, also inside a quote or list item
+  ("> ## Original report"), HTML anywhere in a line, "]:"
   anywhere (a link or footnote definition, even in a quote or list), or a
   lone carriage return is refused, as is text right after the section that
   starts indented. So are a footnote reference ("[^") and "$$" anywhere,
@@ -70,6 +72,9 @@ NEAR_NEXT_ACTION = re.compile(
 RISKY = re.compile(
     r"\s{0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$|([-*_])(\s*\3){2,}\s*$|```|~~~|<|\[[^\]]+\]:)"
 )
+# Quote and list markers in front of a line: a heading, rule or fence inside
+# a quote or list item is structure too ("> ## Original report").
+CONTAINER = re.compile(r"(?:[ \t]*(?:>|[-*+](?=[ \t])|[0-9]{1,9}[.)](?=[ \t]|$)))*")
 # HTML anywhere in a line: a tag, comment, declaration or processing instruction.
 HTML = re.compile(r"<[A-Za-z!/?]|--!?>")
 # A link or footnote definition applies to the whole body, even inside a quote
@@ -100,7 +105,10 @@ def lines_of(text):
 
 
 def risky(line):
-    return bool(RISKY.match(line) or HTML.search(line) or DEFINITION.search(line))
+    inner = line[CONTAINER.match(line).end() :].lstrip(" \t")
+    return bool(
+        RISKY.match(line) or RISKY.match(inner) or HTML.search(line) or DEFINITION.search(line)
+    )
 
 
 def section_lines(lines, start, what):

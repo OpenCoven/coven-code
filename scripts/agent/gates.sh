@@ -33,9 +33,11 @@
 #   GATES_COMPUTER_USE  1 or 0 to force the computer-use clippy gate on or off
 #                     (on when uname -s is Darwin)
 #
-# Not run here: the macOS job's computer_use::tests and workspace_policy
-# steps, the Windows job, the contract fixtures by name, and the Coven
-# engine contract. Hosted CI runs those.
+# Not run here: the headless-schemas job (release version preflight and the
+# headless JSON Schema fixtures), the installer-checksums jobs, the macOS
+# job's computer_use::tests and workspace_policy steps, the Windows job, the
+# contract fixtures by name, and the Coven engine contract. Hosted CI runs
+# those, so a local pass covers only the gates listed above.
 #
 # Exit status: 0 when every gate passed, 1 when any failed, 2 on usage errors,
 # 3 when the gates passed but the worktree's head or dirty files changed
@@ -83,10 +85,13 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKTREE/src-rust/target}"
 # in CI, and a Coven agent shell's COVEN_HOME would point the tests at a real
 # home instead of the scratch one. A CARGO_TARGET_<triple>_RUNNER of `true`
 # would skip every test, and XDG_* would send test caches to the caller's real
-# directories on Linux. Settings in $CARGO_HOME/config.toml still
-# apply. (COVEN_TOOLCHAIN was read above.)
+# directories on Linux. RUSTC_BOOTSTRAP=1 would let #![feature] code build on
+# the stable pin, and a workspace wrapper could rewrite every rustc call.
+# Settings in $CARGO_HOME/config.toml, and in a .cargo/config.toml in any
+# directory above the worktree, still apply. (COVEN_TOOLCHAIN was read above.)
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS \
-  CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET RUSTC CLIPPY_CONF_DIR
+  CARGO_BUILD_RUSTFLAGS CARGO_BUILD_RUSTDOCFLAGS CARGO_BUILD_TARGET RUSTC CLIPPY_CONF_DIR \
+  RUSTC_BOOTSTRAP RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
 for var in $(compgen -e); do
   case "$var" in
     CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUNNER | CARGO_PROFILE_* | XDG_* | \
