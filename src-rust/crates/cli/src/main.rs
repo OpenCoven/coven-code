@@ -4532,7 +4532,7 @@ async fn run_interactive(
                                         .map(|title| claurst_tui::terminal_title_topic(renderer, title));
                                     claurst_tui::update_terminal_title(title.as_deref());
                                     app.status_message =
-                                        Some(format!("Resumed session {}.", &session.id[..8]));
+                                        Some(format!("Resumed session {}.", claurst_core::truncate::short_id(&session.id)));
                                 }
                                 Some(CommandResult::RenameSession(title)) => {
                                     session.title = Some(title.clone());

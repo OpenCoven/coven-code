@@ -551,8 +551,7 @@ mod tests {
     #[tokio::test]
     async fn a_post_create_command_past_its_limit_is_stopped_with_its_grandchild() {
         let ticker = crate::windows_ticker::Ticker::new();
-        // Unquoted: Rust's quoting for `cmd /C` mangles an inner `"` (#517).
-        // The runner's temporary directory has no spaces.
+        // Unquoted, as the runner's temporary directory has no spaces.
         let hook = format!("cmd /D /C {}", ticker.script().display());
         // The loop runs 60 s unless it is stopped.
         let report = tokio::time::timeout(
