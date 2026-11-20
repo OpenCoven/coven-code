@@ -3504,9 +3504,8 @@ pub fn render_full_status_line(
 
     // Session ID
     if let Some(sid) = &data.session_id {
-        let short = &sid[..sid.len().min(8)];
         spans.push(Span::styled(
-            format!("[session:{}]", short),
+            format!("[session:{}]", claurst_core::truncate::short_id(sid)),
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -3834,6 +3833,36 @@ mod welcome_tests {
     fn welcome_provider_label_falls_back_to_anthropic() {
         let app = make_test_app_with_model_and_familiar(None, None, None, None);
         assert_eq!(welcome_provider_label(&app), "anthropic");
+    }
+
+    /// #573: a session id from `--session-id` can be shorter than 8 bytes or
+    /// have a multibyte character across byte 8. The status line shortens it
+    /// without panicking.
+    #[test]
+    fn full_status_line_shortens_short_and_non_ascii_session_ids() {
+        for (id, shown) in [
+            ("ab", "[session:ab]"),
+            ("abcdefgé", "[session:abcdefgé]"),
+            ("abcdefgéh", "[session:abcdefgé]"),
+            ("日本語セッション名", "[session:日本語セッション]"),
+            ("0f8e2c1a-7b6d-4e5f-9a8b-1c2d3e4f5a6b", "[session:0f8e2c1a]"),
+        ] {
+            let data = StatusLineData {
+                session_id: Some(id.to_string()),
+                ..Default::default()
+            };
+            let area = Rect::new(0, 0, 80, 1);
+            let mut buf = Buffer::empty(area);
+            render_full_status_line(&data, area, &mut buf);
+            // A wide character's second cell is blank, so compare without
+            // whitespace; the expected text has none.
+            let line: String = (0..area.width)
+                .map(|x| buf[(x, 0)].symbol())
+                .collect::<String>()
+                .split_whitespace()
+                .collect();
+            assert!(line.contains(shown), "{id:?}: {line:?}");
+        }
     }
 
     #[test]

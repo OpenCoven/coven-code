@@ -178,7 +178,7 @@ fn normalize_url(url: &str) -> Option<String> {
 ///
 /// Skipped when `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set.
 pub async fn prefetch_official_mcp_urls() {
-    if std::env::var("COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_ok() {
+    if std::env::var_os(claurst_core::traffic_opt_out::DISABLE_NONESSENTIAL_TRAFFIC_ENV).is_some() {
         return;
     }
 

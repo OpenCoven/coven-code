@@ -5780,6 +5780,15 @@ impl App {
                 self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
             }
 
+            // ---- ESC: vim leaves Insert, Visual, a pending command or the
+            // `:` and `/` lines (#569). Everything above takes Escape first:
+            // modals and overlays, notices, key bindings, transcript focus
+            // and a running turn's cancel.
+            KeyCode::Esc if self.prompt_input.vim_enabled => {
+                self.prompt_input.vim_command("Escape");
+                self.refresh_prompt_input();
+            }
+
             // ---- Quit / cancel ----------------------------------------
             // Accept both 'c' and 'C' so Shift+Ctrl+C also triggers copy
             // (issue #149 follow-up).
@@ -8661,19 +8670,17 @@ fn open_file_externally(
     #[cfg(target_os = "windows")]
     {
         let system_root = windows_system_root();
-        let mut command = tokio::process::Command::new(
+        let mut shell = std::process::Command::new(
             std::path::Path::new(&system_root)
                 .join("System32")
                 .join("cmd.exe"),
         );
-        let quoted_path = quote_windows_cmd_path(path);
-        command
-            .args(["/C", "start", ""])
-            .arg(quoted_path)
+        shell
             .env_clear()
             .env("SystemRoot", &system_root)
             .env("WINDIR", &system_root);
-        ExternalOpener::spawn(command)
+        let command = claurst_core::shell::start(shell, path)?;
+        ExternalOpener::spawn(tokio::process::Command::from(command))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -8692,14 +8699,6 @@ fn open_file_externally(
             "No suitable editor found",
         ))
     }
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn quote_windows_cmd_path(path: &std::path::Path) -> std::ffi::OsString {
-    let mut quoted = std::ffi::OsString::from("\"");
-    quoted.push(path.as_os_str());
-    quoted.push("\"");
-    quoted
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -9661,16 +9660,6 @@ role = "Research"
     }
 
     #[test]
-    fn windows_cmd_path_is_passed_as_quoted_argument() {
-        let path = std::path::Path::new(r"C:\temp\safe & literal.txt");
-
-        assert_eq!(
-            quote_windows_cmd_path(path).to_string_lossy(),
-            r#""C:\temp\safe & literal.txt""#
-        );
-    }
-
-    #[test]
     fn windows_system_root_prefers_absolute_system_root() {
         let system_root = std::env::temp_dir().join("windows-root").into_os_string();
         let windir = std::env::temp_dir().join("windir").into_os_string();
@@ -10029,6 +10018,107 @@ role = "Research"
         assert!(app.intercept_slash_command("vim"));
         assert!(app.prompt_input.vim_enabled);
         assert!(app.intercept_slash_command("vim"));
+        assert!(!app.prompt_input.vim_enabled);
+    }
+
+    /// Escape reaches vim from the composer in both renderers (#569). It
+    /// leaves Insert, so `0` and `i` are vim commands, and leaving an insert
+    /// made before the end of the text does not panic.
+    #[test]
+    fn escape_takes_vim_out_of_insert_in_both_renderers() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        for renderer in [
+            crate::application::UiRenderer::Classic,
+            crate::application::UiRenderer::Next,
+        ] {
+            let mut app = make_app();
+            app.renderer = renderer;
+            assert!(app.intercept_slash_command("vim"));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+            for c in "ab".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            for c in "0ix".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            assert_eq!(app.prompt_input.text, "xab", "{renderer:?}");
+            // Visual mode is left the same way.
+            app.handle_key_event(press_key(KeyCode::Char('v'), KeyModifiers::NONE));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Visual, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+        }
+    }
+
+    /// With vim on, a running turn still takes Escape first; the next
+    /// Escape goes to vim.
+    #[test]
+    fn escape_cancels_a_running_turn_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.is_streaming = true;
+        app.handle_key_event(esc);
+        assert!(!app.is_streaming);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+        app.handle_key_event(esc);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Normal);
+    }
+
+    /// With vim on, transcript focus still takes Escape first.
+    #[test]
+    fn escape_returns_focus_from_the_transcript_before_vim_takes_it() {
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.focus = FocusTarget::Transcript;
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.focus, FocusTarget::Input);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, Next's inspector still takes Escape first, through its
+    /// key binding.
+    #[test]
+    fn escape_closes_the_next_inspector_before_vim_takes_it() {
+        let mut app = make_app();
+        app.renderer = crate::application::UiRenderer::Next;
+        app.prompt_input.vim_enabled = true;
+        app.next_shell.inspector = Some(crate::next::InspectorPage::Views);
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.next_shell.inspector.is_none());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, a notice still takes Escape first.
+    #[test]
+    fn escape_dismisses_a_notice_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.notifications.push(
+            crate::notifications::NotificationKind::Info,
+            "a notice".to_string(),
+            None,
+        );
+        app.handle_key_event(esc);
+        assert!(app.notifications.is_empty());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim off, Escape on an idle composer still changes nothing, as
+    /// before vim took Escape.
+    #[test]
+    fn escape_without_vim_leaves_the_idle_composer_alone() {
+        let mut app = make_app();
+        app.set_prompt_text("draft".to_string());
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.prompt_input.text, "draft");
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
         assert!(!app.prompt_input.vim_enabled);
     }
 
@@ -11115,5 +11205,138 @@ role = "Research"
                 .status,
             ToolStatus::Running
         );
+    }
+}
+
+/// #517 on Windows: the keybindings file opens through `cmd.exe /C start`,
+/// which must get the file's path whole. Before, `Command::arg` wrote the
+/// quotes around the path as `\"`, which `cmd.exe` does not unescape.
+///
+/// `cmd.exe` also replaces `%NAME%` with the variable's value.
+///
+/// A file type registered for the current user stands in for the user's
+/// editor: Windows runs this test binary with the path it was asked to open.
+/// Whether a real editor then shows the file can only be seen on a desktop.
+#[cfg(all(test, windows))]
+mod windows_open_tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    const HANDLER: &str = "app::windows_open_tests::file_open_handler";
+    const CAPTURE: &str = "capture";
+
+    // The registry helpers are repeated in claurst-mcp's
+    // `tests/windows_cmd_quotes.rs`: test crates cannot share a module.
+
+    /// Registry keys under `HKCU\Software\Classes`, removed on drop.
+    struct Registered(Vec<String>);
+
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            for key in &self.0 {
+                let _ = Command::new("reg")
+                    .args(["delete", key.as_str(), "/f"])
+                    .output();
+            }
+        }
+    }
+
+    fn reg_add(key: &str, value: &[&str], data: &str) {
+        let output = Command::new("reg")
+            .arg("add")
+            .arg(key)
+            .args(value)
+            .args(["/d", data, "/f"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "reg add {key}: {output:?}");
+    }
+
+    /// Make files ending in `extension` open with this test binary, which
+    /// writes the path it was given to `capture`.
+    fn register_file_type(extension: &str, capture: &Path) -> Registered {
+        let class = format!("CovenTest517File{}", std::process::id());
+        let classes = r"HKCU\Software\Classes";
+        let registered = Registered(vec![
+            format!(r"{classes}\{extension}"),
+            format!(r"{classes}\{class}"),
+        ]);
+        reg_add(&registered.0[0], &["/ve"], &class);
+        let handler = format!(
+            r#""{}" --exact {HANDLER} --ignored --nocapture "{}" "%1""#,
+            std::env::current_exe().unwrap().display(),
+            capture.display(),
+        );
+        reg_add(
+            &format!(r"{classes}\{class}\shell\open\command"),
+            &["/ve"],
+            &handler,
+        );
+        registered
+    }
+
+    async fn wait_for(capture: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(capture) {
+                return text;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nothing was opened within 60 s: {} was not written",
+                capture.display()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn file_opener_passes_the_whole_path() {
+        let directory = tempfile::tempdir().unwrap();
+        // The opener's `cmd.exe` has `SystemRoot` set, and would replace
+        // `%SystemRoot%` with its value; with delayed expansion on, it would
+        // also replace `!SystemRoot!` and drop the `^`.
+        let folder = directory
+            .path()
+            .join("with space & %SystemRoot% !SystemRoot! ^x");
+        std::fs::create_dir(&folder).unwrap();
+        let extension = format!(".coventest517x{}", std::process::id());
+        let file = folder.join(format!("keybindings{extension}"));
+        std::fs::write(&file, "{}").unwrap();
+        let capture = directory.path().join(format!("opened.{CAPTURE}"));
+        let _registered = register_file_type(&extension, &capture);
+
+        let _opener = super::open_file_externally(&file).unwrap();
+
+        let opened = PathBuf::from(wait_for(&capture).await);
+        assert_eq!(
+            std::fs::canonicalize(&opened).ok(),
+            Some(std::fs::canonicalize(&file).unwrap()),
+            "Windows was asked to open {}",
+            opened.display()
+        );
+    }
+
+    /// Run by Windows as the test file type's handler, with the capture file
+    /// and the opened path as its last two arguments. It does nothing unless
+    /// the first of those is a capture file.
+    #[test]
+    #[ignore = "run by Windows as the handler of the test file type"]
+    fn file_open_handler() {
+        let mut arguments = std::env::args_os().rev();
+        let (Some(opened), Some(capture)) = (arguments.next(), arguments.next()) else {
+            return;
+        };
+        let capture = PathBuf::from(capture);
+        if capture
+            .extension()
+            .is_none_or(|extension| extension != CAPTURE)
+        {
+            return;
+        }
+        let partial = capture.with_extension("partial");
+        std::fs::write(&partial, opened.to_string_lossy().as_bytes()).unwrap();
+        std::fs::rename(partial, capture).unwrap();
     }
 }

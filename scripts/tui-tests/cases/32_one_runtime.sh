@@ -206,15 +206,17 @@ if os.path.exists(db_path):
 else:
     indexed, owners, texts = None, None, []
 report("the session index holds one session, with that id", indexed == [first_id], indexed)
-# Current behaviour, not endorsed: the index keys a message by its uuid, and
-# a user message has none, so each is stored under the id "unknown", which
-# the whole index shares, and only the first one ever is kept. The answers
-# carry uuids, so they show both turns reached the index.
+# The answers carry uuids; the user messages have none and are keyed by
+# their session, role, text and repeat count (#566). The session was saved
+# after each turn, so a prompt indexed twice would show here.
 answers = [any(text.strip() == want for text in texts)
            for want in ("TOOL_RESULT_OK", "flood line\nflood line")]
 report("every indexed message belongs to that session, the answer of each turn included",
        owners == [first_id] and all(answers),
        "owners: %s; answers indexed: %s" % (owners, answers))
+prompts = [sum(text == want for text in texts) for want in (tool_prompt, text_prompt)]
+report("each user prompt is indexed once", prompts == [1, 1],
+       "times indexed (tool prompt, text prompt): %s" % prompts)
 
 requests = [line["messages"] for line in read_lines(messages_log)]
 streams = sorted((c for c in read_lines(connections_log) if c.get("stream")),
