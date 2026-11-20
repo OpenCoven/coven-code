@@ -417,7 +417,10 @@ impl CodexProvider {
         crate::model_dispatch::mark_attempted();
         let resp = builder.send().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
-            message: format!("HTTP request failed: {}", e),
+            message: format!(
+                "HTTP request failed: {}",
+                crate::providers::http_util::error_with_causes(&e)
+            ),
             status: None,
             body: None,
         })?;
@@ -485,7 +488,10 @@ impl CodexProvider {
         crate::model_dispatch::mark_attempted();
         let resp = builder.send().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
-            message: format!("HTTP request failed: {}", e),
+            message: format!(
+                "HTTP request failed: {}",
+                crate::providers::http_util::error_with_causes(&e)
+            ),
             status: None,
             body: None,
         })?;

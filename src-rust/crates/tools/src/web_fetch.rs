@@ -190,7 +190,10 @@ async fn semantic_extraction(html: &str, ctx: &ToolContext) -> Option<String> {
     let client = match claurst_api::AnthropicClient::from_config(&ctx.config) {
         Ok(c) => c,
         Err(_) => {
-            warn!("Failed to create Anthropic client for semantic extraction");
+            // Expected whenever the configured provider isn't Anthropic: the
+            // plain-text conversion is used instead. Headless runs print WARN
+            // to stderr, where it read as a reason the turn failed.
+            debug!("No Anthropic client for semantic extraction; using the plain-text conversion");
             return None;
         }
     };
