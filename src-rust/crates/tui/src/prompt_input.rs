@@ -3476,14 +3476,19 @@ impl PromptInputState {
         let mut row = 0usize;
         for (byte, line) in drawn_lines(&self.text) {
             let rows = wrap_ranges(line, width);
-            if let Some(range) = rows.get(target_row - row) {
+            let index = target_row - row;
+            if let Some(range) = rows.get(index) {
                 // The last character edge at or before the target column,
-                // so the cursor never lands inside a wide character.
+                // so the cursor never lands inside a wide character. The end
+                // of any row but a line's last is the start of the next row,
+                // where the cursor would be drawn, so it stops one grapheme
+                // cluster short of it.
+                let last_row = index + 1 == rows.len();
                 let mut at = range.start;
                 let mut col = 0usize;
                 for cluster in line[range.clone()].graphemes(true) {
                     col += UnicodeWidthStr::width(cluster);
-                    if col > target_col {
+                    if col > target_col || (!last_row && at + cluster.len() == range.end) {
                         break;
                     }
                     at += cluster.len();
@@ -6253,6 +6258,33 @@ mod tests {
         assert_eq!(s.cursor, line + 1 + FLAG_JP.len());
         assert!(s.move_visual_up(40));
         assert_eq!(s.cursor, 3);
+    }
+
+    /// Up or Down onto a row that a wide character ended early lands on that
+    /// row (#410). With width 4, `abc漢d` is drawn as `abc` and `漢d`: the
+    /// end of `abc` is the start of `漢d`, so the cursor stops on `c`.
+    #[test]
+    fn moving_onto_a_row_a_wide_character_ended_early_stays_on_that_row() {
+        let text = "abc\u{6F22}d";
+        let mut s = composer(text, text.len());
+        assert_eq!(s.cursor_visual_pos(4), (1, 3));
+        assert!(s.move_visual_up(4));
+        assert_eq!(s.cursor_visual_pos(4).0, 0);
+        assert_eq!(s.cursor, 2);
+
+        // On a line's last row the end of the row is the end of the line,
+        // drawn on that row, so the cursor may still go there.
+        let text = "abcd\n\u{6F22}\u{6F22}x";
+        let mut s = composer(text, text.len());
+        assert_eq!(s.cursor_visual_pos(8), (1, 5));
+        assert!(s.move_visual_up(8));
+        assert_eq!((s.cursor, s.cursor_visual_pos(8)), (4, (0, 4)));
+
+        // Down onto such a row stays on it too, instead of skipping it.
+        let text = "xyz\nabc\u{6F22}d";
+        let mut s = composer(text, 3);
+        assert!(s.move_visual_down(4));
+        assert_eq!((s.cursor, s.cursor_visual_pos(4)), (6, (1, 2)));
     }
 
     #[test]
