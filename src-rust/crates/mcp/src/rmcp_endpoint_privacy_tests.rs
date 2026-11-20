@@ -7,6 +7,12 @@ use tokio::time::{timeout, Duration};
 
 const SECRET: &str = "mcp-endpoint-privacy-canary";
 const TOKEN: &str = "mcp-bearer-canary";
+/// A local address that refuses connections. This assumes nothing listens on
+/// port 1, and no test binds it: binding port 0 picks from the ephemeral
+/// range, far above it. A port freed by dropping a socket is open to any other
+/// test, whose server answers instead of refusing, and the error then has
+/// another category.
+const REFUSED: &str = "127.0.0.1:1";
 
 fn config(url: String) -> claurst_core::config::McpServerConfig {
     claurst_core::config::McpServerConfig {
@@ -25,15 +31,26 @@ fn assert_private(error: &anyhow::Error, stage: &str, category: &str) {
         format!("{error:#}"),
         format!("{error:?}"),
     ] {
-        assert!(rendered.contains("privacy-fixture"), "missing fixture name");
-        assert!(rendered.contains(stage), "missing transport stage");
-        assert!(rendered.contains(category), "missing failure category");
+        // The privacy checks come first, so the messages below can print the
+        // error without exposing fixture secrets.
         for secret in [SECRET, TOKEN, "127.0.0.1", "http://", "userinfo-secret"] {
             assert!(
                 !rendered.contains(secret),
                 "rendered error contains private fixture data"
             );
         }
+        assert!(
+            rendered.contains("privacy-fixture"),
+            "missing fixture name in {rendered:?}"
+        );
+        assert!(
+            rendered.contains(stage),
+            "missing transport stage {stage:?} in {rendered:?}"
+        );
+        assert!(
+            rendered.contains(category),
+            "missing failure category {category:?} in {rendered:?}"
+        );
     }
     assert_eq!(error.chain().count(), 1, "raw sources must not escape");
 }
@@ -95,13 +112,8 @@ fn message() -> rmcp::service::TxJsonRpcMessage<RoleClient> {
 
 #[tokio::test]
 async fn get_refusal_redacts_userinfo_query_and_fragment() {
-    // Release a local port immediately before the refused connection.
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let addr = socket.local_addr().unwrap();
-    drop(socket);
     let error = connect_error(format!(
-        "http://{SECRET}:userinfo-secret@{addr}/sse?key={SECRET}#{SECRET}"
+        "http://{SECRET}:userinfo-secret@{REFUSED}/sse?key={SECRET}#{SECRET}"
     ))
     .await;
     assert_private(&error, "GET", "connection");
@@ -118,13 +130,9 @@ async fn get_builder_failure_redacts_url() {
 
 #[tokio::test]
 async fn discovered_post_refusal_redacts_userinfo_query_and_fragment() {
-    let refused = tokio::net::TcpSocket::new_v4().unwrap();
-    refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let endpoint = format!(
-        "http://{SECRET}:userinfo-secret@{}/messages?key={SECRET}#{SECRET}",
-        refused.local_addr().unwrap()
-    );
-    drop(refused);
+    // The announced endpoint refuses.
+    let endpoint =
+        format!("http://{SECRET}:userinfo-secret@{REFUSED}/messages?key={SECRET}#{SECRET}");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/sse?get={SECRET}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
