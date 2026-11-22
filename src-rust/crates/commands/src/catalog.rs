@@ -1010,7 +1010,7 @@ pub(crate) fn builtin_catalog_template() -> Vec<CommandSpec> {
         CommandSpec::active(
             "update",
             "Check for and install Coven updates",
-            "/update <version|notes>",
+            "/update [version|notes]",
             CovenAdvanced,
             &["update", "upgrade", "version"],
         )

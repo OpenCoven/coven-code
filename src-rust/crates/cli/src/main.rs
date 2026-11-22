@@ -4072,6 +4072,7 @@ async fn run_interactive(
     // When the loop last saw a permission panel open, or closed one; cleared
     // when a turn ends. See `open_permission_panel`.
     let mut panel_last_open: Option<std::time::Instant> = None;
+    let mut update_version = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -4485,6 +4486,17 @@ async fn run_interactive(
 
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
+                                Some(CommandResult::InstallUpdate(version)) => {
+                                    if app.is_streaming || current_query.is_some() {
+                                        app.show_command_error(
+                                            "Wait for the current response to finish before running /update."
+                                                .to_string(),
+                                        );
+                                    } else {
+                                        update_version = Some(version);
+                                        break 'main;
+                                    }
+                                }
                                 Some(CommandResult::ClearConversation) => {
                                     replace_conversation(
                                         &mut session_scope,
@@ -6567,6 +6579,9 @@ async fn run_interactive(
         .await;
 
     terminal_result?;
+    if let Some(version) = update_version {
+        upgrade::run_upgrade(&["--version".to_string(), version]).await?;
+    }
     Ok(())
 }
 
