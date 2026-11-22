@@ -606,6 +606,7 @@ mod tests {
         match frame {
             Ok(InputFrame::User(_)) => "user",
             Ok(InputFrame::AssistantPrefill(_)) => "assistant_prefill",
+            Ok(InputFrame::Recover(_)) => "recover_provider_task",
             Ok(InputFrame::Ignored) => "ignored",
             Err(_) => "error",
         }
