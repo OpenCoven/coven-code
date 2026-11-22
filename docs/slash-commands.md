@@ -55,7 +55,7 @@ Type `/` for contextual suggestions, or open the command palette with Ctrl+K. En
 | Command | Usage | Description |
 |---|---|---|
 | `/account` | `/account <login\|logout\|list\|dedupe\|providers\|connect\|switch\|refresh>` | Manage accounts and provider connections |
-| `/account login` | `/account login [anthropic\|codex] [--console] [--label <name>]` | Sign in to a provider |
+| `/account login` | `/account login [anthropic\|codex\|--codex] [--console] [--label <name>]` | Sign in to a provider |
 | `/account logout` | `/account logout` | Sign out of a provider |
 | `/account list` | `/account list [--viable]` | List configured accounts |
 | `/account dedupe` | `/account dedupe` | Remove duplicate credentials |

@@ -337,7 +337,7 @@ fn child(
     keywords: &[&str],
 ) -> CommandSpec {
     let arguments = match (parent, name) {
-        ("account", "login") => " [anthropic|codex] [--console] [--label <name>]",
+        ("account", "login") => " [anthropic|codex|--codex] [--console] [--label <name>]",
         ("account", "switch") => " [<provider>/<profile-id>]",
         ("account", "list") => " [--viable]",
         ("config", "theme") => " [name]",

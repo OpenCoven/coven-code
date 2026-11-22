@@ -210,13 +210,10 @@ impl AccountRegistry {
 
     /// Persist the registry to disk. Best-effort but propagates I/O errors.
     pub fn save(&self) -> anyhow::Result<()> {
-        let path = Self::path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)?;
-        set_user_only_perms(&path);
+        crate::secret_file::write_secret_file_sync(
+            &Self::path(),
+            serde_json::to_vec_pretty(self)?,
+        )?;
         Ok(())
     }
 
@@ -374,25 +371,6 @@ pub fn backup_dir(provider: &str) -> PathBuf {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-/// Tighten permissions on credential files to `0600` (owner read/write only).
-///
-/// Best-effort and Unix-only: on Windows this is a no-op and access control is
-/// left to the filesystem ACLs of the user's home directory. Every file that
-/// stores a secret (API keys, OAuth access/refresh tokens) routes through this
-/// before it can be read by another local user under a permissive umask.
-#[allow(unused_variables)]
-pub(crate) fn set_user_only_perms(path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +595,35 @@ mod tests {
         assert_eq!(slugify_profile_id("  --weird-- "), "weird");
         assert_eq!(slugify_profile_id(""), "account");
         assert_eq!(slugify_profile_id("kuber@example.com"), "kuber-example-com");
+    }
+
+    #[test]
+    fn switching_profiles_publishes_a_complete_registry_to_new_readers() {
+        let home = tempfile::tempdir().unwrap();
+        let request = crate::config::resolve_config_home(Some(home.path()), None, None, None, None);
+        crate::config::with_requested_home_for_test(request, || {
+            let mut registry = AccountRegistry::default();
+            for id in ["first", "second"] {
+                registry
+                    .upsert(
+                        PROVIDER_CODEX,
+                        AccountProfile {
+                            id: id.into(),
+                            ..Default::default()
+                        },
+                        true,
+                    )
+                    .unwrap();
+            }
+            let previous = std::fs::File::open(AccountRegistry::path()).unwrap();
+            registry.switch_to(PROVIDER_CODEX, "first").unwrap();
+            let old: AccountRegistry = serde_json::from_reader(previous).unwrap();
+            assert_eq!(old.active(PROVIDER_CODEX), Some("second"));
+            assert_eq!(
+                AccountRegistry::load().active(PROVIDER_CODEX),
+                Some("first")
+            );
+        });
     }
 
     #[test]

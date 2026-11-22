@@ -6575,7 +6575,7 @@ async fn run_interactive(
     let terminal_result = terminal_result.map_err(anyhow::Error::from).and_then(|()| {
         if let Some((provider, id)) = selected_account {
             claurst_core::accounts::AccountRegistry::load().switch_to(&provider, &id)?;
-            println!("Selected {provider}/{id}. Relaunch Coven Code to use it.");
+            println!("Account selected. Relaunch Coven Code to use it.");
         }
         Ok(())
     });
