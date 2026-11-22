@@ -163,6 +163,10 @@ struct Cli {
     #[arg(long = "run-budget-capabilities", action = ArgAction::SetTrue)]
     run_budget_capabilities: bool,
 
+    /// Report the targeted provider task continuation protocol.
+    #[arg(long)]
+    task_recovery_capabilities: bool,
+
     /// Custom system prompt
     #[arg(long = "system-prompt", short = 's')]
     system_prompt: Option<String>,
@@ -618,6 +622,13 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let cli = Cli::parse();
+    if cli.task_recovery_capabilities {
+        println!(
+            "{}",
+            serde_json::json!({"provider_task_recovery":1,"profile":"claude-local-research"})
+        );
+        return Ok(());
+    }
     if cli.run_budget_capabilities {
         println!("{}", run_budget::capabilities());
         return Ok(());
@@ -2062,6 +2073,22 @@ async fn run_headless(
 
     while let Some(event) = event_rx.recv().await {
         match &event {
+            QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ProviderLimit(limit))
+                if is_stream_json =>
+            {
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"provider_limit","version":1,"limit":limit})
+                );
+            }
+            QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ProviderTask(task))
+                if is_stream_json =>
+            {
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"provider_task","version":1,"task":task})
+                );
+            }
             QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ContentBlockDelta {
                 delta: claurst_api::streaming::ContentDelta::TextDelta { text },
                 ..

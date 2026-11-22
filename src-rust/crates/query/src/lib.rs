@@ -4560,6 +4560,10 @@ fn map_to_anthropic_event(
         }
         StreamEvent::MessageStop => Some(AnthropicStreamEvent::MessageStop),
         // The consumer already reset its stall deadline before mapping this event.
+        StreamEvent::ProviderLimit(limit) => {
+            Some(AnthropicStreamEvent::ProviderLimit(limit.clone()))
+        }
+        StreamEvent::ProviderTask(task) => Some(AnthropicStreamEvent::ProviderTask(task.clone())),
         StreamEvent::Ping => None,
         StreamEvent::Error {
             error_type,

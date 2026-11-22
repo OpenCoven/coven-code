@@ -288,6 +288,8 @@ pub mod streaming {
     /// Events emitted by the Anthropic SSE streaming parser.
     #[derive(Debug, Clone)]
     pub enum AnthropicStreamEvent {
+        ProviderTask(crate::ProviderTask),
+        ProviderLimit(crate::ProviderLimit),
         /// The overall message has started; carries the message id and model.
         MessageStart {
             id: String,
@@ -300,9 +302,14 @@ pub mod streaming {
             content_block: ContentBlock,
         },
         /// Incremental delta for an existing content block.
-        ContentBlockDelta { index: usize, delta: ContentDelta },
+        ContentBlockDelta {
+            index: usize,
+            delta: ContentDelta,
+        },
         /// A content block is finished.
-        ContentBlockStop { index: usize },
+        ContentBlockStop {
+            index: usize,
+        },
         /// Final message-level delta (stop_reason, usage).
         MessageDelta {
             stop_reason: Option<String>,
@@ -311,7 +318,10 @@ pub mod streaming {
         /// The message is complete.
         MessageStop,
         /// An error occurred during streaming.
-        Error { error_type: String, message: String },
+        Error {
+            error_type: String,
+            message: String,
+        },
         /// A ping/keep-alive event.
         Ping,
     }
@@ -1600,7 +1610,9 @@ impl StreamAccumulator {
             }
 
             AnthropicStreamEvent::MessageStop => self.received_message_stop = true,
-            AnthropicStreamEvent::Ping => {}
+            AnthropicStreamEvent::ProviderLimit(_)
+            | AnthropicStreamEvent::ProviderTask(_)
+            | AnthropicStreamEvent::Ping => {}
             AnthropicStreamEvent::Error { .. } => {}
         }
     }
@@ -1679,6 +1691,7 @@ impl StreamAccumulator {
                 }
             }
             StreamEvent::MessageStop => AnthropicStreamEvent::MessageStop,
+            StreamEvent::ProviderLimit(_) | StreamEvent::ProviderTask(_) => return,
             StreamEvent::Ping => AnthropicStreamEvent::Ping,
             StreamEvent::Error {
                 error_type,
