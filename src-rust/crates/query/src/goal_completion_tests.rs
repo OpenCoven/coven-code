@@ -1153,7 +1153,7 @@ mod goal_completion {
     }
 
     async fn serve_goal_responses(
-        response: impl Fn(usize) -> String + Send + 'static,
+        response: impl Fn(usize, &[u8]) -> String + Send + 'static,
     ) -> (
         String,
         Arc<std::sync::atomic::AtomicUsize>,
@@ -1175,7 +1175,7 @@ mod goal_completion {
                 };
                 let mut data = Vec::new();
                 let mut buffer = [0u8; 4096];
-                loop {
+                let body_start = loop {
                     let n = tokio::time::timeout(
                         std::time::Duration::from_secs(2),
                         socket.read(&mut buffer),
@@ -1184,7 +1184,7 @@ mod goal_completion {
                     .unwrap()
                     .unwrap();
                     if n == 0 {
-                        break;
+                        break None;
                     }
                     data.extend_from_slice(&buffer[..n]);
                     if let Some(end) = data.windows(4).position(|s| s == b"\r\n\r\n") {
@@ -1198,16 +1198,16 @@ mod goal_completion {
                             })
                             .unwrap();
                         if data.len() >= end + 4 + len {
-                            break;
+                            break Some(end + 4);
                         }
                     }
-                }
-                if data.is_empty() {
+                };
+                let Some(body_start) = body_start else {
                     continue;
-                }
+                };
                 let attempt = server_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // The callback runs after the entire actual request was received.
-                let body = response(attempt);
+                let body = response(attempt, &data[body_start..]);
                 let _ = socket.write_all(body.as_bytes()).await;
             }
         });
@@ -1225,8 +1225,15 @@ mod goal_completion {
         let ctx = scheduling_ctx(temp.path());
         let config = make_config(None, None);
         let usage = compact::context_window_for_model(&config.model) * 92 / 100;
-        let (base, calls, stop, server) = serve_goal_responses(move |index| {
-            if index == 10 {
+        let summaries = Arc::new(Mutex::new(Vec::new()));
+        let recorded = summaries.clone();
+        let (base, _, stop, server) = serve_goal_responses(move |index, body| {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            if let Some(prompt) = request["messages"][0]["content"]
+                .as_str()
+                .filter(|text| text.contains("<conversation_to_summarize "))
+            {
+                recorded.lock().unwrap().push(prompt.to_owned());
                 sse_response("summary of oldest", 1, true)
             } else {
                 sse_response(&format!("answer {}", index % 5 + 1), usage, true)
@@ -1250,7 +1257,7 @@ mod goal_completion {
                 let mut expected: Vec<_> = history.iter().map(Message::get_all_text).collect();
                 expected.push(format!("answer {turn}"));
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                let before = calls.load(std::sync::atomic::Ordering::SeqCst);
+                let before = summaries.lock().unwrap().len();
                 let outcome = run_query_loop(
                     &client,
                     &mut history,
@@ -1267,8 +1274,7 @@ mod goal_completion {
                     matches!(outcome, QueryOutcome::EndTurn { .. }),
                     "{outcome:?}"
                 );
-                // Each query samples once. Any further request is the summarizer.
-                let requests = calls.load(std::sync::atomic::Ordering::SeqCst) - before - 1;
+                let requests = summaries.lock().unwrap().len() - before;
                 let mut announcements = 0;
                 while let Ok(event) = rx.try_recv() {
                     if matches!(event, QueryEvent::Status(text) if text == "Compacting context...")
@@ -1288,6 +1294,10 @@ mod goal_completion {
         }
         stop.cancel();
         server.await.unwrap();
+        let summaries = summaries.lock().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].contains("Human: queued context\n\n</conversation_to_summarize>"));
+        assert!(!summaries[0].contains("Human: question 1"));
         // (history length including the sampled answer, status count, summary requests)
         assert_eq!(
             observed,
@@ -1317,7 +1327,7 @@ mod goal_completion {
             let store = GoalStore::open(&path).unwrap();
             store.set_goal("goal-query", "A", None).unwrap();
             let hook_path = path.clone();
-            let (base, count, stop, server) = serve_goal_responses(move |attempt| {
+            let (base, count, stop, server) = serve_goal_responses(move |attempt, _| {
                 if attempt == 0 {
                     if revoke {
                         GoalStore::open(&hook_path)
@@ -1371,7 +1381,7 @@ mod goal_completion {
         let cancel = tokio_util::sync::CancellationToken::new();
         let (sent, received) = tokio::sync::oneshot::channel();
         let sent = Mutex::new(Some(sent));
-        let (base, count, stop, server) = serve_goal_responses(move |_| {
+        let (base, count, stop, server) = serve_goal_responses(move |_, _| {
             if let Some(sent) = sent.lock().unwrap().take() { let _ = sent.send(()); }
             "HTTP/1.1 429 Busy\r\nRetry-After: 10\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into()
         }).await;
@@ -1470,7 +1480,7 @@ mod goal_completion {
             store
                 .complete_goal_turn(context.captured().unwrap())
                 .unwrap();
-            let (base, count, stop, server) = serve_goal_responses(move |_| {
+            let (base, count, stop, server) = serve_goal_responses(move |_, _| {
                 if ping_only {
                     let body = "event: ping\ndata: {}\n\n";
                     format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
@@ -2356,7 +2366,7 @@ mod goal_completion {
         let context = GoalTurnContext::Captured(store.capture_active_goal("goal-query").unwrap());
         let background = context.for_background_work();
         let (base, count, stop, server) =
-            serve_goal_responses(|_| sse_response("[]", 1, true)).await;
+            serve_goal_responses(|_, _| sse_response("[]", 1, true)).await;
         let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
             api_key: "test-key".into(),
             api_base: base,
@@ -2455,7 +2465,7 @@ mod goal_completion {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let (base, count, stop, server) = serve_goal_responses(|attempt| {
+        let (base, count, stop, server) = serve_goal_responses(|attempt, _| {
             if attempt == 0 {
                 sse_response("Done.", 1, true)
             } else {
@@ -2487,10 +2497,7 @@ mod goal_completion {
         let seen = wait_for_requests(&count, 2).await;
         stop.cancel();
         server.await.unwrap();
-        assert_eq!(
-            seen, 2,
-            "extraction request did not reach the turn endpoint"
-        );
+        assert_eq!(seen, 2, "extraction request did not reach the turn endpoint");
     }
 
     // #530: when the turn is served by another provider, the transcript is
@@ -2502,7 +2509,7 @@ mod goal_completion {
         }
         let dir = tempfile::tempdir().unwrap();
         let (base, count, stop, server) =
-            serve_goal_responses(|_| sse_response("[]", 1, true)).await;
+            serve_goal_responses(|_, _| sse_response("[]", 1, true)).await;
         let run = run_goal_fixture(
             dir.path(),
             GoalTurnContext::Captured(None),
@@ -2785,9 +2792,10 @@ time.sleep(60)
                 )
                 .await
                 .unwrap();
-            let events: Vec<_> = tokio::time::timeout(FIXTURE_TURN_LIMIT, prime.collect())
-                .await
-                .unwrap();
+            let events: Vec<_> =
+                tokio::time::timeout(FIXTURE_TURN_LIMIT, prime.collect())
+                    .await
+                    .unwrap();
             assert!(events
                 .iter()
                 .any(|e| matches!(e, Ok(StreamEvent::MessageStop))));
@@ -2812,9 +2820,10 @@ time.sleep(60)
             let failed = match response {
                 Err(_) => true,
                 Ok(stream) => {
-                    let events: Vec<_> = tokio::time::timeout(FIXTURE_TURN_LIMIT, stream.collect())
-                        .await
-                        .unwrap();
+                    let events: Vec<_> =
+                        tokio::time::timeout(FIXTURE_TURN_LIMIT, stream.collect())
+                            .await
+                            .unwrap();
                     assert!(events
                         .iter()
                         .any(|e| matches!(e, Ok(StreamEvent::MessageStop))));

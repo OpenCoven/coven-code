@@ -3538,7 +3538,9 @@ async fn run_query_loop_inner(
                         return QueryOutcome::Error(e);
                     }
                 }
-            } else if compact::should_compact(usage.input_tokens, context_limit) {
+            } else if compact::should_compact(usage.input_tokens, context_limit)
+                && compact::reactive_head_len(messages) > 0
+            {
                 if let Some(ref tx) = event_tx {
                     let _ = tx
                         .emit(QueryEvent::Status("Compacting context...".to_string()))
