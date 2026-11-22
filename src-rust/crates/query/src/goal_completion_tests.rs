@@ -1215,6 +1215,79 @@ mod goal_completion {
     }
 
     #[tokio::test]
+    async fn reactive_compaction_waits_until_history_has_a_head() {
+        if isolated_case_completed("reactive_compaction_waits_until_history_has_a_head") {
+            return;
+        }
+        let _lock = REACTIVE_COMPACT_FEATURE_GATE_LOCK.lock().await;
+        std::env::set_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT", "1");
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = scheduling_ctx(temp.path());
+        ctx.config.provider = Some(SCRIPTED_PROVIDER_ID.to_owned());
+        let (base, summaries, stop, server) =
+            serve_goal_responses(|_| sse_response("summary of oldest", 1, true)).await;
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_base: base,
+            api_key: "test-key".into(),
+            max_retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let mut observed = Vec::new();
+        // The first conversation reaches exactly ten messages. One queued user
+        // message in the second shifts its turns to odd lengths, including eleven.
+        for mut history in [Vec::new(), vec![Message::user("queued context")]] {
+            let mut config = make_config(None, None);
+            let rounds = (1..=5).map(|turn| {
+                let mut events = scripted_round("reply", vec![ContentBlock::Text {
+                    text: format!("answer {turn}"),
+                }], ProviderStopReason::EndTurn);
+                let StreamEvent::MessageStart { usage, .. } = &mut events[0] else {
+                    panic!("scripted round must start with usage");
+                };
+                usage.input_tokens = compact::context_window_for_model(&config.model) * 92 / 100;
+                events
+            }).collect();
+            let mut registry = claurst_api::ProviderRegistry::new();
+            registry.register(Arc::new(ScriptedProvider::new(rounds)));
+            config.provider_registry = Some(Arc::new(registry));
+            for turn in 1..=5 {
+                history.push(Message::user(format!("question {turn}")));
+                let mut expected: Vec<_> = history.iter().map(Message::get_all_text).collect();
+                expected.push(format!("answer {turn}"));
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let before = summaries.load(std::sync::atomic::Ordering::SeqCst);
+                let outcome = run_query_loop(&client, &mut history, &[], &ctx, &config,
+                    ctx.cost_tracker.clone(), Some(tx), Default::default(), None).await;
+                assert!(matches!(outcome, QueryOutcome::EndTurn { .. }), "{outcome:?}");
+                let requests = summaries.load(std::sync::atomic::Ordering::SeqCst) - before;
+                let mut announcements = 0;
+                while let Ok(event) = rx.try_recv() {
+                    if matches!(event, QueryEvent::Status(text) if text == "Compacting context...") {
+                        announcements += 1;
+                    }
+                }
+                let actual: Vec<_> = history.iter().map(Message::get_all_text).collect();
+                observed.push((expected.len(), announcements, requests));
+                if expected.len() == 11 {
+                    assert!(actual[0].contains("summary of oldest"), "{actual:?}");
+                    assert_eq!(actual[1..], expected[1..]);
+                } else {
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        stop.cancel();
+        server.await.unwrap();
+        // (history length including the sampled answer, status count, summary requests)
+        assert_eq!(observed, [
+            (2,0,0),(4,0,0),(6,0,0),(8,0,0),(10,0,0),
+            (3,0,0),(5,0,0),(7,0,0),(9,0,0),(11,1,1),
+        ]);
+    }
+
+    #[tokio::test]
     async fn fallback_reentry_rechecks_original_goal() {
         if isolated_case_completed("fallback_reentry_rechecks_original_goal") {
             return;
