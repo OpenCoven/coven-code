@@ -853,84 +853,31 @@ Coven Code supports **multiple named accounts per provider** — Anthropic (Clau
 
 See [Authentication Guide](./auth.md#multi-account-profiles) for the full story and on-disk layout.
 
-### /login
+### /account
 
-Authenticate with Anthropic or Codex via OAuth PKCE. Opens a browser for the flow and saves tokens under the active profile (or creates a new profile if none exists).
-
-```
-/login                            — Claude.ai OAuth (Bearer token, default)
-/login --console                  — Console OAuth (creates an API key)
-/login --codex                    — Codex / ChatGPT OAuth
-/login --label work               — name the new profile "work"
-/login --codex --label personal   — Codex login, name the profile "personal"
-```
-
-If a profile matching the JWT's email or account_id already exists, that profile is refreshed in place — re-logging-in is idempotent. Use `--label` to either name a fresh profile or to disambiguate.
-
-Subcommands: `/login switch [name]` to change the active account and `/login refresh` to force a token refresh — both documented below.
-
----
-
-### /logout
-
-Remove credentials. By default removes only the **active** profile for the provider; other stored profiles remain switchable.
+Manage named provider accounts. The active profile for each provider is marked with `*`.
 
 ```
-/logout                — clear active Anthropic profile (drops it from registry)
-/logout --codex        — clear active Codex profile
-/logout --all          — purge every Anthropic profile + clear any API key in settings
-/logout --codex --all  — purge every Codex profile
+/account list
+/account list --viable
+/account switch codex/work
+/account login codex --label work
+/account login anthropic --label personal
+/account logout --codex
+/account dedupe
 ```
 
----
+Use a provider-qualified ID to distinguish profiles that share a name. An unqualified ID works when exactly one provider has it. Coven Code exits after switching. Relaunch it to load the selected credentials. Account selection is per provider. Choose a model from that provider when you want to use the account.
 
-### /login switch
+Use the intended browser account during OAuth sign-in. Codex also accepts `--codex`. Anthropic OAuth requires a configured Coven OAuth client ID and supports `--console` for Console login.
 
-Switch the active account for a provider. Anthropic by default; pass `--codex` for Codex. Run `/login switch` with no arguments to list every stored account and see available profile ids — the active profile in each provider is marked with `*`. Replaces the former `/switch` command.
+Use `/account list --viable` to see locally eligible named accounts, their labels, and the active marker. Codex accepts an unexpired or refreshable profile. Anthropic accepts a stored Console API key or a usable OAuth profile minted by the configured Coven Code client. Keyless Claude uses the local Claude CLI’s session. A successful request is the check for provider access.
 
-```
-/login switch                    — list stored accounts across providers
-/login switch work               — set active Anthropic profile to "work"
-/login switch --codex personal   — set active Codex profile to "personal"
-```
+Use `/familiar account <familiar> <provider>/<profile-id>` to bind a roster familiar. The selection applies on its next turn and survives relaunch. Choose a model from the same provider. Run `/familiar account <familiar>` to see the selection and `/familiar account <familiar> default` to return to the session account. If a bound account expires without a refresh token or is removed, select an eligible replacement with the same command.
 
-Sample listing output:
+`/account logout` removes the active Anthropic profile by default. Use `--codex` for Codex and `--all` to remove all profiles for the selected provider. `/account dedupe` collapses duplicate Anthropic profiles for the same underlying account, keeping the active or freshest profile. Duplicate profiles share the same subscription and rate limits.
 
-```
-Anthropic:
-  * personal [pro]    kuber@personal.example
-    work     [max]    kuber@company.example
-Codex:
-    work              kuber@company.example
-```
-
----
-
-### /accounts
-
-List every stored account across providers (same listing as `/login switch`
-with no arguments). When several Anthropic profiles point at the same
-underlying account — the usual cause is importing the same Claude Code
-credential more than once — the listing flags the duplicates.
-
-```
-/accounts          — list stored accounts, flagging duplicates
-/accounts dedupe   — collapse duplicate profiles, keeping the active/freshest
-```
-
-Duplicate profiles all bill the same subscription, so switching between them
-never escapes a rate limit. The rate-limit recovery dialog offers the same
-cleanup with a single key when it detects this situation.
-
----
-
-### /login refresh
-
-Refresh the provider authentication state. Forces a token refresh without full re-authentication. Useful when a session token has expired mid-session. Replaces the former `/refresh` command.
-
-```
-/login refresh
-```
+`/account refresh` clears saved provider credentials, selected provider and model, and model caches. Run `/account connect` afterwards to reconnect.
 
 ---
 

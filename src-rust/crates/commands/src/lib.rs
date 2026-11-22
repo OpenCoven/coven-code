@@ -85,6 +85,10 @@ pub enum CommandResult {
         login_with_claude_ai: bool,
         label: Option<String>,
     },
+    SwitchAccount {
+        provider: String,
+        id: String,
+    },
     /// Exit the REPL.
     Exit,
     /// No visible output.
@@ -104,7 +108,10 @@ pub enum CommandResult {
     RefreshProviderState,
     /// Activate a speech mode (caveman/rocky) with level, or deactivate (normal).
     /// (mode, level) — mode=None means deactivate.
-    SpeechMode { mode: Option<String>, level: String },
+    SpeechMode {
+        mode: Option<String>,
+        level: String,
+    },
 }
 
 /// Every slash command implements this trait.
@@ -2967,7 +2974,7 @@ impl SlashCommand for LoginCommand {
         "Authenticate with Anthropic or Codex (multi-account)"
     }
     fn help(&self) -> &str {
-        "Usage: /login [--console] [--codex] [--label <name>]\n\n\
+        "Usage: /account login [anthropic|codex] [--console] [--label <name>]\n\n\
          Start an OAuth login. Anthropic OAuth requires a configured Coven\n\
          client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
          ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
@@ -2988,16 +2995,32 @@ impl SlashCommand for LoginCommand {
             "refresh" => return RefreshCommand.execute(rest, ctx).await,
             _ => {}
         }
-        let tokens: Vec<&str> = args.split_whitespace().collect();
-        let use_codex = tokens.contains(&"--codex");
-        let login_with_claude_ai = !tokens.contains(&"--console");
-        let label = parse_label_arg(&tokens);
-
-        let provider = if use_codex {
-            claurst_core::accounts::PROVIDER_CODEX
-        } else {
-            claurst_core::accounts::PROVIDER_ANTHROPIC
-        };
+        use claurst_core::accounts::{PROVIDER_ANTHROPIC, PROVIDER_CODEX};
+        let mut provider = None;
+        let mut login_with_claude_ai = true;
+        let mut label = None;
+        let mut tokens = args.split_whitespace();
+        while let Some(token) = tokens.next() {
+            match token {
+                "codex" | "--codex" if provider.is_none() => provider = Some(PROVIDER_CODEX),
+                "anthropic" if provider.is_none() => provider = Some(PROVIDER_ANTHROPIC),
+                "--console" => login_with_claude_ai = false,
+                "--label" | "-l" if label.is_none() => {
+                    let Some(name) = tokens.next().filter(|name| !name.starts_with('-')) else {
+                        return CommandResult::Error("Provide a name after --label.".to_string());
+                    };
+                    label = Some(name.to_string());
+                }
+                token if label.is_none() && token.starts_with("--label=") && token.len() > 8 => {
+                    label = Some(token[8..].to_string());
+                }
+                _ => return CommandResult::Error(self.help().to_string()),
+            }
+        }
+        let provider = provider.unwrap_or(PROVIDER_ANTHROPIC);
+        if provider == PROVIDER_CODEX && !login_with_claude_ai {
+            return CommandResult::Error("--console applies only to Anthropic login.".to_string());
+        }
 
         CommandResult::StartLoginForProvider {
             provider: provider.to_string(),
@@ -3005,19 +3028,6 @@ impl SlashCommand for LoginCommand {
             label,
         }
     }
-}
-
-fn parse_label_arg(tokens: &[&str]) -> Option<String> {
-    let mut it = tokens.iter();
-    while let Some(t) = it.next() {
-        if *t == "--label" || *t == "-l" {
-            return it.next().map(|s| s.to_string());
-        }
-        if let Some(rest) = t.strip_prefix("--label=") {
-            return Some(rest.to_string());
-        }
-    }
-    None
 }
 
 // ---- /logout -------------------------------------------------------------
@@ -3147,6 +3157,11 @@ impl SlashCommand for AccountsCommand {
                 Err(err) => CommandResult::Error(format!("Dedupe failed: {err}")),
             };
         }
+        let viable_only = match args.trim() {
+            "" => false,
+            "--viable" => true,
+            _ => return CommandResult::Error("Usage: /account list [--viable]".to_string()),
+        };
         let registry = claurst_core::accounts::AccountRegistry::load();
         let mut out = String::new();
         for (provider, label) in [
@@ -3155,22 +3170,56 @@ impl SlashCommand for AccountsCommand {
         ] {
             let profiles = registry.list(provider);
             let active = registry.active(provider);
-            if profiles.is_empty() {
-                out.push_str(&format!("{}: (no accounts stored)\n", label));
-                continue;
+            if !viable_only {
+                if profiles.is_empty() {
+                    out.push_str(&format!("{}: (no accounts stored)\n", label));
+                    continue;
+                }
+                out.push_str(&format!("{}:\n", label));
             }
-            out.push_str(&format!("{}:\n", label));
             for p in profiles {
                 let marker = if active == Some(&p.id) { "*" } else { " " };
+                if viable_only {
+                    let account = claurst_core::accounts::FamiliarAccount {
+                        provider: provider.to_owned(),
+                        id: p.id.clone(),
+                    };
+                    if account.eligible().await {
+                        let label = p.label.as_deref().unwrap_or(&p.id);
+                        let access = match account.last_success() {
+                            Some(time) => {
+                                format!("last successful familiar request {}", time.to_rfc3339())
+                            }
+                            None => "locally eligible, provider request unverified".to_owned(),
+                        };
+                        out.push_str(&format!(
+                            "  {marker} {provider}/{} ({label}) — {access}\n",
+                            p.id
+                        ));
+                    }
+                    continue;
+                }
                 let email = p.email.as_deref().unwrap_or("");
                 let tier = p
                     .subscription_tier
                     .as_deref()
                     .map(|t| format!(" [{}]", t))
                     .unwrap_or_default();
-                out.push_str(&format!("  {} {}{}  {}\n", marker, p.id, tier, email));
+                out.push_str(&format!(
+                    "  {marker} {provider}/{} ({}){tier}  {email}\n",
+                    p.id,
+                    p.label.as_deref().unwrap_or(&p.id)
+                ));
             }
         }
+        if viable_only {
+            return CommandResult::Message(if out.is_empty() {
+                "No profiles with readable credentials. Run /account login to add one.".to_string()
+            } else {
+                format!("Familiar account candidates:\n{}", out.trim_end())
+            });
+        }
+        out.push_str("\nSelect with /account switch <provider>/<profile-id>. Add another with /account login --codex --label <name> or /account login --label <name>.");
         let duplicates = claurst_core::accounts::count_duplicate_anthropic_profiles(&registry);
         if duplicates > 0 {
             out.push_str(&format!(
@@ -3203,10 +3252,9 @@ impl SlashCommand for SwitchCommand {
         "Switch the active account for a provider"
     }
     fn help(&self) -> &str {
-        "Usage: /switch [--codex] <profile-id>\n\n\
-         Make a stored account active. Defaults to Anthropic; pass `--codex`\n\
-         to switch the Codex account instead. Run /switch with no arguments\n\
-         to list stored accounts and see available profile ids."
+        "Usage: /account switch <provider>/<profile-id> or /account switch <profile-id>\n\n\
+         Select a stored account. An unqualified profile ID must be unique across providers.\n\
+         Run /account list to see available profile IDs."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -3214,29 +3262,36 @@ impl SlashCommand for SwitchCommand {
         if args.trim().is_empty() {
             return AccountsCommand.execute("", ctx).await;
         }
-        let tokens: Vec<&str> = args.split_whitespace().collect();
-        let use_codex = tokens.contains(&"--codex");
-        let provider = if use_codex {
-            claurst_core::accounts::PROVIDER_CODEX
-        } else {
-            claurst_core::accounts::PROVIDER_ANTHROPIC
+        use claurst_core::accounts::{AccountRegistry, PROVIDER_ANTHROPIC, PROVIDER_CODEX};
+        let registry = AccountRegistry::load();
+        let tokens: Vec<_> = args.split_whitespace().collect();
+        let (provider, id) = match tokens.as_slice() {
+            ["--codex", id] | [id, "--codex"] if !id.starts_with('-') => (PROVIDER_CODEX, *id),
+            [selection] => match selection.split_once('/') {
+                Some((provider @ (PROVIDER_ANTHROPIC | PROVIDER_CODEX), id)) if !id.is_empty() => {
+                    (provider, id)
+                }
+                None if !selection.starts_with('-') => {
+                    match (registry.get(PROVIDER_ANTHROPIC, selection), registry.get(PROVIDER_CODEX, selection)) {
+                        (Some(_), None) => (PROVIDER_ANTHROPIC, *selection),
+                        (None, Some(_)) => (PROVIDER_CODEX, *selection),
+                        (Some(_), Some(_)) => return CommandResult::Error(format!("Profile '{selection}' exists under both providers. Use /account switch <provider>/{selection}.")),
+                        (None, None) => return CommandResult::Error(format!("Profile '{selection}' was not found. Run /account list.")),
+                    }
+                }
+                _ => return CommandResult::Error(self.help().to_string()),
+            },
+            _ => return CommandResult::Error(self.help().to_string()),
         };
-        let display = if use_codex { "Codex" } else { "Anthropic" };
-        let id = tokens.iter().find(|t| !t.starts_with("--"));
 
-        let Some(id) = id else {
+        if registry.get(provider, id).is_none() {
             return CommandResult::Error(format!(
-                "Usage: /switch {}<profile-id> (try /accounts to see options)",
-                if use_codex { "--codex " } else { "" }
+                "Profile '{provider}/{id}' was not found. Run /account list."
             ));
-        };
-
-        let mut registry = claurst_core::accounts::AccountRegistry::load();
-        match registry.switch_to(provider, id) {
-            Ok(()) => {
-                CommandResult::Message(format!("Switched {} active account to '{}'.", display, id))
-            }
-            Err(e) => CommandResult::Error(format!("{}", e)),
+        }
+        CommandResult::SwitchAccount {
+            provider: provider.to_string(),
+            id: id.to_string(),
         }
     }
 }
@@ -9072,6 +9127,7 @@ impl SlashCommand for FamiliarCommand {
          /familiar incant ...       Change the model's speech incantation\n\
          /familiar whisper <text>   Ask a side question without history\n\
          /familiar handoff <name>   Hand the current work to a familiar in the TUI\n\
+         /familiar account <name> [provider/id|default]   Inspect or change its account\n\
          /familiar info <name>      Details for any familiar or agent\n\
          /familiar list|create|edit|delete [name]   Manage workspace agents\n\
          /familiar new <id> [name]  Create a familiar (standalone; writes ~/.coven/familiars.toml)\n\
@@ -9091,6 +9147,69 @@ impl SlashCommand for FamiliarCommand {
         let (head, rest) = grouped_commands::split_subcommand(trimmed);
 
         match head {
+            "account" => {
+                use claurst_core::accounts::FamiliarAccount;
+                let mut args = rest.split_whitespace();
+                let Some(familiar) = args.next() else {
+                    return CommandResult::Message("Usage: /familiar account <familiar> [<provider>/<profile-id>|default]. See /account list --viable.".into());
+                };
+                let familiar = familiar.to_lowercase();
+                if !current_familiar_roster()
+                    .iter()
+                    .any(|(id, _, _)| id.eq_ignore_ascii_case(&familiar))
+                {
+                    return CommandResult::Error(
+                        "Unknown familiar. Run /familiar to see the roster.".into(),
+                    );
+                }
+                let selection = args.next();
+                if args.next().is_some() {
+                    return CommandResult::Error(
+                        "Specify exactly one provider/profile-id or default.".into(),
+                    );
+                }
+                let result = match selection {
+                    None => match FamiliarAccount::load(&familiar) {
+                        Ok(Some(account)) => {
+                            let status = if account.eligible().await {
+                                "locally eligible"
+                            } else {
+                                "unavailable; select another account"
+                            };
+                            Ok(format!(
+                                "{familiar} uses {}/{} ({status}).",
+                                account.provider, account.id
+                            ))
+                        }
+                        Ok(None) => Ok(format!("{familiar} uses the session default.")),
+                        Err(e) => Err(e),
+                    },
+                    Some("default") => FamiliarAccount::clear(&familiar)
+                        .map(|()| format!("{familiar} uses the session default.")),
+                    Some(value) => {
+                        let Some((provider, id)) = value.split_once('/') else {
+                            return CommandResult::Error(
+                                "Use a provider-qualified ID from /account list --viable.".into(),
+                            );
+                        };
+                        let account = FamiliarAccount {
+                            provider: provider.to_owned(),
+                            id: id.to_owned(),
+                        };
+                        if !account.eligible().await {
+                            return CommandResult::Error(
+                                "Account unavailable. Choose an ID from /account list --viable."
+                                    .into(),
+                            );
+                        }
+                        account.save(&familiar).map(|()| format!("{familiar} uses {value} for the next turn. Select a {provider} model with /model."))
+                    }
+                };
+                return match result {
+                    Ok(message) => CommandResult::Message(message),
+                    Err(e) => CommandResult::Error(format!("Familiar account: {e}")),
+                };
+            }
             "incant" => return IncantCommand.execute(rest, ctx).await,
             "whisper" => return BtwCommand.execute(rest, ctx).await,
             "handoff" => return CommandResult::Silent,
@@ -12435,6 +12554,7 @@ mod tests {
             "permissions sandbox",
             "update version",
             "update notes",
+            "familiar account",
             "familiar incant",
             "familiar whisper",
             "familiar handoff",
@@ -12466,6 +12586,7 @@ mod tests {
             "effort fast",
             "export share",
             "export copy",
+            "familiar account",
             "familiar incant",
             "familiar whisper",
             "familiar list",
@@ -13396,6 +13517,26 @@ mod tests {
                 assert_eq!(label.as_deref(), Some("work"));
             }
             other => panic!("expected StartLoginForProvider, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn account_login_accepts_named_providers_and_rejects_bad_flags() {
+        let mut ctx = make_ctx();
+        assert!(matches!(
+            execute_command("/account login codex --label work", &mut ctx).await,
+            Some(CommandResult::StartLoginForProvider { provider, label, .. })
+                if provider == "codex" && label.as_deref() == Some("work")
+        ));
+        for input in [
+            "/account login codex --console",
+            "/account login --label --codex",
+            "/account login unknown",
+        ] {
+            assert!(matches!(
+                execute_command(input, &mut ctx).await,
+                Some(CommandResult::Error(_))
+            ));
         }
     }
 

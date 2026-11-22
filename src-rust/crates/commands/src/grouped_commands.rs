@@ -40,7 +40,7 @@ impl SlashCommand for AccountCommand {
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let (child, remaining_args) = split_subcommand(args);
         match child {
-            "" | "list" => AccountsCommand.execute("", ctx).await,
+            "" | "list" => AccountsCommand.execute(remaining_args, ctx).await,
             "dedupe" => AccountsCommand.execute("dedupe", ctx).await,
             "login" => LoginCommand.execute(remaining_args, ctx).await,
             "logout" => LogoutCommand.execute(remaining_args, ctx).await,

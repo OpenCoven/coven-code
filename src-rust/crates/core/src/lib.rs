@@ -6151,6 +6151,10 @@ pub mod oauth {
         /// into the returned error — provider responses can reflect parts of the
         /// request, and we never want a refresh/access token landing in logs.
         pub async fn refresh(&self) -> anyhow::Result<Self> {
+            self.refresh_for_profile(None).await
+        }
+
+        pub async fn refresh_for_profile(&self, profile: Option<&str>) -> anyhow::Result<Self> {
             use anyhow::{bail, Context};
 
             let refresh_token = self
@@ -6223,7 +6227,10 @@ pub mod oauth {
                 updated.scopes = scope.split_whitespace().map(String::from).collect();
             }
 
-            updated.save().await?;
+            match profile {
+                Some(id) => updated.save_for_profile(id).await?,
+                None => updated.save().await?,
+            }
             Ok(updated)
         }
 

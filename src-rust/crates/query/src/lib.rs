@@ -1934,6 +1934,25 @@ async fn run_query_loop_inner(
     // Agent model override takes priority over the session model when set.
     let mut effective_model = selected_model_for_query(config);
 
+    let familiar_account = match config
+        .agent_name
+        .as_deref()
+        .map(claurst_core::accounts::FamiliarAccount::load)
+        .transpose()
+    {
+        Ok(binding) => binding.flatten(),
+        Err(error) => {
+            return QueryOutcome::Error(ClaudeError::Config(format!(
+                "Cannot read familiar account selection: {error}"
+            )))
+        }
+    };
+    if familiar_account.is_some() && config.provider_registry.is_none() {
+        return QueryOutcome::Error(ClaudeError::Config(
+            "Named familiar accounts require provider dispatch.".into(),
+        ));
+    }
+
     let mut used_fallback = false;
     // How many automatic retries remain when a stream stalls (no data for 45s).
     let mut retries_left: u32 = 2;
@@ -2267,7 +2286,22 @@ async fn run_query_loop_inner(
         //   3. Model registry lookup (e.g. "gemini-3-flash-preview" → google)
         //   4. Default to "anthropic"
         if let Some(ref registry) = config.provider_registry {
-            let (provider_id_str, model_id_str) = if let Some(p) = tool_ctx
+            let bound_model = familiar_account.as_ref().and_then(|account| {
+                if let Some((provider, model)) = effective_model.split_once('/') {
+                    return Some((
+                        claurst_api::registry::canonical_provider_id(provider).to_owned(),
+                        model.to_owned(),
+                    ));
+                }
+                config
+                    .model_registry
+                    .as_ref()
+                    .and_then(|models| models.get(&account.provider, &effective_model))
+                    .map(|_| (account.provider.clone(), effective_model.clone()))
+            });
+            let (provider_id_str, model_id_str) = if let Some(selected) = bound_model {
+                selected
+            } else if let Some(p) = tool_ctx
                 .config
                 .provider
                 .as_deref()
@@ -2389,7 +2423,9 @@ async fn run_query_loop_inner(
             // Dispatch through the provider path for non-Anthropic providers,
             // AND for Anthropic when the pre-built client has no API key
             // (user started without ANTHROPIC_API_KEY but added one via /connect).
-            let use_provider_dispatch = provider_id_str != "anthropic" || client.api_key_is_empty();
+            let use_provider_dispatch = familiar_account.is_some()
+                || provider_id_str != "anthropic"
+                || client.api_key_is_empty();
 
             if use_provider_dispatch {
                 let pid = claurst_core::provider_id::ProviderId::new(&provider_id_str);
@@ -2398,36 +2434,56 @@ async fn run_query_loop_inner(
                 // that keys added at runtime via /connect are picked up
                 // immediately — even when the provider was pre-registered at
                 // startup with a stale or missing key.
-                let runtime_provider = claurst_api::registry::runtime_provider_for_with_delegation(
-                    &provider_id_str,
-                    !claurst_tools::workspace_scope::active(),
-                );
-
-                let registry_provider = if runtime_provider.is_some() {
-                    // Fresh auth_store key available — use it instead of the
-                    // (possibly stale) registry entry.
-                    None
+                let provider = if let Some(account) = &familiar_account {
+                    if claurst_api::registry::canonical_provider_id(&provider_id_str)
+                        != account.provider
+                    {
+                        return QueryOutcome::Error(ClaudeError::Config(format!(
+                            "This familiar uses {}/{}. Choose a compatible model with /model or change its binding with /familiar account.",
+                            account.provider, account.id
+                        )));
+                    }
+                    match claurst_api::registry::provider_for_familiar_account(account).await {
+                        Some(provider) => Some(provider),
+                        None => return QueryOutcome::Error(ClaudeError::Config(format!(
+                            "Familiar account {}/{} is unavailable. Run /account list --viable and select a replacement with /familiar account.",
+                            account.provider, account.id
+                        ))),
+                    }
                 } else {
-                    registry.get(&pid).cloned()
-                };
+                    let runtime_provider =
+                        claurst_api::registry::runtime_provider_for_with_delegation(
+                            &provider_id_str,
+                            !claurst_tools::workspace_scope::active(),
+                        );
 
-                let mut provider = runtime_provider.or(registry_provider);
+                    let registry_provider = if runtime_provider.is_some() {
+                        // Fresh auth_store key available — use it instead of the
+                        // (possibly stale) registry entry.
+                        None
+                    } else {
+                        registry.get(&pid).cloned()
+                    };
 
-                // Rebuild providers using the unified base resolver so overrides
-                // from settings/env/defaults are applied consistently.
-                if claurst_api::registry::resolve_provider_api_base(
-                    &tool_ctx.config,
-                    &provider_id_str,
-                )
-                .is_some()
-                {
-                    if let Some(overridden) = claurst_api::registry::provider_from_config(
+                    let mut provider = runtime_provider.or(registry_provider);
+
+                    // Rebuild providers using the unified base resolver so overrides
+                    // from settings/env/defaults are applied consistently.
+                    if claurst_api::registry::resolve_provider_api_base(
                         &tool_ctx.config,
                         &provider_id_str,
-                    ) {
-                        provider = Some(overridden);
+                    )
+                    .is_some()
+                    {
+                        if let Some(overridden) = claurst_api::registry::provider_from_config(
+                            &tool_ctx.config,
+                            &provider_id_str,
+                        ) {
+                            provider = Some(overridden);
+                        }
                     }
-                }
+                    provider
+                };
                 if let Some(provider) = provider {
                     debug!(provider = %provider_id_str, model = %model_id_str, "Dispatching to non-Anthropic provider");
 
@@ -2572,7 +2628,11 @@ async fn run_query_loop_inner(
                                 claude_error,
                                 &provider_id_str,
                                 &model_id_str,
-                                active_account_notice(&provider_id_str).as_deref(),
+                                familiar_account
+                                    .as_ref()
+                                    .map(|a| a.id.clone())
+                                    .or_else(|| active_account_notice(&provider_id_str))
+                                    .as_deref(),
                             ));
                         }
                     };
@@ -2778,6 +2838,12 @@ async fn run_query_loop_inner(
                         )
                         .await;
                         return QueryOutcome::Error(error);
+                    }
+
+                    if let Some(account) = &familiar_account {
+                        if let Err(error) = account.record_success() {
+                            warn!(%error, "Could not record successful familiar request");
+                        }
                     }
 
                     // Apply terminal guards before any tool execution. Provider

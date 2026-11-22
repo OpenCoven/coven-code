@@ -85,6 +85,39 @@ pub fn canonical_provider_id(id: &str) -> &str {
     }
 }
 
+/// Resolve only the named profile. Never substitute the global active credential.
+pub async fn provider_for_familiar_account(
+    account: &claurst_core::accounts::FamiliarAccount,
+) -> Option<Arc<dyn LlmProvider>> {
+    if !account.eligible().await {
+        return None;
+    }
+    match account.provider.as_str() {
+        "codex" => {
+            CodexProvider::from_profile(&account.id).map(|p| Arc::new(p) as Arc<dyn LlmProvider>)
+        }
+        "anthropic" => {
+            let mut tokens =
+                claurst_core::oauth::OAuthTokens::load_for_profile(&account.id).await?;
+            if !tokens.bearer_auth_is_usable() {
+                return None;
+            }
+            if tokens.uses_bearer_auth() && tokens.is_expired() {
+                tokens = tokens.refresh_for_profile(Some(&account.id)).await.ok()?;
+            }
+            let client = ClientConfig {
+                api_key: tokens.effective_credential()?.to_owned(),
+                use_bearer_auth: tokens.uses_bearer_auth(),
+                ..Default::default()
+            };
+            AnthropicProvider::from_config(client)
+                .ok()
+                .map(|p| Arc::new(p) as Arc<dyn LlmProvider>)
+        }
+        _ => None,
+    }
+}
+
 pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
     runtime_provider_for_with_delegation(provider_id, true)
 }

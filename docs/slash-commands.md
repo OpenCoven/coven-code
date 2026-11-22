@@ -55,13 +55,13 @@ Type `/` for contextual suggestions, or open the command palette with Ctrl+K. En
 | Command | Usage | Description |
 |---|---|---|
 | `/account` | `/account <login\|logout\|list\|dedupe\|providers\|connect\|switch\|refresh>` | Manage accounts and provider connections |
-| `/account login` | `/account login [--console] [--codex] [--label <name>]` | Sign in to a provider |
+| `/account login` | `/account login [anthropic\|codex] [--console] [--label <name>]` | Sign in to a provider |
 | `/account logout` | `/account logout` | Sign out of a provider |
-| `/account list` | `/account list` | List configured accounts |
+| `/account list` | `/account list [--viable]` | List configured accounts |
 | `/account dedupe` | `/account dedupe` | Remove duplicate credentials |
 | `/account providers` | `/account providers` | List available providers |
 | `/account connect` | `/account connect` | Connect a provider account |
-| `/account switch` | `/account switch [name]` | Switch the active account |
+| `/account switch` | `/account switch [<provider>/<profile-id>]` | Switch the active account |
 | `/account refresh` | `/account refresh` | Refresh provider authentication |
 | `/model` | `/model [name]` | Show or change the current model |
 | `/permissions` | `/permissions [sandbox]` | View or change tool permission settings |
@@ -107,7 +107,8 @@ Type `/` for contextual suggestions, or open the command palette with Ctrl+K. En
 |---|---|---|
 | `/coven` | `/coven [status\|sessions\|familiars\|log\|run\|daemon\|goal\|help] ...` | Drive the local Coven daemon (sessions, harness runs, rituals) |
 | `/coven goal` | `/coven goal [objective\|status\|pause\|resume\|clear\|complete]` | Manage durable session goals |
-| `/familiar` | `/familiar <incant\|whisper\|handoff\|list\|managed>` | Your familiar & agents — switch persona, inspect, and manage |
+| `/familiar` | `/familiar <account\|incant\|whisper\|handoff\|list\|managed>` | Your familiar & agents — switch persona, inspect, and manage |
+| `/familiar account` | `/familiar account <name> [<provider>/<profile-id>\|default]` | Inspect or change a familiar’s provider account |
 | `/familiar incant` | `/familiar incant [arguments]` | Run a familiar incantation |
 | `/familiar whisper` | `/familiar whisper <message>` | Ask a familiar side question |
 | `/familiar handoff` | `/familiar handoff <name>` | Hand work to a familiar |

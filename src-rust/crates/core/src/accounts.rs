@@ -35,6 +35,97 @@ use std::path::PathBuf;
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_CODEX: &str = "codex";
 
+/// A local provider credential selected for a familiar.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FamiliarAccount {
+    pub provider: String,
+    pub id: String,
+}
+
+impl FamiliarAccount {
+    fn path(familiar: &str) -> PathBuf {
+        // Encode the entire identity, including separators in external agent names.
+        use base64::Engine;
+        let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(familiar.to_lowercase());
+        claurst_dir()
+            .join("familiar-accounts")
+            .join(format!("{name}.json"))
+    }
+
+    pub fn load(familiar: &str) -> anyhow::Result<Option<Self>> {
+        match std::fs::read(Self::path(familiar)) {
+            Ok(data) => Ok(Some(serde_json::from_slice(&data)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save(&self, familiar: &str) -> anyhow::Result<()> {
+        crate::secret_file::write_secret_file_sync_in_private_dir(
+            &Self::path(familiar),
+            serde_json::to_vec(self)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn clear(familiar: &str) -> anyhow::Result<()> {
+        match std::fs::remove_file(Self::path(familiar)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Written only after the provider finishes a model response using this binding.
+    pub fn record_success(&self) -> std::io::Result<()> {
+        let path = account_dir(&self.provider, &self.id).join("last-request-success");
+        crate::secret_file::write_secret_file_sync(&path, now_iso())
+    }
+
+    pub fn last_success(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let text = std::fs::read_to_string(
+            account_dir(&self.provider, &self.id).join("last-request-success"),
+        )
+        .ok()?;
+        text.trim().parse().ok()
+    }
+
+    pub async fn eligible(&self) -> bool {
+        if slugify_profile_id(&self.id) != self.id
+            || AccountRegistry::load()
+                .get(&self.provider, &self.id)
+                .is_none()
+        {
+            return false;
+        }
+        match self.provider.as_str() {
+            PROVIDER_CODEX => crate::oauth_config::load_codex_tokens_for_profile(&self.id)
+                .is_some_and(|t| {
+                    !t.access_token.trim().is_empty()
+                        && (t
+                            .expires_at
+                            .is_none_or(|expiry| expiry > chrono::Utc::now().timestamp() as u64)
+                            || t.refresh_token
+                                .as_deref()
+                                .is_some_and(|token| !token.trim().is_empty()))
+                }),
+            PROVIDER_ANTHROPIC => crate::oauth::OAuthTokens::load_for_profile(&self.id)
+                .await
+                .is_some_and(|t| {
+                    t.bearer_auth_is_usable()
+                        && t.effective_credential()
+                            .is_some_and(|key| !key.trim().is_empty())
+                        && (!t.uses_bearer_auth()
+                            || !t.is_expired()
+                            || t.refresh_token
+                                .as_deref()
+                                .is_some_and(|r| !r.trim().is_empty()))
+                }),
+            _ => false,
+        }
+    }
+}
+
 /// Metadata recorded for a single stored profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AccountProfile {
@@ -526,6 +617,59 @@ mod tests {
         assert_eq!(slugify_profile_id("  --weird-- "), "weird");
         assert_eq!(slugify_profile_id(""), "account");
         assert_eq!(slugify_profile_id("kuber@example.com"), "kuber-example-com");
+    }
+
+    #[test]
+    fn familiar_selection_survives_profile_switch_and_missing_credentials() {
+        use crate::oauth_config::{save_codex_tokens_for_profile, CodexTokens};
+        let home = tempfile::tempdir().unwrap();
+        let request = crate::config::resolve_config_home(Some(home.path()), None, None, None, None);
+        crate::config::with_requested_home_for_test(request, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut registry = AccountRegistry::default();
+            for id in ["personal", "work"] {
+                registry
+                    .upsert(
+                        PROVIDER_CODEX,
+                        AccountProfile {
+                            id: id.into(),
+                            ..Default::default()
+                        },
+                        true,
+                    )
+                    .unwrap();
+            }
+            let binding = FamiliarAccount {
+                provider: PROVIDER_CODEX.into(),
+                id: "personal".into(),
+            };
+            let mut tokens = CodexTokens {
+                access_token: "synthetic".into(),
+                refresh_token: None,
+                account_id: None,
+                expires_at: Some(1),
+            };
+            save_codex_tokens_for_profile(&tokens, "personal").unwrap();
+            assert!(!runtime.block_on(binding.eligible()));
+            tokens.refresh_token = Some("synthetic refresh".into());
+            save_codex_tokens_for_profile(&tokens, "personal").unwrap();
+            assert!(runtime.block_on(binding.eligible()));
+            binding.save("atlas").unwrap();
+            assert_eq!(
+                FamiliarAccount::load("ATLAS").unwrap().as_ref(),
+                Some(&binding)
+            );
+            assert_eq!(FamiliarAccount::load("ember").unwrap(), None);
+            assert_eq!(AccountRegistry::load().active(PROVIDER_CODEX), Some("work"));
+            registry.remove(PROVIDER_CODEX, "personal").unwrap();
+            assert!(!runtime.block_on(binding.eligible()));
+            assert_eq!(FamiliarAccount::load("atlas").unwrap(), Some(binding));
+            FamiliarAccount::clear("atlas").unwrap();
+            assert_eq!(FamiliarAccount::load("atlas").unwrap(), None);
+        });
     }
 
     #[test]

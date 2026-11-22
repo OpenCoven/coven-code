@@ -64,6 +64,7 @@ pub struct CodexProvider {
     http_client: reqwest::Client,
     /// Mutable token cache: updated in-place when a refresh succeeds.
     tokens: Arc<Mutex<CodexTokens>>,
+    profile_id: Option<String>,
     goal_authority: Option<(GoalTurn, GoalTurnPermission)>,
     #[cfg(test)]
     test_endpoints: Option<(String, String)>,
@@ -77,6 +78,7 @@ impl CodexProvider {
             id,
             http_client,
             tokens: Arc::new(Mutex::new(tokens)),
+            profile_id: None,
             goal_authority: None,
             #[cfg(test)]
             test_endpoints: None,
@@ -88,6 +90,7 @@ impl CodexProvider {
             id: self.id.clone(),
             http_client: self.http_client.clone(),
             tokens: self.tokens.clone(),
+            profile_id: self.profile_id.clone(),
             goal_authority: Some((turn.clone(), permission)),
             #[cfg(test)]
             test_endpoints: self.test_endpoints.clone(),
@@ -117,11 +120,25 @@ impl CodexProvider {
     /// Construct from stored tokens; returns `None` if no tokens are saved or
     /// if the HTTP client could not be built.
     pub fn from_stored() -> Option<Self> {
+        let registry = claurst_core::accounts::AccountRegistry::load();
+        if let Some(id) = registry.active(claurst_core::accounts::PROVIDER_CODEX) {
+            return Self::from_profile(id);
+        }
         let tokens = get_codex_tokens()?;
         if tokens.access_token.is_empty() {
             return None;
         }
         Self::new(tokens).ok()
+    }
+
+    pub(crate) fn from_profile(id: &str) -> Option<Self> {
+        let tokens = claurst_core::oauth_config::load_codex_tokens_for_profile(id)?;
+        if tokens.access_token.trim().is_empty() {
+            return None;
+        }
+        let mut provider = Self::new(tokens).ok()?;
+        provider.profile_id = Some(id.to_owned());
+        Some(provider)
     }
 
     // -----------------------------------------------------------------------
@@ -278,7 +295,11 @@ impl CodexProvider {
         }
         updated.expires_at = new_expires_at;
 
-        if let Err(e) = save_codex_tokens(&updated) {
+        let persisted = match &self.profile_id {
+            Some(id) => claurst_core::oauth_config::save_codex_tokens_for_profile(&updated, id),
+            None => save_codex_tokens(&updated),
+        };
+        if let Err(e) = persisted {
             warn!("Failed to persist refreshed Codex tokens: {}", e);
         }
 
