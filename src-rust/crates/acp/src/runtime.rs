@@ -10,9 +10,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use claurst_core::config::{Config, Settings};
 use claurst_core::permissions::PermissionManager;
-use claurst_core::CostTracker;
+use claurst_core::{CostTracker, PermissionMode};
 use claurst_query::QueryConfig;
 use claurst_tools::Tool;
+use tracing::warn;
 
 /// Snapshot of the global agent runtime — built at server startup, cloned
 /// (cheaply, via Arc) into each session.
@@ -43,11 +44,7 @@ impl AgentRuntime {
             )
         })?;
         let mut config = settings.effective_config();
-        // Plan mode requires interactive UI — fall back to Default so the
-        // ACP permission bridge can route decisions to the client.
-        if config.permission_mode == claurst_core::PermissionMode::Plan {
-            config.permission_mode = claurst_core::PermissionMode::Default;
-        }
+        config.permission_mode = acp_permission_mode(&config.permission_mode);
         config.project_dir = Some(working_dir.clone());
 
         let active_provider = config.selected_provider_id().to_string();
@@ -112,6 +109,27 @@ impl AgentRuntime {
     }
 }
 
+/// The mode an ACP server runs in for the mode saved in settings.
+///
+/// `coven-code acp` takes no flag and reads no variable that names a mode, so
+/// nothing can opt in to a saved `bypassPermissions`: under the rule every
+/// start shares, it runs in `default`, and the server says so on stderr, never
+/// on the protocol stream. Plan mode needs the interactive plan approval ACP
+/// does not have, so a saved `plan` also runs in `default`, where the
+/// permission bridge routes each decision to the client.
+fn acp_permission_mode(saved: &PermissionMode) -> PermissionMode {
+    let restored = saved.restored_from_settings();
+    if restored.mode != *saved {
+        if let Some(notice) = restored.notice {
+            warn!("ACP: {notice}; running in default mode, as ACP has no opt-in for bypass");
+        }
+    }
+    match restored.mode {
+        PermissionMode::Plan => PermissionMode::Default,
+        mode => mode,
+    }
+}
+
 async fn build_mcp_manager(config: &Config) -> Option<Arc<claurst_mcp::McpManager>> {
     if config.mcp_servers.is_empty() {
         return None;
@@ -119,4 +137,99 @@ async fn build_mcp_manager(config: &Config) -> Option<Arc<claurst_mcp::McpManage
     let mgr = Arc::new(claurst_mcp::McpManager::connect_all(&config.mcp_servers).await);
     mgr.clone().spawn_notification_poll_loop(None);
     Some(mgr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentRuntime;
+    use claurst_core::PermissionMode;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const ROOT_ENV: &str = "ACP_SAVED_PERMISSION_MODE_FIXTURE_ROOT";
+    const COMPLETE: &str = "acp-saved-permission-mode-fixture-complete";
+
+    /// Builds the ACP runtime over each saved mode. Only the parent below may
+    /// run this: it rewrites the settings file of the engine home the
+    /// environment names.
+    #[test]
+    #[ignore = "run by isolated parent with temporary engine home"]
+    fn saved_permission_mode_child() {
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("run through the parent test"));
+        assert_eq!(
+            std::env::var_os("COVEN_CODE_HOME").as_deref(),
+            Some(root.as_os_str())
+        );
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut failures = Vec::new();
+        for (saved, expected) in [
+            ("default", PermissionMode::Default),
+            ("acceptEdits", PermissionMode::AcceptEdits),
+            // Plan needs the interactive plan approval ACP does not have.
+            ("plan", PermissionMode::Default),
+            // ACP has no explicit opt-in, so a saved bypass never applies.
+            ("bypassPermissions", PermissionMode::Default),
+        ] {
+            // A provider other than Anthropic keeps the build off credentials.
+            std::fs::write(
+                root.join("settings.json"),
+                format!(r#"{{"config":{{"provider":"codex","permission_mode":"{saved}"}}}}"#),
+            )
+            .unwrap();
+            let runtime = tokio
+                .block_on(AgentRuntime::build(root.clone()))
+                .unwrap_or_else(|error| panic!("saved {saved}: {error:#}"));
+            // The mode each turn and the keyless child get, and the mode
+            // tool approvals are checked in.
+            let turn = runtime.config.permission_mode.clone();
+            let approvals = runtime.permission_manager.lock().unwrap().mode.clone();
+            if turn != expected || approvals != expected {
+                failures.push(format!(
+                    "saved {saved}: turn {turn:?}, approvals {approvals:?}, expected {expected:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        println!("{COMPLETE}");
+    }
+
+    #[test]
+    fn acp_never_restores_a_saved_bypass_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::tests::saved_permission_mode_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            // Windows needs these to start a process and open sockets.
+            .envs(
+                ["SystemRoot", "PATH"]
+                    .into_iter()
+                    .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+            )
+            .env("HOME", &root_path)
+            .env("USERPROFILE", &root_path)
+            .env("COVEN_HOME", root_path.join("coven"))
+            .env("COVEN_CAVE_HOME", root_path.join("cave"))
+            .env("COVEN_CODE_HOME", &root_path)
+            .env("XDG_CONFIG_HOME", &root_path)
+            .env("XDG_CACHE_HOME", &root_path)
+            .env(ROOT_ENV, &root_path)
+            .current_dir(&root_path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(COMPLETE),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

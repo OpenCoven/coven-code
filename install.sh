@@ -42,17 +42,21 @@ OPTIONS:
     --version <ver>     Install a specific version (default: latest)
     --install-dir <dir> Override install location (default: ~/.coven-code/bin)
     --binary <path>     Use a local binary instead of downloading
+    --force             Replace an existing ${APP} that differs from this one
+                        without asking (or set COVEN_CODE_INSTALL_FORCE=1)
     -h, --help          Show this help
 
 EXAMPLES:
     curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
     ./install.sh --version 0.1.4
     ./install.sh --binary /path/to/coven-code
+    curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash -s -- --force
 EOF
 }
 
 # Parse args
-specific_version=""; install_dir_override=""; local_binary=""
+specific_version=""; install_dir_override=""; local_binary=""; force=0
+if [[ "${COVEN_CODE_INSTALL_FORCE:-}" == 1 ]]; then force=1; fi
 while [[ $# -gt 0 ]]; do
   if [[ $# -lt 2 && ( "$1" == --version || "$1" == --install-dir || "$1" == --binary ) ]]; then
     print_message error "Missing value for $1" >&2
@@ -63,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --version) specific_version="$2"; shift 2 ;;
     --install-dir) install_dir_override="$2"; shift 2 ;;
     --binary) local_binary="$2"; shift 2 ;;
+    --force) force=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) print_message error "Unknown option: $1"; usage; exit 1 ;;
   esac
@@ -165,9 +170,32 @@ report_start_failure() {
   print_message error "Runtime requirements: https://github.com/${REPO}/blob/main/docs/installation.md#linux-runtime-requirements" >&2
 }
 
+same_bytes() {
+  local first second
+  if command -v cmp >/dev/null 2>&1; then
+    cmp -s "$1" "$2"
+  else
+    first=$(file_checksum "$1") && second=$(file_checksum "$2") && [[ "$first" == "$second" ]]
+  fi
+}
+
+# Replacing an engine that differs from the one being installed needs the
+# user's consent (#369). Only a terminal on stdin can give it here.
+confirm_replace() {
+  local installed="$1" reply=""
+  print_message warning "${INSTALL_DIR}/${APP} is a different ${APP} (${installed:+v}${installed:-version unknown}) from the one being installed (${install_source})." >&2
+  if [[ -t 0 ]]; then
+    printf '   Replace it? [y/N] ' >&2
+    read -r reply || true
+    if [[ "$reply" == [yY] || "$reply" == [yY][eE][sS] ]]; then return 0; fi
+  fi
+  print_message error "Left the existing ${APP} in place. To replace it, rerun with --force, or set COVEN_CODE_INSTALL_FORCE=1 (with curl: ... | bash -s -- --force)." >&2
+  return 1
+}
+
 install_binary_and_alias() (
   local source="$1" stage target="${INSTALL_DIR}/${APP}" alias="${INSTALL_DIR}/${ALIAS}"
-  local start_output missing
+  local start_output missing installed_version
   local had_target=0 had_alias=0 installed_target=0 installed_alias=0 committed=0
   local rollback_failed=0
 
@@ -216,6 +244,22 @@ install_binary_and_alias() (
     report_start_failure "${start_output//"$stage/$APP"/$APP}"
     return 1
   fi
+  # The same bytes, or a download of the version already installed, replace
+  # nothing that needs asking about.
+  if [[ $force -ne 1 && -f "$target" ]] && ! same_bytes "$stage/$APP" "$target"; then
+    installed_version=$("$target" --version </dev/null 2>/dev/null || true)
+    installed_version=${installed_version%%$'\n'*}
+    # Only an engine that names itself counts as the same version.
+    if [[ "$installed_version" =~ ^${APP}[[:space:]]+v?([0-9][^[:space:]]*)$ ]]; then
+      installed_version=${BASH_REMATCH[1]}
+    else
+      installed_version=""
+    fi
+    if [[ -n "$local_binary" || "$installed_version" != "$specific_version" ]] &&
+      ! confirm_replace "$installed_version"; then
+      return 1
+    fi
+  fi
   ln -s "$APP" "$stage/$ALIAS" || cp "$stage/$APP" "$stage/$ALIAS"
 
   if [[ -e "$target" || -L "$target" ]]; then
@@ -233,7 +277,10 @@ install_binary_and_alias() (
   committed=1
 )
 
-mkdir -p "$INSTALL_DIR"
+if ! mkdir -p "$INSTALL_DIR"; then
+  print_message error "Could not create the install directory ${INSTALL_DIR}" >&2
+  exit 1
+fi
 
 if [[ -n "$local_binary" ]]; then
   print_message info "Using local binary: $local_binary"
@@ -295,7 +342,12 @@ if [[ "${SHELL:-}" == */fish ]]; then
   path_check="$path_line"
 fi
 if [[ -n "$shell_rc" ]] && ! grep -qF "$path_check" "$shell_rc" 2>/dev/null; then
-  mkdir -p "$(dirname "$shell_rc")"
+  # Name the directory ourselves: some mkdir builds (uutils on Ubuntu 26.04)
+  # report only "Not a directory" without the path.
+  if ! mkdir -p "$(dirname "$shell_rc")"; then
+    print_message error "Could not create $(dirname "$shell_rc") for ${shell_rc}" >&2
+    exit 1
+  fi
   echo "" >> "$shell_rc"
   echo "# Coven Code" >> "$shell_rc"
   echo "$path_line" >> "$shell_rc"

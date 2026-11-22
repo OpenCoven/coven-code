@@ -192,7 +192,7 @@ impl Interactive {
         &mut self,
         prompt: &str,
     ) -> (
-        tokio::sync::mpsc::UnboundedSender<QueryEvent>,
+        tokio::sync::mpsc::Sender<QueryEvent>,
         tokio::task::JoinHandle<()>,
     ) {
         let message = Message::user(prompt.to_string());
@@ -201,7 +201,8 @@ impl Interactive {
         self.session.messages = self.messages.clone();
         self.app.is_streaming = true;
         self.app.streaming_text.clear();
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let worker = tokio::spawn(forward_scoped_events(
             turn_rx,
             self.events.clone(),
@@ -213,12 +214,12 @@ impl Interactive {
     /// Send `events` from a worker and wait until the queue holds them all.
     async fn deliver(
         &mut self,
-        worker: &tokio::sync::mpsc::UnboundedSender<QueryEvent>,
+        worker: &tokio::sync::mpsc::Sender<QueryEvent>,
         events: Vec<QueryEvent>,
     ) {
         let target = self.queue.len() + events.len();
         for event in events {
-            worker.send(event).expect("worker is running");
+            worker.send(event).await.expect("worker is running");
         }
         let queued = async {
             while self.queue.len() < target {
@@ -509,7 +510,13 @@ async fn an_open_rewind_holds_compaction_and_cuts_at_the_chosen_message() {
         cli.app.context_window_size = 100;
         cli.app.context_used_tokens = 99;
         cli.app.auto_compact_threshold = 90;
-        assert_eq!(select_idle_compaction(&cli.app, false), Some(99), "{case}");
+        // Long enough to have a head to summarise (#571).
+        let compactable: Vec<Message> = (0..12).map(|n| Message::user(format!("m {n}"))).collect();
+        assert_eq!(
+            select_idle_compaction(&cli.app, false, &compactable),
+            Some(IdleCompaction::Start(99)),
+            "{case}"
+        );
 
         // `/rewind`, as the loop runs it: the App's intercept, then the
         // `CommandResult::OpenRewindOverlay` arm.
@@ -517,7 +524,7 @@ async fn an_open_rewind_holds_compaction_and_cuts_at_the_chosen_message() {
         cli.app.replace_messages(cli.messages.clone());
         cli.app.open_rewind_flow();
         assert_eq!(
-            select_idle_compaction(&cli.app, false),
+            select_idle_compaction(&cli.app, false, &compactable),
             None,
             "{case}: compaction started under the rewind"
         );

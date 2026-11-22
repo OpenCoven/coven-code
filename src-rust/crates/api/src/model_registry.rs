@@ -871,11 +871,14 @@ impl ModelRegistry {
     /// Attempt to refresh the registry from the models.dev public API.
     ///
     /// Returns `Ok(true)` if new data was fetched, `Ok(false)` if the cache
-    /// was still fresh.  Honors `COVEN_CODE_DISABLE_MODELS_FETCH`.  All network
+    /// was still fresh.  Honors `COVEN_CODE_DISABLE_MODELS_FETCH` and
+    /// `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC`.  All network
     /// or parse failures are silenced — the bundled snapshot is always
     /// sufficient.
     pub async fn refresh_from_models_dev(&mut self) -> anyhow::Result<bool> {
-        if std::env::var("COVEN_CODE_DISABLE_MODELS_FETCH").is_ok() {
+        if claurst_core::traffic_opt_out::traffic_opted_out(
+            claurst_core::traffic_opt_out::DISABLE_MODELS_FETCH_ENV,
+        ) {
             return Ok(false);
         }
         if self.cache_is_fresh() {

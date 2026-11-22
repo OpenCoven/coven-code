@@ -716,6 +716,9 @@ pub struct App {
     pub agent_mode_changed: bool,
     pub agent_status: Vec<(String, String)>,
     pub keybindings: KeybindingResolver,
+    /// The user's bindings as loaded at launch, which `keybindings` resolves.
+    /// Hints are drawn from these so they name the keys that work.
+    pub user_keybindings: UserKeybindings,
     /// Presentation preferences for the Next renderer; Classic ignores them.
     pub next_presentation: crate::next::NextPresentation,
     /// Renderer drawing this session. Next-only keys are unbound in Classic.
@@ -824,6 +827,11 @@ pub struct App {
     // ---- Visual mode indicators -------------------------------------------
     /// Plan mode — input border turns blue, [PLAN] shown in status bar.
     pub plan_mode: bool,
+    /// Whether the launch, not the saved settings, chose the session's
+    /// permission mode (`--permission-mode`, `--dangerously-skip-permissions`,
+    /// a GitHub context or a scoped workspace). A reload of the saved settings
+    /// (`/config import`) then keeps the session's mode, as a start does.
+    pub permission_mode_from_launch: bool,
     /// "While you were away" summary text shown on the welcome screen.
     pub away_summary: Option<String>,
     /// When streaming stalled (used to turn the spinner red after 3 s).
@@ -1360,6 +1368,7 @@ impl App {
             accent_color: ACCENT_BUILD,
             agent_status: Vec::new(),
             keybindings: KeybindingResolver::new(&user_keybindings),
+            user_keybindings,
             next_presentation: crate::next::NextPresentation::default(),
             renderer: crate::application::UiRenderer::default(),
             next_shell: crate::next::ShellState::default(),
@@ -1404,6 +1413,7 @@ impl App {
             file_history: None,
             current_turn: None,
             plan_mode: false,
+            permission_mode_from_launch: false,
             away_summary: None,
             stall_start: None,
             settings_screen: SettingsScreen::new(),
@@ -1735,7 +1745,9 @@ impl App {
                 let new_config = new_settings.effective_config();
                 let result_message = claurst_core::summarize_import_result(&result, &paths);
                 let imported_mcp = result.imported_fields.iter().any(|f| f == "mcpServers");
-                self.config = new_config.clone();
+                let session_mode = self.config.permission_mode.clone();
+                self.config = new_config;
+                self.config.permission_mode = self.permission_mode_after_reload(session_mode);
                 self.model_name = self.config.effective_model().to_string();
                 self.cost_tracker.set_model(&self.model_name);
                 self.refresh_context_window_size();
@@ -1763,6 +1775,39 @@ impl App {
                 self.import_config_dialog.close();
             }
         }
+    }
+
+    /// The session's permission mode once the saved settings, now in
+    /// `self.config`, have been reloaded, under the rule a start follows. A
+    /// mode chosen at launch stays. Otherwise a saved `acceptEdits` or `plan`
+    /// applies. A saved bypass mode is never restored and a saved `default`
+    /// cannot be told apart from nothing saved, so both leave the session's
+    /// mode as it is: a reload never loosens it to `default` or to bypass.
+    /// Each reload that changes the mode or refuses a saved bypass says so.
+    fn permission_mode_after_reload(
+        &mut self,
+        session_mode: claurst_core::config::PermissionMode,
+    ) -> claurst_core::config::PermissionMode {
+        use claurst_core::config::PermissionMode;
+        if self.permission_mode_from_launch {
+            return session_mode;
+        }
+        let saved = self.config.permission_mode.clone();
+        let restored = saved.restored_from_settings();
+        let refused = restored.mode != saved;
+        let mode = if refused || saved == PermissionMode::Default {
+            session_mode.clone()
+        } else {
+            restored.mode
+        };
+        // A session already in bypass, chosen in the session, was not refused.
+        if mode != session_mode || (refused && session_mode != saved) {
+            if let Some(notice) = restored.notice {
+                self.notifications
+                    .push(NotificationKind::Warning, notice.to_string(), Some(30));
+            }
+        }
+        mode
     }
 
     pub(crate) fn current_user_turn_index(&self) -> Option<usize> {
@@ -2088,6 +2133,10 @@ impl App {
         if now.saturating_duration_since(self.daemon_last_checked) >= DAEMON_STATUS_REFRESH {
             self.daemon_last_checked = now;
             self.daemon_online = crate::coven_status::daemon_looks_online();
+            // The ledger registration follows the instance that took it (#412).
+            if let Some((sighting, seen_at)) = crate::coven_status::last_daemon_sighting() {
+                self.ownership.observe_daemon(&sighting, seen_at);
+            }
         }
     }
 
@@ -5731,6 +5780,15 @@ impl App {
                 self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
             }
 
+            // ---- ESC: vim leaves Insert, Visual, a pending command or the
+            // `:` and `/` lines (#569). Everything above takes Escape first:
+            // modals and overlays, notices, key bindings, transcript focus
+            // and a running turn's cancel.
+            KeyCode::Esc if self.prompt_input.vim_enabled => {
+                self.prompt_input.vim_command("Escape");
+                self.refresh_prompt_input();
+            }
+
             // ---- Quit / cancel ----------------------------------------
             // Accept both 'c' and 'C' so Shift+Ctrl+C also triggers copy
             // (issue #149 follow-up).
@@ -8612,19 +8670,17 @@ fn open_file_externally(
     #[cfg(target_os = "windows")]
     {
         let system_root = windows_system_root();
-        let mut command = tokio::process::Command::new(
+        let mut shell = std::process::Command::new(
             std::path::Path::new(&system_root)
                 .join("System32")
                 .join("cmd.exe"),
         );
-        let quoted_path = quote_windows_cmd_path(path);
-        command
-            .args(["/C", "start", ""])
-            .arg(quoted_path)
+        shell
             .env_clear()
             .env("SystemRoot", &system_root)
             .env("WINDIR", &system_root);
-        ExternalOpener::spawn(command)
+        let command = claurst_core::shell::start(shell, path)?;
+        ExternalOpener::spawn(tokio::process::Command::from(command))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -8643,14 +8699,6 @@ fn open_file_externally(
             "No suitable editor found",
         ))
     }
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn quote_windows_cmd_path(path: &std::path::Path) -> std::ffi::OsString {
-    let mut quoted = std::ffi::OsString::from("\"");
-    quoted.push(path.as_os_str());
-    quoted.push("\"");
-    quoted
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -9341,6 +9389,136 @@ mod tests {
         }
     }
 
+    /// #412, policy B: the same refresh compares the last probe with the
+    /// daemon instance that took the ledger registration. The same instance
+    /// keeps it; another process answering on the socket makes it unknown,
+    /// while the daemon still reads as online.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_refresh_makes_the_registration_unknown_after_a_restart() {
+        use crate::application::{DaemonPresence, SessionOwnership};
+        use claurst_core::coven_daemon::DaemonSighting;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        // A fake daemon whose health names `pid`; it answers until stopped.
+        fn daemon(
+            socket: &std::path::Path,
+            pid: u32,
+        ) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+            let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind socket");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let stop = Arc::new(AtomicBool::new(false));
+            let health = format!(
+                r#"{{"ok":true,"apiVersion":"coven.daemon.v1","covenVersion":"0.5.0","daemon":{{"pid":{pid},"startedAt":"2026-11-18T05:00:00Z"}}}}"#
+            );
+            let thread = {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let Ok((mut stream, _)) = listener.accept() else {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        };
+                        // Accepted streams inherit O_NONBLOCK on macOS.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 256];
+                        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => request.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        let _ =
+                            stream.write_all(format!("HTTP/1.0 200 OK\r\n\r\n{health}").as_bytes());
+                    }
+                })
+            };
+            (stop, thread)
+        }
+
+        // Run the loop's refresh, one interval per call, until a probe that
+        // began after `after` has landed and been compared.
+        fn refresh_past(app: &mut App, now: &mut Instant, after: Instant) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                *now += DAEMON_STATUS_REFRESH;
+                app.refresh_daemon_status(*now);
+                let landed = crate::coven_status::last_daemon_sighting()
+                    .is_some_and(|(_, began_at)| began_at >= after);
+                if landed {
+                    *now += DAEMON_STATUS_REFRESH;
+                    app.refresh_daemon_status(*now);
+                    return;
+                }
+                assert!(Instant::now() < deadline, "no probe landed");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+        let socket = coven_home.join("coven.sock");
+
+        let (stop, first) = daemon(&socket, 100);
+        crate::coven_status::forget_daemon_probe();
+        let mut app = make_app();
+        let mut now = app.daemon_last_checked;
+        refresh_past(&mut app, &mut now, Instant::now());
+        let Some((DaemonSighting::Instance(instance), _)) =
+            crate::coven_status::last_daemon_sighting()
+        else {
+            panic!("the probe did not identify the fake daemon");
+        };
+        assert_eq!(instance.pid, Some(100));
+
+        // The session registered with that instance.
+        let registered = SessionOwnership::LedgerRegistered {
+            session_id: "session-a".to_string(),
+            instance,
+            since: Instant::now(),
+        };
+        app.ownership = registered.clone();
+        crate::coven_status::forget_daemon_probe();
+        refresh_past(&mut app, &mut now, Instant::now());
+        assert_eq!(app.ownership, registered, "the same instance keeps it");
+        assert_eq!(
+            app.ownership.daemon_presence(app.daemon_online),
+            DaemonPresence::Online
+        );
+
+        // The daemon is replaced by another process on the same path.
+        stop.store(true, Ordering::Release);
+        first.join().expect("first fake daemon");
+        std::fs::remove_file(&socket).expect("remove socket");
+        let (stop, second) = daemon(&socket, 101);
+        crate::coven_status::forget_daemon_probe();
+        refresh_past(&mut app, &mut now, Instant::now());
+        assert_eq!(
+            app.ownership,
+            SessionOwnership::LedgerUnknown {
+                session_id: "session-a".to_string()
+            }
+        );
+        assert!(app.daemon_online, "the new daemon answers");
+        assert_eq!(
+            app.ownership.daemon_presence(app.daemon_online),
+            DaemonPresence::Unknown
+        );
+
+        stop.store(true, Ordering::Release);
+        second.join().expect("second fake daemon");
+    }
+
     #[test]
     fn app_does_not_infer_builtin_familiar_without_saved_roster() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9478,16 +9656,6 @@ role = "Research"
         assert_eq!(
             app.config.permission_mode,
             claurst_core::config::PermissionMode::AcceptEdits
-        );
-    }
-
-    #[test]
-    fn windows_cmd_path_is_passed_as_quoted_argument() {
-        let path = std::path::Path::new(r"C:\temp\safe & literal.txt");
-
-        assert_eq!(
-            quote_windows_cmd_path(path).to_string_lossy(),
-            r#""C:\temp\safe & literal.txt""#
         );
     }
 
@@ -9850,6 +10018,107 @@ role = "Research"
         assert!(app.intercept_slash_command("vim"));
         assert!(app.prompt_input.vim_enabled);
         assert!(app.intercept_slash_command("vim"));
+        assert!(!app.prompt_input.vim_enabled);
+    }
+
+    /// Escape reaches vim from the composer in both renderers (#569). It
+    /// leaves Insert, so `0` and `i` are vim commands, and leaving an insert
+    /// made before the end of the text does not panic.
+    #[test]
+    fn escape_takes_vim_out_of_insert_in_both_renderers() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        for renderer in [
+            crate::application::UiRenderer::Classic,
+            crate::application::UiRenderer::Next,
+        ] {
+            let mut app = make_app();
+            app.renderer = renderer;
+            assert!(app.intercept_slash_command("vim"));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+            for c in "ab".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            for c in "0ix".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            assert_eq!(app.prompt_input.text, "xab", "{renderer:?}");
+            // Visual mode is left the same way.
+            app.handle_key_event(press_key(KeyCode::Char('v'), KeyModifiers::NONE));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Visual, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+        }
+    }
+
+    /// With vim on, a running turn still takes Escape first; the next
+    /// Escape goes to vim.
+    #[test]
+    fn escape_cancels_a_running_turn_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.is_streaming = true;
+        app.handle_key_event(esc);
+        assert!(!app.is_streaming);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+        app.handle_key_event(esc);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Normal);
+    }
+
+    /// With vim on, transcript focus still takes Escape first.
+    #[test]
+    fn escape_returns_focus_from_the_transcript_before_vim_takes_it() {
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.focus = FocusTarget::Transcript;
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.focus, FocusTarget::Input);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, Next's inspector still takes Escape first, through its
+    /// key binding.
+    #[test]
+    fn escape_closes_the_next_inspector_before_vim_takes_it() {
+        let mut app = make_app();
+        app.renderer = crate::application::UiRenderer::Next;
+        app.prompt_input.vim_enabled = true;
+        app.next_shell.inspector = Some(crate::next::InspectorPage::Views);
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.next_shell.inspector.is_none());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, a notice still takes Escape first.
+    #[test]
+    fn escape_dismisses_a_notice_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.notifications.push(
+            crate::notifications::NotificationKind::Info,
+            "a notice".to_string(),
+            None,
+        );
+        app.handle_key_event(esc);
+        assert!(app.notifications.is_empty());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim off, Escape on an idle composer still changes nothing, as
+    /// before vim took Escape.
+    #[test]
+    fn escape_without_vim_leaves_the_idle_composer_alone() {
+        let mut app = make_app();
+        app.set_prompt_text("draft".to_string());
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.prompt_input.text, "draft");
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
         assert!(!app.prompt_input.vim_enabled);
     }
 
@@ -10936,5 +11205,138 @@ role = "Research"
                 .status,
             ToolStatus::Running
         );
+    }
+}
+
+/// #517 on Windows: the keybindings file opens through `cmd.exe /C start`,
+/// which must get the file's path whole. Before, `Command::arg` wrote the
+/// quotes around the path as `\"`, which `cmd.exe` does not unescape.
+///
+/// `cmd.exe` also replaces `%NAME%` with the variable's value.
+///
+/// A file type registered for the current user stands in for the user's
+/// editor: Windows runs this test binary with the path it was asked to open.
+/// Whether a real editor then shows the file can only be seen on a desktop.
+#[cfg(all(test, windows))]
+mod windows_open_tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    const HANDLER: &str = "app::windows_open_tests::file_open_handler";
+    const CAPTURE: &str = "capture";
+
+    // The registry helpers are repeated in claurst-mcp's
+    // `tests/windows_cmd_quotes.rs`: test crates cannot share a module.
+
+    /// Registry keys under `HKCU\Software\Classes`, removed on drop.
+    struct Registered(Vec<String>);
+
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            for key in &self.0 {
+                let _ = Command::new("reg")
+                    .args(["delete", key.as_str(), "/f"])
+                    .output();
+            }
+        }
+    }
+
+    fn reg_add(key: &str, value: &[&str], data: &str) {
+        let output = Command::new("reg")
+            .arg("add")
+            .arg(key)
+            .args(value)
+            .args(["/d", data, "/f"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "reg add {key}: {output:?}");
+    }
+
+    /// Make files ending in `extension` open with this test binary, which
+    /// writes the path it was given to `capture`.
+    fn register_file_type(extension: &str, capture: &Path) -> Registered {
+        let class = format!("CovenTest517File{}", std::process::id());
+        let classes = r"HKCU\Software\Classes";
+        let registered = Registered(vec![
+            format!(r"{classes}\{extension}"),
+            format!(r"{classes}\{class}"),
+        ]);
+        reg_add(&registered.0[0], &["/ve"], &class);
+        let handler = format!(
+            r#""{}" --exact {HANDLER} --ignored --nocapture "{}" "%1""#,
+            std::env::current_exe().unwrap().display(),
+            capture.display(),
+        );
+        reg_add(
+            &format!(r"{classes}\{class}\shell\open\command"),
+            &["/ve"],
+            &handler,
+        );
+        registered
+    }
+
+    async fn wait_for(capture: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(capture) {
+                return text;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nothing was opened within 60 s: {} was not written",
+                capture.display()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn file_opener_passes_the_whole_path() {
+        let directory = tempfile::tempdir().unwrap();
+        // The opener's `cmd.exe` has `SystemRoot` set, and would replace
+        // `%SystemRoot%` with its value; with delayed expansion on, it would
+        // also replace `!SystemRoot!` and drop the `^`.
+        let folder = directory
+            .path()
+            .join("with space & %SystemRoot% !SystemRoot! ^x");
+        std::fs::create_dir(&folder).unwrap();
+        let extension = format!(".coventest517x{}", std::process::id());
+        let file = folder.join(format!("keybindings{extension}"));
+        std::fs::write(&file, "{}").unwrap();
+        let capture = directory.path().join(format!("opened.{CAPTURE}"));
+        let _registered = register_file_type(&extension, &capture);
+
+        let _opener = super::open_file_externally(&file).unwrap();
+
+        let opened = PathBuf::from(wait_for(&capture).await);
+        assert_eq!(
+            std::fs::canonicalize(&opened).ok(),
+            Some(std::fs::canonicalize(&file).unwrap()),
+            "Windows was asked to open {}",
+            opened.display()
+        );
+    }
+
+    /// Run by Windows as the test file type's handler, with the capture file
+    /// and the opened path as its last two arguments. It does nothing unless
+    /// the first of those is a capture file.
+    #[test]
+    #[ignore = "run by Windows as the handler of the test file type"]
+    fn file_open_handler() {
+        let mut arguments = std::env::args_os().rev();
+        let (Some(opened), Some(capture)) = (arguments.next(), arguments.next()) else {
+            return;
+        };
+        let capture = PathBuf::from(capture);
+        if capture
+            .extension()
+            .is_none_or(|extension| extension != CAPTURE)
+        {
+            return;
+        }
+        let partial = capture.with_extension("partial");
+        std::fs::write(&partial, opened.to_string_lossy().as_bytes()).unwrap();
+        std::fs::rename(partial, capture).unwrap();
     }
 }

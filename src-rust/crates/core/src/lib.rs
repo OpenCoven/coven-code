@@ -40,6 +40,7 @@ pub mod shell;
 pub mod spinner;
 pub mod status_notices;
 pub mod token_budget;
+pub mod traffic_opt_out;
 pub mod truncate;
 pub use spinner::{
     sample_completion_verb, sample_spinner_verb, SPINNER_VERBS, TURN_COMPLETION_VERBS,
@@ -96,7 +97,7 @@ pub use config::{
     builtin_managed_agent_presets, default_agents, strip_jsonc_comments, substitute_env_vars,
     AgentDefinition, BudgetSplitPolicy, CommandTemplate, Config, FormatterConfig,
     ManagedAgentConfig, ManagedAgentPreset, McpServerConfig, OutputFormat, PermissionMode,
-    ProviderConfig, Settings, SkillsConfig, Theme,
+    ProviderConfig, RestoredPermissionMode, Settings, SkillsConfig, Theme,
 };
 pub use error::{ClaudeError, Result};
 pub use import_config::{
@@ -1061,6 +1062,41 @@ pub mod config {
         Plan,
     }
 
+    /// The mode a session takes from a saved permission mode, and what to say
+    /// about it once.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RestoredPermissionMode {
+        pub mode: PermissionMode,
+        /// Set when the saved mode decided `mode` or was refused. Short enough
+        /// for the one-row notification both renderers draw.
+        pub notice: Option<&'static str>,
+    }
+
+    impl PermissionMode {
+        /// The mode a session runs in when `self` is the saved mode and nothing
+        /// explicit (such as `--permission-mode`) chose one. A saved
+        /// `acceptEdits` or `plan` applies. A saved `bypassPermissions` is
+        /// never restored: the session runs in `default` and says so, so a
+        /// settings file cannot turn approvals off unseen. Every place that
+        /// applies a saved mode (an interactive start, `/config import`, ACP)
+        /// goes through this one rule.
+        pub fn restored_from_settings(&self) -> RestoredPermissionMode {
+            let (mode, notice) = match self {
+                PermissionMode::Default => (PermissionMode::Default, None),
+                PermissionMode::AcceptEdits => (
+                    PermissionMode::AcceptEdits,
+                    Some("Saved accept-edits mode restored"),
+                ),
+                PermissionMode::Plan => (PermissionMode::Plan, Some("Saved plan mode restored")),
+                PermissionMode::BypassPermissions => (
+                    PermissionMode::Default,
+                    Some("Saved bypass mode not restored"),
+                ),
+            };
+            RestoredPermissionMode { mode, notice }
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     #[serde(rename_all = "camelCase")]
     pub enum Theme {
@@ -1825,6 +1861,73 @@ pub mod config {
         f()
     }
 
+    /// Write `edits` into the settings file at `path`, keeping every other key.
+    /// A file the settings loader would refuse is left alone: saving into it
+    /// would report success for choices that are never read back.
+    fn write_appearance_edits(
+        path: &std::path::Path,
+        edits: &crate::appearance::AppearanceEdits,
+    ) -> anyhow::Result<()> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()))
+            }
+        };
+        let mut root: serde_json::Value = match &content {
+            Some(content) => serde_json::from_str(content)
+                .with_context(|| format!("{} is not valid JSON", path.display()))?,
+            None => serde_json::Value::Object(Default::default()),
+        };
+        let object = root
+            .as_object_mut()
+            .with_context(|| format!("{} does not hold a settings object", path.display()))?;
+        // The text, as the loader reads it: a parsed value has already
+        // dropped all but the last copy of a repeated key.
+        if let Some(content) = &content {
+            serde_json::from_str::<Settings>(content)
+                .with_context(|| format!("{} cannot be read as settings", path.display()))?;
+        }
+        let mut layer: crate::appearance::NextAppearanceSettings =
+            match object.get("nextAppearance") {
+                Some(value) => serde_json::from_value(value.clone())?,
+                None => Default::default(),
+            };
+        anyhow::ensure!(
+            !layer.is_unreadable(),
+            "nextAppearance in {} is not an object; fix or remove it",
+            path.display()
+        );
+        edits.apply_to(&mut layer);
+        let written = serde_json::to_value(&layer)?;
+        if written.as_object().is_some_and(|keys| keys.is_empty()) {
+            object.remove("nextAppearance");
+        } else {
+            object.insert("nextAppearance".to_string(), written);
+        }
+        match edits.reduce_motion() {
+            Some(true) => {
+                object.insert(
+                    crate::appearance::REDUCE_MOTION_KEY.to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            Some(false) => {
+                object.remove(crate::appearance::REDUCE_MOTION_KEY);
+            }
+            None => {}
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(&root)?;
+        if let Some((staged, target)) = prepare_settings_save(path, content.as_bytes())? {
+            staged.persist(target).map_err(|error| error.error)?;
+        }
+        Ok(())
+    }
+
     // Existing settings are staged beside the resolved target. Missing targets
     // retain direct creation, including through dangling symlinks.
     fn prepare_settings_save(
@@ -1932,6 +2035,16 @@ pub mod config {
             Ok(())
         }
 
+        /// Write appearance edits to the user's settings file and change
+        /// nothing else in it: keys this version does not know stay, and values
+        /// from project settings never move into the user's file. A file that
+        /// cannot be read as settings is refused and left as it was.
+        pub fn save_appearance_edits(
+            edits: &crate::appearance::AppearanceEdits,
+        ) -> anyhow::Result<()> {
+            write_appearance_edits(&Self::global_settings_path(), edits)
+        }
+
         /// Return the effective `Config`, merging top-level provider settings
         /// into the embedded `config` field.
         ///
@@ -2001,7 +2114,8 @@ pub mod config {
         /// Load settings from all config levels and merge them.
         /// Priority: project > engine-global > shared, except project-local
         /// executable MCP server definitions and provider-routing fields are
-        /// ignored before merging.
+        /// ignored before merging, and the permission mode always comes from
+        /// the user's own two layers.
         ///
         /// Three-layer load order (lowest → highest precedence):
         ///   1. Shared  — `~/.coven/settings.json`  (whitelisted keys only)
@@ -2042,7 +2156,12 @@ pub mod config {
             SharedSettings::load().apply_to(&mut merged);
             // 3. Find and merge project settings (safe project fields win).
             if let Some(project_settings) = Self::find_project_settings(cwd).await {
+                // A start with no `--permission-mode` runs in the saved mode,
+                // so that mode is the user's alone: a repository's file must
+                // neither choose it nor, by leaving it out, reset it.
+                let permission_mode = merged.config.permission_mode.clone();
                 merged = Self::merge(merged, Self::sanitize_project_settings(project_settings));
+                merged.config.permission_mode = permission_mode;
             }
             merged
         }
@@ -2443,6 +2562,127 @@ pub mod config {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn appearance_edits_change_only_what_they_name() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(
+                &path,
+                r#"{"someFutureKey":{"a":[1,2]},"config":{"model":"m"},"reduceMotion":true,
+                    "nextAppearance":{"laterKey":42,"theme":"plaid","density":"compact"}}"#,
+            )
+            .unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("layout", "work").unwrap();
+            write_appearance_edits(&path, &edits).unwrap();
+
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                written,
+                serde_json::json!({
+                    "someFutureKey": {"a": [1, 2]},
+                    "config": {"model": "m"},
+                    "reduceMotion": true,
+                    "nextAppearance": {
+                        "laterKey": 42, "theme": "plaid", "density": "compact", "layout": "work"
+                    }
+                })
+            );
+        }
+
+        #[test]
+        fn appearance_reset_leaves_the_rest_of_the_file_and_creates_nothing_empty() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(
+                &path,
+                r#"{"someFutureKey":1,"reduceMotion":true,"nextAppearance":{"density":"compact"}}"#,
+            )
+            .unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.reset_all();
+            write_appearance_edits(&path, &edits).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(written, serde_json::json!({"someFutureKey": 1}));
+        }
+
+        #[test]
+        fn appearance_edits_start_a_missing_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("nested/settings.json");
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("reduceMotion", "true").unwrap();
+            edits.set("density", "compact").unwrap();
+            write_appearance_edits(&path, &edits).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                written,
+                serde_json::json!({"reduceMotion": true, "nextAppearance": {"density": "compact"}})
+            );
+            let loaded: Settings = serde_json::from_value(written).unwrap();
+            assert!(loaded.reduce_motion);
+        }
+
+        #[test]
+        fn appearance_edits_refuse_a_file_they_cannot_read_and_leave_it_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("density", "compact").unwrap();
+            for content in [
+                "{ not json",
+                "[1,2,3]",
+                r#"{"nextAppearance":"dark","kept":1}"#,
+                "",
+            ] {
+                std::fs::write(&path, content).unwrap();
+                let error = write_appearance_edits(&path, &edits).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("settings.json")
+                        || format!("{error:#}").contains("nextAppearance"),
+                    "{error:#}"
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+            }
+        }
+
+        #[test]
+        fn appearance_edits_refuse_a_file_the_settings_loader_rejects() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            // Valid JSON, but a value of the wrong type: loading falls back to
+            // defaults, so saving into it would only hide that.
+            let content = r#"{"hasCompletedOnboarding":"yes","kept":1}"#;
+            assert!(serde_json::from_str::<Settings>(content).is_err());
+            std::fs::write(&path, content).unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("density", "compact").unwrap();
+
+            let error = write_appearance_edits(&path, &edits).unwrap_err();
+            assert!(format!("{error:#}").contains("settings.json"), "{error:#}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+
+        #[test]
+        fn appearance_edits_refuse_a_file_with_a_repeated_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            // The loader rejects a repeated field, so the whole file is
+            // ignored; a parsed JSON value would keep only the last copy.
+            let content = r#"{"reduceMotion":true,"reduceMotion":false,"kept":1}"#;
+            assert!(serde_json::from_str::<Settings>(content).is_err());
+            std::fs::write(&path, content).unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("density", "compact").unwrap();
+
+            let error = write_appearance_edits(&path, &edits).unwrap_err();
+            assert!(format!("{error:#}").contains("settings.json"), "{error:#}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
 
         #[test]
         fn project_settings_do_not_merge_mcp_servers() {
@@ -3185,6 +3425,110 @@ pub mod config {
                 engine.config.permission_mode,
                 PermissionMode::AcceptEdits
             ));
+        }
+
+        /// The permission mode `load_hierarchical` gives for these file
+        /// contents: the user's engine and shared settings, and a repository's.
+        fn loaded_permission_mode(
+            engine: Option<&str>,
+            shared: Option<&str>,
+            repository: &str,
+        ) -> PermissionMode {
+            let _guard = with_shared_layer(
+                |coven_home| {
+                    if let Some(shared) = shared {
+                        std::fs::write(coven_home.join("settings.json"), shared).unwrap();
+                    }
+                },
+                |code_home| {
+                    if let Some(engine) = engine {
+                        std::fs::write(code_home.join("settings.json"), engine).unwrap();
+                    }
+                },
+            );
+            let project = tempfile::tempdir().unwrap();
+            let config_dir = project.path().join(PROJECT_CONFIG_DIRNAME);
+            std::fs::create_dir(&config_dir).unwrap();
+            std::fs::write(config_dir.join("settings.json"), repository).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Settings::load_hierarchical(project.path()))
+                .config
+                .permission_mode
+        }
+
+        #[test]
+        fn a_repository_settings_file_neither_sets_nor_resets_the_users_permission_mode() {
+            let accept_edits = r#"{"config":{"permission_mode":"acceptEdits"}}"#;
+            for (engine, shared, repository, expected) in [
+                // Leaving the mode out must not reset the user's choice.
+                (Some(accept_edits), None, "{}", PermissionMode::AcceptEdits),
+                (
+                    Some(accept_edits),
+                    None,
+                    r#"{"config":{"model":"repository-model"}}"#,
+                    PermissionMode::AcceptEdits,
+                ),
+                (
+                    None,
+                    Some(r#"{"permission_mode":"plan"}"#),
+                    "{}",
+                    PermissionMode::Plan,
+                ),
+                // Naming a mode must not choose it, whatever the user has.
+                (
+                    Some(accept_edits),
+                    None,
+                    r#"{"config":{"permission_mode":"bypassPermissions"}}"#,
+                    PermissionMode::AcceptEdits,
+                ),
+                (
+                    None,
+                    None,
+                    r#"{"config":{"permission_mode":"bypassPermissions"}}"#,
+                    PermissionMode::Default,
+                ),
+                (
+                    None,
+                    None,
+                    r#"{"config":{"permission_mode":"acceptEdits"}}"#,
+                    PermissionMode::Default,
+                ),
+                (
+                    None,
+                    None,
+                    r#"{"config":{"permission_mode":"plan"}}"#,
+                    PermissionMode::Default,
+                ),
+            ] {
+                assert_eq!(
+                    loaded_permission_mode(engine, shared, repository),
+                    expected,
+                    "engine {engine:?}, shared {shared:?}, repository {repository}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_saved_permission_mode_that_cannot_be_read_is_the_default() {
+            for (engine, shared) in [
+                (Some(r#"{"config":{"permission_mode":"yolo"}}"#), None),
+                (Some(r#"{"config":{"permission_mode":7}}"#), None),
+                (
+                    Some(r#"{"config":{"permission_mode":"BYPASSPERMISSIONS"}}"#),
+                    None,
+                ),
+                (None, Some(r#"{"permission_mode":"yolo"}"#)),
+                (None, Some(r#"{"permission_mode":"bypass-permissions"}"#)),
+            ] {
+                assert_eq!(
+                    loaded_permission_mode(engine, shared, "{}"),
+                    PermissionMode::Default,
+                    "engine {engine:?}, shared {shared:?}"
+                );
+            }
         }
 
         /// A malformed / non-JSON shared file is non-fatal: `load()` returns

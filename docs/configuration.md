@@ -14,7 +14,8 @@ the engine home. Global settings require **plain JSON**, without comments.
 
 Shared `<coven-home>/settings.json` supplies only `model`, `theme`, and
 `permission_mode` defaults when the engine-global values remain at defaults.
-Command-line overrides apply after settings loading.
+Command-line overrides apply after settings loading. Which starts use the
+saved permission mode is described under [Permission Modes](#permission-modes).
 
 ### Per-project settings
 
@@ -26,11 +27,13 @@ an unreadable or invalid file does not fall back to another file or parent.
 Project settings are sanitized before merging. Provider routing and credentials,
 MCP and LSP server definitions, hooks, hosted-review policy, persisted permission
 rules, and `workspace_paths` are discarded from this layer. Configure these
-in trusted engine-global settings instead.
+in trusted engine-global settings instead. `permission_mode` is not taken from
+this file either: a project file neither sets the mode nor resets the one you
+saved.
 
 Merging is field-specific: some lists concatenate and maps merge. Omission does
 not always preserve a global value: project defaults can replace fields such as
-`permission_mode`, `theme`, and `output_format`. Keep project settings minimal
+`theme` and `output_format`. Keep project settings minimal
 and verify the effective behavior before relying on a global preference.
 
 ---
@@ -62,6 +65,37 @@ When Coven Code saves the engine-global file, it preserves the JSON values of un
 
 ---
 
+## Next Appearance
+
+`nextAppearance` changes how the Next renderer (`COVEN_CODE_UI=next`) draws, and nothing else: no value here reaches permissions, providers, identity or stored state. Classic ignores it. An invalid value falls back to its default and stays in the file, and so does any key this version does not know.
+
+| Key | Values | Default | What it does |
+|-----|--------|---------|--------------|
+| `theme` | `auto`, `dark`, `light` | `auto` | Light or dark colors. `auto` reads `COLORFGBG`; with no answer, Next uses the terminal's own palette. |
+| `colorMode` | `auto`, `truecolor`, `256`, `16`, `none` | `auto` | Color capability. `auto` follows `NO_COLOR`, `TERM` and `COLORTERM`; an explicit value overrides `NO_COLOR`. `truecolor` and `256` need a known background: with `theme` set to `auto` and no `COLORFGBG`, Next keeps the terminal's own 16 colors, and a preview says so. |
+| `glyphs` | `auto`, `unicode`, `ascii` | `auto` | `auto` uses Unicode under a UTF-8 locale, except CJK locales. |
+| `density` | `comfortable`, `compact` | `comfortable` | Blank rows between transcript entries. |
+| `layout` | `focus`, `work`, `inspect` | `focus` | Where the inspector sits: closed, on Work, or on Activity. It opens only while the terminal is 120x32 or larger, so a session never starts with its transcript hidden, and it follows a resize until you open, close or turn it yourself. Reverting or resetting a layout preview leaves the inspector as you left it, and previewing a layout that does not fit yet leaves an inspector you have open where it is until you preview the layout again at a size that fits. |
+| `hints` | `true`, `false` | `false` | The key-hint row. |
+
+The top-level `reduceMotion` setting makes Next's activity indicator static.
+
+Under Next, `/config appearance` (or `/settings appearance`) previews these before anything is saved:
+
+```text
+/config appearance                  List the settings and their values
+/config appearance density compact  Preview one; it shows at once and is not saved
+/config appearance save             Keep the preview in your settings file
+/config appearance revert           Drop the preview
+/config appearance reset            Preview the defaults; save keeps them
+```
+
+A save changes only the settings you previewed. Every other setting keeps its effect, and every key this version does not know is kept with its value. The file is written back with its keys in alphabetical order. Inside `nextAppearance`, `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out whenever they hold their default, including ones you did not preview, since leaving them out means the same; `hints` is written as you set it, and an empty `nextAppearance` is removed. After a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
+
+Measured contrast and its limits are in the [contrast record](tui-v2/contrast.md).
+
+---
+
 ## The `config` Object
 
 The `config` object holds runtime behaviour options.
@@ -79,7 +113,7 @@ The `config` object holds runtime behaviour options.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `permission_mode` | string | `"default"` | Controls how tool permissions are enforced. One of `"default"`, `"acceptEdits"`, `"bypassPermissions"`, `"plan"`. |
+| `permission_mode` | string | `"default"` | The mode an interactive session starts in when `--permission-mode` is not given. One of `"default"`, `"acceptEdits"`, `"bypassPermissions"`, `"plan"`; a saved `"bypassPermissions"` is not restored. |
 
 See [Permission Modes](#permission-modes) for a full description of each value.
 
@@ -330,6 +364,55 @@ coven-code --permission-mode accept-edits "refactor the auth module"
 coven-code --permission-mode bypass-permissions "..."
 ```
 
+### Which mode a start uses
+
+1. `--dangerously-skip-permissions`, then `--permission-mode`, when given. A
+   run with a `--context` brief always bypasses permissions.
+2. Otherwise an interactive session starts in the saved `permission_mode`:
+   the one `/config set permission-mode` or `/permissions set` wrote to your
+   engine-global settings, or the shared default when that is `default`. A
+   notification says that a saved `acceptEdits` or `plan` was restored.
+3. A saved `bypassPermissions` is never restored at startup. The session
+   starts in `default` and a notification says so; pass
+   `--permission-mode bypass-permissions` to use it. The notification stops
+   when the saved mode is no longer `bypassPermissions`.
+4. Headless runs (`--print`, `--headless` or a prompt argument, whatever the
+   output format) ignore the saved mode: without the flag they run in
+   `default`.
+
+A value that is not one of the four modes counts as `default`; in engine-global
+settings it also makes the whole file invalid, so its other settings are not
+loaded. Changing the saved mode with the `Config` tool needs the same approval
+as any other write; a session in `bypassPermissions` gives it without asking.
+The settings screen never saves the session's mode.
+
+`/config import` reloads your engine-global settings into the open session
+under the same rule. A mode chosen at launch (`--permission-mode` or
+`--dangerously-skip-permissions`) stays. Otherwise a saved `acceptEdits` or
+`plan` applies, as at a start, even over a mode chosen in the session (a
+saved `acceptEdits` replaces a session's `plan`). A saved `default` or
+`bypassPermissions` leaves the session's mode as it is, so the reload never
+moves it to `default` or to bypass. A notification says when the mode changed
+or a saved bypass was not restored.
+
+`coven-code acp` takes no `--permission-mode` and reads no setting or variable
+that opts in to bypass. It loads the mode saved in engine-global settings: a
+saved `acceptEdits` applies, `plan` runs as `default` (ACP has no interactive
+plan approval), and a saved `bypassPermissions` is never restored. ACP then
+runs in `default` and logs `Saved bypass mode not restored` to stderr (at the
+default `COVEN_CODE_ACP_LOG` level); the protocol stream is unchanged. The
+mode decides which tool calls ask the connected client, and reaches the
+keyless `claude` transport and the PowerShell risk gate.
+
+One limit to know about:
+
+- An engine-global `default` cannot be told apart from no saved mode, so it
+  does not override an `acceptEdits`, `plan` or `bypassPermissions` in the
+  shared file: `/config set permission-mode default` reports success and the
+  next start still acts on the shared mode (a shared `bypassPermissions` keeps
+  producing the not-restored notification). Change the shared file, or pass
+  `--permission-mode default`.
+
 ---
 
 ## AGENTS.md Memory Files
@@ -535,6 +618,8 @@ and `api_base` override the corresponding environment variables.
 | `COVEN_CODE_PROVIDER` | Active provider. Equivalent to `--provider`. |
 | `COVEN_CODE_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api-base`. |
 | `COVEN_CODE_GOALS` | Set to `0` to disable the goal system (`/coven goal` command and `GoalCompleteTool`). |
+| `COVEN_CODE_DISABLE_UPDATE_CHECK` | Set to skip the release check an interactive session makes at startup: a request to GitHub's releases API unless a result from the last 24 hours is cached, and the update notice that follows. The variable only has to be present, so `0` or an empty value also disables the check; unset it to restore the default. `/update` and `coven-code upgrade` still contact GitHub when you run them. The model catalog refresh at startup is separate: see `COVEN_CODE_DISABLE_MODELS_FETCH` in [providers.md](providers.md). `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` turns off both. |
+| `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Set to turn off the startup release check (as `COVEN_CODE_DISABLE_UPDATE_CHECK` does) and the model catalog refresh from models.dev (as `COVEN_CODE_DISABLE_MODELS_FETCH` does, so `coven-code models --refresh` fetches nothing either). These are the two requests this build makes without being asked. Like the other two variables, it only has to be present, so `0` or an empty value counts. Other requests still run: model turns, MCP servers you configured, web tools, `/update` and `coven-code upgrade`. It does not reach the `claude` program that Claude turns run through when no API key is set; that program has its own settings. |
 | `COVEN_CODE_BRIDGE_URL` | Enable the remote-control bridge by setting the server URL. |
 | `COVEN_CODE_BRIDGE_TOKEN` | Bearer token for the remote-control bridge. |
 | `RUST_LOG` | Tracing filter (e.g. `debug`, `claurst_core=trace`). |

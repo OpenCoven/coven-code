@@ -80,11 +80,80 @@ The shell installer does not remove macOS quarantine attributes automatically.
 | `--binary <path>` | `-Binary <path>` | Install an already verified local binary |
 | `--install-dir <path>` | `-InstallDir <path>` | Override the install directory |
 | Not supported | `-NoModifyPath` | Leave the Windows user PATH unchanged |
+| `--force` | `-Force` | Replace an existing engine that differs from this one without asking |
 | `--help` | `-Help` | Print usage |
+
+An installer replaces an existing `coven-code` in the install directory only
+with consent. It installs without asking when the existing file has the same
+bytes as the new one, or when a download is for the version the existing engine
+reports as `coven-code <version>`. Otherwise it asks `Replace it? [y/N]` if its
+input is a terminal, and replaces the engine only on `y` or `yes`;
+`irm ... | iex` in a console asks, `curl ... | bash` never does. With no
+terminal, as under `curl ... | bash` or in CI, it leaves the existing engine and
+alias untouched and fails: the shell installer exits non-zero, and the
+PowerShell installer throws. Upgrading an older standalone install with a piped
+one-liner therefore needs consent without a prompt: `--force` (`-Force`), or
+`COVEN_CODE_INSTALL_FORCE=1` (exactly `1`) in the environment:
+
+```bash
+curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash -s -- --force
+```
+
+```powershell
+$env:COVEN_CODE_INSTALL_FORCE = '1'; try { irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex } finally { Remove-Item Env:COVEN_CODE_INSTALL_FORCE }
+```
+
+The check covers `coven-code`, not the `coven-cave` alias beside it.
 
 The local-binary path does not authenticate the file for you. Verify its origin
 and digest before installing it. The shell installer may still resolve the
 latest release if no `--version` is supplied, even with `--binary`.
+
+### Windows PowerShell 5.1: 'Get-FileHash' is not recognized
+
+`install.ps1` runs under PowerShell 7 (`pwsh`) and under Windows PowerShell 5.1
+(`powershell`). Typing `powershell` at a PowerShell 7 prompt is fine: PowerShell
+7 removes its own module paths from `PSModulePath` for a Windows PowerShell it
+starts directly. A Windows PowerShell started through another program that
+PowerShell 7 launched, such as `cmd.exe`, Python, a build tool or an editor
+task, inherits PowerShell 7's `PSModulePath` unchanged. It then finds PowerShell
+7's copies of built-in modules first, cannot load them, and cannot auto-load some
+commands, including `Get-FileHash`. See
+[about_PSModulePath](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath).
+
+The installer then fails at the checksum step with output such as:
+
+```
+Download failed: The term 'Get-FileHash' is not recognized as the name of a cmdlet, ...
+Check that release v<version> exists for windows-x86_64:
+  https://github.com/OpenCoven/coven-code/releases/tag/v<version>
+```
+
+The release exists; the shell is the problem. The installer stops before it
+extracts the archive: no executable is installed, an existing install is left
+as it was, and the user PATH is not changed (the install directory may be left
+behind, empty). Run it in one of these ways instead:
+
+- Run it under PowerShell 7: `pwsh -NoProfile -File .\install.ps1`.
+- Start Windows PowerShell 5.1 from the Start menu, or from a Command Prompt
+  that was not started from PowerShell 7, directly or through another program,
+  and run it there.
+- Clear the variable for the Windows PowerShell you start, so it builds its own
+  module path. This works from a Command Prompt or PowerShell, run in the folder
+  that holds `install.ps1` (not a `\\server\share` path):
+
+  ```
+  cmd /c "set PSModulePath=&& powershell -NoProfile -File .\install.ps1"
+  ```
+
+Pass the installer's parameters after `.\install.ps1`. If running scripts is
+disabled, and you have inspected the script, put `-ExecutionPolicy Bypass`
+before `-File` (for example `pwsh -NoProfile -ExecutionPolicy Bypass -File
+.\install.ps1`); at an interactive prompt, run
+`Set-ExecutionPolicy -Scope Process Bypass` first. Installs with `-Binary` do
+not use `Get-FileHash` and are not affected, but check that binary's digest in
+a shell that can load `Get-FileHash`, such as PowerShell 7, or with
+`certutil -hashfile <file> SHA256`.
 
 ### Archive verification
 
