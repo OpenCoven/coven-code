@@ -13334,7 +13334,7 @@ mod tests {
         let mut ctx = make_ctx();
         assert!(
             matches!(execute_command("/help account login", &mut ctx).await,
-            Some(CommandResult::Message(message)) if message.contains("/account login") && message.contains("--codex"))
+            Some(CommandResult::Message(message)) if message.contains("Usage: /account login [anthropic|codex] [--console] [--label <name>]"))
         );
         assert!(
             matches!(execute_command("/help feedback usability report", &mut ctx).await,
