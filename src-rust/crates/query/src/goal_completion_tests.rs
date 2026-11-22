@@ -1296,8 +1296,12 @@ mod goal_completion {
         server.await.unwrap();
         let summaries = summaries.lock().unwrap();
         assert_eq!(summaries.len(), 1);
-        assert!(summaries[0].contains("Human: queued context\n\n</conversation_to_summarize>"));
-        assert!(!summaries[0].contains("Human: question 1"));
+        let (_, transcript) = summaries[0].rsplit_once("<conversation_to_summarize ").unwrap();
+        let (_, transcript) = transcript.split_once('>').unwrap();
+        assert_eq!(
+            transcript.trim_end().strip_suffix("</conversation_to_summarize>").unwrap().trim(),
+            "Human: queued context",
+        );
         // (history length including the sampled answer, status count, summary requests)
         assert_eq!(
             observed,
