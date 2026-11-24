@@ -267,7 +267,9 @@ async fn saturated_handlers_reject_excess_and_route_cancel_before_output_unblock
     assert_eq!(
         responses
             .iter()
-            .filter(|r| r["error"]["code"] == -32000)
+            .filter(|r| r["error"]["code"] == -32603
+                && r["error"]["data"]["reason"] == "request_capacity"
+                && r["id"].as_i64().unwrap() >= 32)
             .count(),
         32
     );
