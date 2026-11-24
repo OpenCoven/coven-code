@@ -55,28 +55,15 @@ nor supported.
 engine login even when the local Claude CLI has a usable login. Check that CLI's
 own authentication when diagnosing delegated Claude turns.
 
-## Direct Anthropic OAuth
+### Named Claude CLI accounts
 
-The separate engine-owned OAuth flow requires a client ID registered for Coven
-Code. Do not reuse another CLI's client identity:
+Run `/account login anthropic --label work` in Classic or Next, or `coven-code auth login --label work` from a terminal. Coven launches `claude auth login --claudeai` with a separate Claude configuration directory for the profile. Claude manages browser consent and credentials. Once signed in, run `/account list --viable` and use the returned ID in `/familiar account <familiar> anthropic/<id>`. A familiar bound to that profile uses its Claude CLI login even when an Anthropic API key is configured.
 
-```bash
-export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID="<registered-client-id>"
-coven-code auth login --label work
-```
+To sign back into the same profile, run `CLAUDE_CONFIG_DIR="<engine-home>/accounts/anthropic/<id>/claude-config" claude auth login --claudeai`. To sign out, use the same directory with `claude auth logout`. Both operations apply only to that Claude profile.
 
-The flow opens an authorization URL and receives a browser callback. Follow the
-URL and fallback instructions printed by the flow if the browser cannot open.
-The `--console` variant requests the Console flow, which creates an API key:
+### Anthropic Console keys
 
-```bash
-coven-code auth login --console --label work
-```
-
-Stored bearer credentials are usable only when associated with the configured
-Coven Code client identity. An old or imported token file is not proof of a
-supported login. The usual Claude setup is an API key or authenticated local
-Claude CLI.
+Existing stored API keys and `ANTHROPIC_API_KEY` remain available for direct API requests. The separate `coven-code auth login --console --label work` flow requires a configured Coven Console OAuth client.
 
 ## Codex browser login
 

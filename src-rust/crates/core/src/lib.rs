@@ -6300,6 +6300,7 @@ pub mod oauth {
             self.save_for_profile(&id).await?;
 
             let profile = AccountProfile {
+                claude_cli: false,
                 id: id.clone(),
                 label: label.map(slugify_profile_id),
                 email: self.email.clone(),

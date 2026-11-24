@@ -36,6 +36,8 @@ to the Anthropic Messages API. Without an API key, turns run through the local
 `claude` binary. That CLI owns its authentication; Coven Code does not import or
 replay Claude CLI OAuth tokens.
 
+Use `/account login anthropic --label work` to sign into a separate Claude CLI profile. Select its ID from `/account list --viable` for a familiar.
+
 The CLI also runs its own tools under its own permission settings. Each turn's
 permission mode reaches it as `--permission-mode`. Started on its own, the
 engine otherwise leaves the CLI to whatever the user's and the workspace's

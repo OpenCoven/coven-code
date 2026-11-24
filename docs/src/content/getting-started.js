@@ -26,7 +26,7 @@ cargo install --path crates/cli --locked</code></pre>
 
     <pre><code data-lang="bash">coven-code codex login</code></pre>
 
-    <p>The direct engine command above starts Codex browser login. Direct Anthropic OAuth requires a configured <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>; an API key or authenticated Claude CLI is the usual Claude path. Use <code>/account</code> for account management.</p>
+    <p>The direct engine command above starts Codex browser login. For a named Claude subscription profile, run <code>/account login anthropic --label work</code>, then select it with <code>/familiar account &lt;name&gt; anthropic/work</code>. Use <code>/account</code> for account management.</p>
 
     <h2>3. Run Interactively</h2>
 

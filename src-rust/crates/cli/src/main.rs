@@ -8,6 +8,7 @@
 //    - Headless (--print / -p) mode: single query, output to stdout
 //    - Interactive REPL mode: full TUI with ratatui
 
+mod claude_subscription;
 mod codex_oauth_flow;
 mod diagnostics;
 mod headless;
@@ -4822,6 +4823,11 @@ async fn run_interactive(
                                                 app.show_command_error(format!("Codex login failed: {e}"));
                                             }
                                         }
+                                    } else if login_with_claude_ai {
+                                        match claude_subscription::login(label.as_deref()).await {
+                                            Ok(id) => app.status_message = Some(format!("Claude CLI signed in. Select anthropic/{id} for a familiar.")),
+                                            Err(error) => app.show_command_error(error.to_string()),
+                                        }
                                     } else {
                                         match oauth_flow::run_oauth_login_flow_with_label(
                                             login_with_claude_ai,
@@ -6601,17 +6607,30 @@ async fn run_interactive(
 // Called before Cli::parse() so it doesn't conflict with positional `prompt`.
 //
 // Usage:
-//   claude auth login [--console]   — Anthropic OAuth with a configured Coven Code client
+//   coven-code auth login [--label NAME] — Named Claude CLI subscription profile
 //   claude auth logout              — Clear stored credentials
 //   claude auth status [--json]     — Show authentication status
 
 async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(|s| s.as_str()) {
+        Some("login")
+            if args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-h" | "--help")) =>
+        {
+            println!("Usage: coven-code auth login [--label NAME] [--console]");
+            println!("Sign in with Claude Code. Use --console for an Anthropic Console API key.");
+        }
         Some("login") => {
             // --console flag selects the Console OAuth flow (creates an API key)
-            // Default (no flag) uses the Claude.ai flow (Bearer token)
+            // Subscription sign-in belongs to the installed Claude CLI.
             let login_with_claude_ai = !args.iter().any(|a| a == "--console");
             let label = extract_label_flag(args);
+            if login_with_claude_ai {
+                let id = claude_subscription::login(label.as_deref()).await?;
+                println!("Claude CLI signed in. Select anthropic/{id} for a familiar.");
+                return Ok(());
+            }
             println!("Starting authentication...");
             match oauth_flow::run_oauth_login_flow_with_label(
                 login_with_claude_ai,
@@ -6699,7 +6718,7 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 fn print_auth_usage() {
     eprintln!("Usage: coven-code auth <subcommand>");
     eprintln!(
-        "  login [--console] [--label <name>]   Authenticate with a configured Coven OAuth client"
+        "  login [--console] [--label <name>]   Sign in with Claude CLI (use --console for an API key)"
     );
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");

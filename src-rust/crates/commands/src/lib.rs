@@ -2975,11 +2975,7 @@ impl SlashCommand for LoginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /account login [anthropic|codex] [--console] [--label <name>]\n\n\
-         Start an OAuth login. Anthropic OAuth requires a configured Coven\n\
-         client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
-         ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
-         add a ChatGPT/Codex account. `--label work` names the saved profile so\n\
-         you can switch to it later by that name.\n\n\
+         Sign into a Claude subscription through the installed Claude CLI, or use `codex` for ChatGPT login. `--console` uses the separate Console flow. `--label work` names the saved profile. Use /account list --viable to see its ID and /familiar account <familiar> <provider>/<id> to select it.\n\n\
          Subcommands (absorbing the former /switch and /refresh):\n\
            /login switch [name]  — switch the active account for a provider\n\
            /login refresh        — clear saved provider auth and model caches"
@@ -3186,6 +3182,7 @@ impl SlashCommand for AccountsCommand {
                     };
                     if account.eligible().await {
                         let label = p.label.as_deref().unwrap_or(&p.id);
+                        let transport = if p.claude_cli { "Claude CLI · " } else { "" };
                         let access = match account.last_success() {
                             Some(time) => {
                                 format!("last successful familiar request {}", time.to_rfc3339())
@@ -3193,7 +3190,7 @@ impl SlashCommand for AccountsCommand {
                             None => "locally eligible, provider request unverified".to_owned(),
                         };
                         out.push_str(&format!(
-                            "  {marker} {provider}/{} ({label}) — {access}\n",
+                            "  {marker} {provider}/{} ({label}) — {transport}{access}\n",
                             p.id
                         ));
                     }
@@ -3287,6 +3284,14 @@ impl SlashCommand for SwitchCommand {
         if registry.get(provider, id).is_none() {
             return CommandResult::Error(format!(
                 "Profile '{provider}/{id}' was not found. Run /account list."
+            ));
+        }
+        if registry
+            .get(provider, id)
+            .is_some_and(|profile| profile.claude_cli)
+        {
+            return CommandResult::Error(format!(
+                "Select this Claude CLI profile with /familiar account <familiar> anthropic/{id}."
             ));
         }
         CommandResult::SwitchAccount {

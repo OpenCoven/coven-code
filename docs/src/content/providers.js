@@ -81,7 +81,7 @@ coven-code --provider codex "explain this function"</code></pre>
 
     <p>With an Anthropic API key, requests use the Messages API. Without a key, turns run through the local <code>claude</code> CLI, which owns its authentication. Coven Code does not import or replay its OAuth tokens. Set <code>ANTHROPIC_API_KEY</code> or use <code>/account connect</code> for setup.</p>
 
-    <p>The separate direct Anthropic OAuth flow requires a configured <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>. It is not a Claude CLI credential-import path.</p>
+    <p>Use <code>/account login anthropic --label work</code> for a named Claude CLI profile. The separate Console flow requires a configured <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>. It is not a Claude CLI credential-import path.</p>
 
     <h2>Codex</h2>
     <p>Sign in with ChatGPT OAuth using the engine's browser login. This provider does not use a standalone OpenAI API key.</p>

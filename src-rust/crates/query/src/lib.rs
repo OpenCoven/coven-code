@@ -2443,10 +2443,10 @@ async fn run_query_loop_inner(
                             account.provider, account.id
                         )));
                     }
-                    match claurst_api::registry::provider_for_familiar_account(account).await {
+                    match claurst_api::registry::provider_for_familiar_account(account, !claurst_tools::workspace_scope::active()).await {
                         Some(provider) => Some(provider),
                         None => return QueryOutcome::Error(ClaudeError::Config(format!(
-                            "Familiar account {}/{} is unavailable. Run /account list --viable and select a replacement with /familiar account.",
+                            "Familiar account {}/{} is unavailable. Check the selected account’s sign-in or delegation policy. Run /account list --viable and select a replacement with /familiar account.",
                             account.provider, account.id
                         ))),
                     }

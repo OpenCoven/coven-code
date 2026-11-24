@@ -27,6 +27,8 @@
 //! pointer per provider). The per-account credential files keep their existing
 //! schemas so the rest of the codebase doesn't change shape.
 
+pub mod claude_cli;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -91,12 +93,15 @@ impl FamiliarAccount {
     }
 
     pub async fn eligible(&self) -> bool {
-        if slugify_profile_id(&self.id) != self.id
-            || AccountRegistry::load()
-                .get(&self.provider, &self.id)
-                .is_none()
-        {
+        if slugify_profile_id(&self.id) != self.id {
             return false;
+        }
+        let registry = AccountRegistry::load();
+        let Some(profile) = registry.get(&self.provider, &self.id) else {
+            return false;
+        };
+        if self.provider == PROVIDER_ANTHROPIC && profile.claude_cli {
+            return claude_cli::signed_in(&claude_cli::config_dir(&self.id)).await;
         }
         match self.provider.as_str() {
             PROVIDER_CODEX => crate::oauth_config::load_codex_tokens_for_profile(&self.id)
@@ -129,6 +134,9 @@ impl FamiliarAccount {
 /// Metadata recorded for a single stored profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AccountProfile {
+    /// Subscription authenticated and managed by the local Claude CLI.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_cli: bool,
     /// Slug used as the directory name and CLI identifier.
     pub id: String,
     /// Optional human-friendly label (e.g. "work", "personal").
@@ -275,6 +283,13 @@ impl AccountRegistry {
         if !section.profiles.contains_key(id) {
             anyhow::bail!("Account '{}' not found for {}", id, provider);
         }
+        if section
+            .profiles
+            .get(id)
+            .is_some_and(|profile| profile.claude_cli)
+        {
+            anyhow::bail!("Use /familiar account <familiar> anthropic/{id} to select this Claude CLI profile.");
+        }
         section.active = Some(id.to_string());
         if let Some(p) = section.profiles.get_mut(id) {
             p.last_selected_at = Some(now_iso());
@@ -285,6 +300,7 @@ impl AccountRegistry {
     /// Remove a profile (and its credential directory). If it was active,
     /// clears the active pointer.
     pub fn remove(&mut self, provider: &str, id: &str) -> anyhow::Result<()> {
+        let cli_owned = self.get(provider, id).is_some_and(|p| p.claude_cli);
         if let Some(section) = self.providers.get_mut(provider) {
             section.profiles.remove(id);
             if section.active.as_deref() == Some(id) {
@@ -293,7 +309,7 @@ impl AccountRegistry {
         }
         // Remove the per-account credential dir.
         let dir = account_dir(provider, id);
-        if dir.exists() {
+        if !cli_owned && dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
         }
         self.save()

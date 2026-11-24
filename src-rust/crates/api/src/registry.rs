@@ -88,6 +88,7 @@ pub fn canonical_provider_id(id: &str) -> &str {
 /// Resolve only the named profile. Never substitute the global active credential.
 pub async fn provider_for_familiar_account(
     account: &claurst_core::accounts::FamiliarAccount,
+    allow_delegated_tools: bool,
 ) -> Option<Arc<dyn LlmProvider>> {
     if !account.eligible().await {
         return None;
@@ -97,6 +98,18 @@ pub async fn provider_for_familiar_account(
             CodexProvider::from_profile(&account.id).map(|p| Arc::new(p) as Arc<dyn LlmProvider>)
         }
         "anthropic" => {
+            if claurst_core::accounts::AccountRegistry::load()
+                .get("anthropic", &account.id)
+                .is_some_and(|p| p.claude_cli)
+            {
+                if !allow_delegated_tools {
+                    return None;
+                }
+                let mut provider = ClaudeCliProvider::new();
+                provider.config_dir =
+                    Some(claurst_core::accounts::claude_cli::config_dir(&account.id));
+                return Some(Arc::new(provider));
+            }
             let mut tokens =
                 claurst_core::oauth::OAuthTokens::load_for_profile(&account.id).await?;
             if !tokens.bearer_auth_is_usable() {

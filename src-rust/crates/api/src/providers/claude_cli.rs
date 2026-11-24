@@ -70,8 +70,7 @@ mod background_work_tests;
 #[cfg(all(test, unix))]
 mod integration_tests;
 
-/// Env var overriding the `claude` binary location.
-pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
+pub use claurst_core::accounts::claude_cli::{resolve_claude_binary, CLAUDE_BIN_ENV};
 
 const INSTALL_HINT: &str = "claude CLI not found — install with `npm install -g @anthropic-ai/claude-code`, sign in by running `claude`, and ensure it is on PATH (or set COVEN_CODE_CLAUDE_BIN)";
 
@@ -132,31 +131,6 @@ const EXIT_GRACE_BEATS: u32 = 2;
 
 /// The `claude` session id carried across turns within this process.
 static CLI_SESSION: Mutex<Option<String>> = Mutex::new(None);
-
-/// Locate the `claude` binary: explicit env override first, then PATH.
-pub fn resolve_claude_binary() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var(CLAUDE_BIN_ENV) {
-        let trimmed = explicit.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    let names: &[&str] = if cfg!(windows) {
-        &["claude.cmd", "claude.exe", "claude"]
-    } else {
-        &["claude"]
-    };
-    for dir in std::env::split_paths(&path) {
-        for name in names {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
 
 // ---------------------------------------------------------------------------
 // Prompt assembly
@@ -658,6 +632,7 @@ enum SpawnOutcome {
 }
 
 pub struct ClaudeCliProvider {
+    pub(crate) config_dir: Option<PathBuf>,
     id: ProviderId,
     /// Resolved lazily so construction never fails; a missing binary
     /// surfaces the install hint when a turn is actually attempted.
@@ -688,6 +663,7 @@ impl ClaudeCliProvider {
             binary: resolve_claude_binary(),
             heartbeat: HEARTBEAT_PERIOD,
             quiet_limit: quiet_limit_from(std::env::var(CLAUDE_QUIET_LIMIT_ENV).ok().as_deref()),
+            config_dir: None,
             goal_authority: None,
         }
     }
@@ -739,6 +715,9 @@ impl ClaudeCliProvider {
                 }
             })?;
         let mut command = Command::new(self.binary_or_default());
+        if let Some(directory) = &self.config_dir {
+            claurst_core::accounts::claude_cli::configure(&mut command, directory);
+        }
         command
             .args(build_args(model, resume, permission))
             .args(policy_args)
@@ -1195,6 +1174,7 @@ impl LlmProvider for ClaudeCliProvider {
                     binary: self.binary.clone(),
                     heartbeat: self.heartbeat,
                     quiet_limit: self.quiet_limit,
+                    config_dir: self.config_dir.clone(),
                     goal_authority: Some((turn.clone(), permission)),
                 }
                 .create_message_stream(request)
@@ -1287,6 +1267,7 @@ mod tests {
             ),
             heartbeat: HEARTBEAT_PERIOD,
             quiet_limit: None,
+            config_dir: None,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -1328,6 +1309,7 @@ mod tests {
             binary: Some(binary),
             heartbeat: std::time::Duration::from_millis(100),
             quiet_limit: None,
+            config_dir: None,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -1382,6 +1364,7 @@ mod tests {
             binary: Some(binary),
             heartbeat: std::time::Duration::from_secs(30),
             quiet_limit: None,
+            config_dir: None,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -1421,6 +1404,7 @@ mod tests {
             binary: Some(binary),
             heartbeat: std::time::Duration::from_millis(50),
             quiet_limit,
+            config_dir: None,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -1554,6 +1538,7 @@ mod tests {
                 binary: Some(binary),
                 heartbeat: std::time::Duration::from_millis(50),
                 quiet_limit: Some(std::time::Duration::from_secs(1)),
+                config_dir: None,
                 goal_authority: None,
             };
             let request = request_with(vec![Message::user("fixture prompt")]);
