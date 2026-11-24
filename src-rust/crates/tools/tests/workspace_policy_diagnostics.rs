@@ -86,7 +86,7 @@ fn unreadable_policy_names_the_file_and_keeps_permission_denied() {
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("unreadable-policy");
     fs::write(&file, "{}").unwrap();
-    fs::set_permissions(&file, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
     let denied = fs::File::open(&file).unwrap_err();
     assert_diagnostic(
         WorkspaceScope::read(&file, temp.path()).unwrap_err(),
