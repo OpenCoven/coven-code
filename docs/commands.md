@@ -987,7 +987,7 @@ Set the prompt bar color for the current session. Accepts standard color names o
 
 ### /status doctor
 
-Run the Coven Code diagnostics suite. Checks configuration integrity, provider connectivity, tool availability, MCP server health, and reports any issues. Replaces the former `/doctor` command.
+Run the Coven Code diagnostics suite. Checks configuration integrity, provider connectivity, tool availability, MCP server health, and reports any issues. Replaces the former `/doctor` command. On Unix, the Coven Substrate section checks the local daemon socket. On Windows, it reports that this build has no daemon client.
 
 ```
 /status doctor
