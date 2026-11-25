@@ -334,3 +334,11 @@ jobs:
         run: |
           cargo test -p claurst-tui --locked --lib app::windows_open_tests | tee "$RUNNER_TEMP/tui-windows-open-tests.txt"
           grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/tui-windows-open-tests.txt"
+
+      - name: Verify Windows daemon diagnostics
+        working-directory: src-rust
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p claurst-commands --locked --lib tests::test_doctor_command_reports_coven_substrate -- --exact | tee "$RUNNER_TEMP/doctor-tests.txt"
+          grep -F 'test result: ok. 1 passed' "$RUNNER_TEMP/doctor-tests.txt"
