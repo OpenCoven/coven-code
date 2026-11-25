@@ -30,6 +30,8 @@ pub enum KeyContext {
     /// The Next renderer's contextual inspector. Layered over Chat: keys it
     /// does not bind keep their Chat meaning so the composer stays usable.
     Inspector,
+    /// Vim command and search lines in the composer.
+    VimLine,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +236,8 @@ pub fn default_bindings() -> Vec<ParsedBinding> {
         ("ctrl+r", "historySearch", KeyContext::Global),
         ("ctrl+b", "createBranch", KeyContext::Global),
         ("alt+h", "openHelp", KeyContext::Global),
+        ("enter", "vimLineAccept", KeyContext::VimLine),
+        ("backspace", "vimLineBackspace", KeyContext::VimLine),
         // ========== CHAT / INPUT CONTEXT ==========
         // Message submission
         ("enter", "submit", KeyContext::Chat),
