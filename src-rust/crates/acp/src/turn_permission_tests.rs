@@ -271,6 +271,32 @@ async fn scenario(root: &Path, max_turns: u32) {
         root.to_path_buf(),
     ));
     let mut output = BufReader::new(output);
+    server
+        .dispatch(crate::connection::Inbound::Request {
+            id: acp::RequestId::Number(0),
+            method: "initialize".into(),
+            params: Some(json!({"protocolVersion":1})),
+        })
+        .await
+        .unwrap();
+    assert_eq!(next_wire(&mut output).await["result"]["protocolVersion"], 1);
+    if max_turns == 12 {
+        let budget = server.connection.event_budget();
+        let _reserved = budget.try_acquire_many_owned(8 * 1024 * 1024).unwrap();
+        let turn = prompt(&server, 17, "plain");
+        let reply = next_wire(&mut output).await;
+        assert_eq!(
+            reply,
+            json!({"jsonrpc":"2.0","id":17,"error":{
+                "code":-32603,"message":"ACP output capacity exceeded; streamed output is incomplete",
+                "data":{"reason":"output_capacity"}
+            }})
+        );
+        turn.await.unwrap();
+        drop(input);
+        reader.await.unwrap().unwrap();
+        return;
+    }
     if max_turns >= 10 {
         let parent = prompt(&server, 1, "capture");
         response(&mut output, 1, "end_turn").await;
@@ -524,4 +550,9 @@ fn isolated_worker() {
         std::panic::resume_unwind(panic);
     }
     std::fs::write(root.join("complete"), "complete").unwrap();
+}
+
+#[test]
+fn exhausted_event_budget_returns_correlated_output_capacity_error() {
+    run_isolated(12);
 }
