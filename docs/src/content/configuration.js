@@ -94,6 +94,9 @@ export function render() {
   }
 }</code></pre>
 
+    <h3>Reactive compaction</h3>
+    <p>With <code>COVEN_CODE_FEATURE_REACTIVE_COMPACT=1</code>, a streamed turn can summarize history older than the newest ten messages when input-token usage reaches 90% of the context window. At 97% usage emergency collapse takes priority, including for short conversations.</p>
+
     <h2>Next Appearance</h2>
     <p><code>nextAppearance</code> changes how the Next renderer (<code>COVEN_CODE_UI=next</code>) draws, and nothing else: no value reaches permissions, providers, identity or stored state. Classic ignores it. An invalid value falls back to its default and stays in the file, and so does any key this version does not know.</p>
     <table>

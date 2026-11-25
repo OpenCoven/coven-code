@@ -207,15 +207,33 @@ ANSI/256-color palettes and transparency require separate validation. Preserve
 terminal-owned fonts. The canonical mark is SVG-only (`web/assets/mark.svg`), and no terminal
 graphics protocol is qualified, so cell renderers use plain `Coven` text for cell/ASCII fallback, not an invented or retired glyph.
 
-#409 must wire semantic roles through actual renderers; merely changing the
-palette file is insufficient. NO_COLOR (currently read nowhere), ASCII/Unicode fallback, reduced motion (wire the
-existing persisted `reduceMotion` setting, which no renderer reads today; do not add a second setting),
-configurable shortcuts and focus cues are required v2 work with #417 evidence,
-not certified current behavior. The inspected render/App/figures paths do not
-establish complete support. Translate UI contract focus/failure/progress semantics;
-DOM hooks and CSS token values are not a terminal implementation.
+Next reads `NO_COLOR` in automatic color mode and uses the persisted `reduceMotion` choice for its activity indicator. The [configuration reference](../../configuration.md#next-appearance) describes preview, save, revert and project precedence. #409 also requires semantic roles in the renderer, ASCII and Unicode fallbacks, configurable shortcuts and focus cues that remain visible without color.
 
-## Dependency readiness and review limits
+## M1 verification on main
+
+| Criterion | Verified behavior | Evidence |
+|---|---|---|
+| #409 appearance preview and reset | Reset restores the six visual defaults. An unsaved motion choice survives reset, revert restores the saved choice, and saving preserves unknown keys. With reduced motion enabled, it stays enabled through reset, save and a fresh Next launch. | [#614](https://github.com/OpenCoven/coven-code/pull/614) · [terminal regressions](https://github.com/OpenCoven/coven-code/actions/runs/45576053129) |
+| Chat workspace admission | The dedicated stream and verifier identify the failed check, path and cause. On macOS a valid policy returns an enforced receipt and overlapping roots are refused. | [#616 and native verification](https://github.com/OpenCoven/coven-code/pull/616) · [Rust regressions](https://github.com/OpenCoven/coven-code/actions/runs/45578729148) |
+| Query-loop status accuracy | With reactive compaction enabled at 92% usage, ten messages produce zero status events announcing compaction and zero summary requests. At eleven the loop announces once, summarizes the oldest message and retains the newest ten. | [#610](https://github.com/OpenCoven/coven-code/pull/610) · [query regression](https://github.com/OpenCoven/coven-code/actions/runs/45581451283) |
+| #410 composer input ownership and navigation | Vim command and search lines consume Enter and Backspace. Next displays the current Vim mode while enabled. Focused regressions cover paste replay, paste with Vim disabled, CRLF line ends, previous-word motion and moving down from a full-width row. | [#606](https://github.com/OpenCoven/coven-code/pull/606) · [terminal suite](https://github.com/OpenCoven/coven-code/actions/runs/45583680193) · [Rust regressions](https://github.com/OpenCoven/coven-code/actions/runs/45583680378) |
+| #412 daemon capability discovery | Windows doctor reports that the daemon client is unsupported. The Unix diagnostic identifies the socket it checked. | [#617](https://github.com/OpenCoven/coven-code/pull/617) · [Windows doctor regression](https://github.com/OpenCoven/coven-code/actions/runs/45586505968/job/139109359920) |
+
+For #410, the remaining composer and navigation criteria stay open. Run the golden transcript and command-navigation journey at both 80×24 and 120×40 in Classic and Next, including focus and draft retention across resize. For #412, run the restart and reconnect journey with a replaced daemon process, and check that the session reports unknown ledger state until an explicit resume re-registers it.
+
+**Next check for [#417](https://github.com/OpenCoven/coven-code/issues/417).** Measure cold startup on a quiet reference host. Build one optimized binary from the recorded head and run matched Classic and Next samples from the repository root. Record the machine load, binary revision and terminal dimensions with the raw samples. The proposed target is a Next cold usable frame within 10% of Classic on the same workload. Record the measured difference and refer the acceptance decision to the maintainer if the target is missed or the variance prevents a conclusion.
+
+```sh
+for sample in $(seq 1 20); do
+  for ui in classic next; do
+    python3 scripts/tui-tests/perf_baseline.py --bin src-rust/target/release/coven-code --ui "$ui" --size 80x24 --size 120x40 --runs 1 --render-timing --json "$ui-$sample.json" || exit 1
+  done
+done
+```
+
+Human visual and keyboard accessibility acceptance, native Windows ConPTY, SSH and Ghostty journeys remain open under [#409](https://github.com/OpenCoven/coven-code/issues/409) and [#417](https://github.com/OpenCoven/coven-code/issues/417). Packaged compatibility and rollback require artifact verification under [#418](https://github.com/OpenCoven/coven-code/issues/418). The table records source verification on `main`.
+
+## Dependency readiness at design acceptance (October 2026)
 
 #408 and #409 are the next implementation candidates after acceptance of these
 three source baselines. File ownership: #408 owns `tui/src/application/`, App/CLI event and effect

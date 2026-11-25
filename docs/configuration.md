@@ -135,6 +135,8 @@ See [Permission Modes](#permission-modes) for a full description of each value.
 | `auto_compact` | boolean | true | Automatically compact the conversation context when the context window nears capacity. |
 | `compact_threshold` | float | 0.85 | Fraction of the context window that triggers auto-compaction (0.0–1.0). |
 
+With `COVEN_CODE_FEATURE_REACTIVE_COMPACT=1`, a streamed turn checks its input-token usage against the model’s context window. At 90% usage the loop can summarize messages older than the newest ten. A shorter conversation can become eligible on a later turn. At 97% usage emergency collapse takes priority, including for short conversations.
+
 ### System prompt
 
 | Key | Type | Default | Description |
