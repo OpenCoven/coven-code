@@ -124,8 +124,8 @@ pub async fn handle(
         if *token == cancel {
             *token = tokio_util::sync::CancellationToken::new();
         }
-        return Err(acp::Error::new(
-            -32000,
+        return Err(crate::admission::capacity_error(
+            "output_capacity",
             "ACP output capacity exceeded; streamed output is incomplete",
         ));
     }

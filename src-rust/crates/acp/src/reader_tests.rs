@@ -267,7 +267,9 @@ async fn saturated_handlers_reject_excess_and_route_cancel_before_output_unblock
     assert_eq!(
         responses
             .iter()
-            .filter(|r| r["error"]["code"] == -32000)
+            .filter(|r| r["error"]["code"] == -32603
+                && r["error"]["data"]["reason"] == "request_capacity"
+                && r["id"].as_i64().unwrap() >= 32)
             .count(),
         32
     );
@@ -315,4 +317,19 @@ async fn oversized_unterminated_input_is_rejected_before_eof() {
     let error = result.unwrap_err();
     assert!(format!("{error:#}").contains("frame exceeds 8 MiB"));
     drop(input);
+}
+
+#[tokio::test]
+async fn sharing_a_runtime_does_not_share_the_handshake() {
+    use tokio::io::AsyncReadExt;
+    let initialized = server(Connection::new(tokio::io::sink()));
+    let (mut output, writer) = tokio::io::duplex(1024);
+    let fresh = AgentServer::new(Connection::new(writer), initialized.runtime.clone());
+    run_connection(fresh, REQUEST).await.unwrap();
+    let mut line = String::new();
+    output.read_to_string(&mut line).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap(),
+        json!({"jsonrpc":"2.0","id":7,"error":acp::Error::invalid_request()})
+    );
 }
