@@ -16,7 +16,7 @@ pub struct AgentServer {
     pub connection: Arc<Connection>,
     pub runtime: Arc<AgentRuntime>,
     pub sessions: Arc<SessionRegistry>,
-    pub client_capabilities: parking_lot::RwLock<acp::ClientCapabilities>,
+    client_capabilities: parking_lot::RwLock<Option<acp::ClientCapabilities>>,
 }
 
 impl AgentServer {
@@ -25,7 +25,7 @@ impl AgentServer {
             connection,
             runtime,
             sessions: Arc::new(SessionRegistry::new()),
-            client_capabilities: parking_lot::RwLock::new(acp::ClientCapabilities::default()),
+            client_capabilities: parking_lot::RwLock::new(None),
         })
     }
 
@@ -34,31 +34,51 @@ impl AgentServer {
     /// is in flight. Returns the join handle so the caller can wait for
     /// in-flight work to finish before shutting down.
     pub fn dispatch(self: &Arc<Self>, msg: Inbound) -> tokio::task::JoinHandle<()> {
-        let this = self.clone();
-        tokio::spawn(async move { this.handle_message(msg).await })
+        tokio::spawn(self.clone().prepare_message(msg))
     }
 
-    pub(crate) async fn handle_message(self: &Arc<Self>, msg: Inbound) {
-        match msg {
-            Inbound::Request { id, method, params } => {
-                let response = self.handle_request(&method, params).await;
-                let result = match response {
-                    Ok(value) => self.connection.send_response(id, value).await,
-                    Err(err) => self.connection.send_error_response(id, err).await,
-                };
-                if let Err(e) = result {
-                    let io_kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
-                    warn!(
-                        method = diagnostic_method(&method),
-                        method_bytes = method.len(),
-                        error_class = if io_kind.is_some() { "io" } else { "other" },
-                        ?io_kind,
-                        "ACP: failed to send response"
-                    );
-                }
+    pub(crate) fn initialization_error(&self, method: &str) -> Option<acp::Error> {
+        (method != "initialize" && self.client_capabilities.read().is_none())
+            .then(acp::Error::invalid_request)
+    }
+
+    // Decide handshake state in receive order, before any handler can be scheduled.
+    pub(crate) fn prepare_message(
+        self: Arc<Self>,
+        mut msg: Inbound,
+    ) -> impl std::future::Future<Output = ()> {
+        let handshake = match &mut msg {
+            Inbound::Request { method, params, .. } if method == "initialize" => {
+                Some(parse_params(params.take()).and_then(|req| self.on_initialize(req)))
             }
-            Inbound::Notification { method, params } => {
-                self.handle_notification(&method, params).await;
+            Inbound::Request { method, .. } => self.initialization_error(method).map(Err),
+            Inbound::Notification { .. } => None,
+        };
+        async move {
+            match msg {
+                Inbound::Request { id, method, params } => {
+                    let response = match handshake {
+                        Some(response) => response,
+                        None => self.handle_request(&method, params).await,
+                    };
+                    let result = match response {
+                        Ok(value) => self.connection.send_response(id, value).await,
+                        Err(err) => self.connection.send_error_response(id, err).await,
+                    };
+                    if let Err(e) = result {
+                        let io_kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
+                        warn!(
+                            method = diagnostic_method(&method),
+                            method_bytes = method.len(),
+                            error_class = if io_kind.is_some() { "io" } else { "other" },
+                            ?io_kind,
+                            "ACP: failed to send response"
+                        );
+                    }
+                }
+                Inbound::Notification { method, params } => {
+                    self.handle_notification(&method, params).await;
+                }
             }
         }
     }
@@ -74,11 +94,6 @@ impl AgentServer {
             "ACP: dispatch request"
         );
         match method {
-            "initialize" => {
-                let req: acp::InitializeRequest = parse_params(params)?;
-                let result = self.on_initialize(req).await?;
-                serde_json::to_value(result).map_err(|_| acp::Error::internal_error())
-            }
             "authenticate" => {
                 let _req: acp::AuthenticateRequest = parse_params(params)?;
                 // Coven Code uses local credentials; clients don't need to authenticate.
@@ -155,15 +170,14 @@ impl AgentServer {
         }
     }
 
-    async fn on_initialize(
+    pub(crate) fn on_initialize(
         self: &Arc<Self>,
         req: acp::InitializeRequest,
-    ) -> Result<acp::InitializeResponse, acp::Error> {
+    ) -> Result<Value, acp::Error> {
         info!(
             client_version = ?req.client_info.as_ref().map(|i| (&i.name, &i.version)),
             "ACP: initialize"
         );
-        *self.client_capabilities.write() = req.client_capabilities.clone();
 
         let agent_info = acp::Implementation::new("coven-code", env!("CARGO_PKG_VERSION"))
             .title(Some("Coven".to_string()));
@@ -176,7 +190,9 @@ impl AgentServer {
                     .mcp_capabilities(acp::McpCapabilities::new()),
             );
         response = response.agent_info(Some(agent_info));
-        Ok(response)
+        let value = serde_json::to_value(response).map_err(|_| acp::Error::internal_error())?;
+        *self.client_capabilities.write() = Some(req.client_capabilities);
+        Ok(value)
     }
 
     async fn on_new_session(
