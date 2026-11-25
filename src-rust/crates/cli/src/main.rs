@@ -4492,6 +4492,7 @@ async fn run_interactive(
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
                                 Some(CommandResult::ClearConversation) => {
+                                    base_query_config.cli_session = Default::default();
                                     replace_conversation(
                                         &mut session_scope,
                                         Vec::new(),
@@ -4502,6 +4503,7 @@ async fn run_interactive(
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
+                                    base_query_config.cli_session = Default::default();
                                     let removed = messages.len().saturating_sub(new_msgs.len());
                                     replace_conversation(
                                         &mut session_scope,
@@ -4539,6 +4541,7 @@ async fn run_interactive(
                                 }
                                 Some(CommandResult::ResumeSession(resumed_session)) => {
                                     session_scope.advance();
+                                    base_query_config.cli_session = Default::default();
                                     session = resumed_session;
                                     app.enter_session_scope(&session.id);
                                     messages = session.messages.clone();
@@ -5323,6 +5326,9 @@ async fn run_interactive(
                             tools_arc =
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
+                    }
+                    if app.rewind_confirmed_at.is_some() {
+                        base_query_config.cli_session = Default::default();
                     }
                     adopt_in_app_rewind(&mut session_scope, &mut app, &mut messages, &mut session);
                 }

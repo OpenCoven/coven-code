@@ -858,6 +858,8 @@ mod goal_completion {
                                 stop_sequences: vec![],
                                 thinking: None,
                                 provider_options: serde_json::json!({}),
+                                working_dir: None,
+                                cli_session: Default::default(),
                                 permission_mode: None,
                             };
                             match provider
@@ -2786,6 +2788,8 @@ time.sleep(60)
                 stop_sequences: vec![],
                 thinking: None,
                 provider_options: serde_json::json!({}),
+                working_dir: None,
+                cli_session: Default::default(),
                 permission_mode: None,
             };
             let prime = provider
@@ -2923,6 +2927,8 @@ print(json.dumps({'type':'result','is_error':False}), flush=True)
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::json!({}),
+            working_dir: None,
+            cli_session: Default::default(),
             permission_mode: None,
         };
         let stream = provider

@@ -3766,6 +3766,8 @@ impl SlashCommand for ReviewCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            working_dir: Some(ctx.working_dir.clone()),
+            cli_session: Default::default(),
             permission_mode: None,
         };
 
@@ -6022,6 +6024,8 @@ impl SlashCommand for RenameCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            working_dir: Some(ctx.working_dir.clone()),
+            cli_session: Default::default(),
             permission_mode: None,
         };
 

@@ -574,6 +574,7 @@ pub struct QueryConfig {
     pub output_style: claurst_core::system_prompt::OutputStyle,
     pub output_style_prompt: Option<String>,
     pub working_directory: Option<String>,
+    pub cli_session: claurst_api::ClaudeCliSession,
     pub thinking_budget: Option<u32>,
     pub temperature: Option<f32>,
     /// Maximum cumulative character count of all tool results in the message
@@ -635,6 +636,7 @@ impl Default for QueryConfig {
             output_style: claurst_core::system_prompt::OutputStyle::Default,
             output_style_prompt: None,
             working_directory: None,
+            cli_session: Default::default(),
             thinking_budget: None,
             temperature: None,
             tool_result_budget: 50_000,
@@ -2518,6 +2520,8 @@ async fn run_query_loop_inner(
                             config.effort_level,
                             effective_thinking_budget,
                         ),
+                        working_dir: Some(tool_ctx.working_dir.clone()),
+                        cli_session: config.cli_session.clone(),
                         permission_mode: Some(tool_ctx.config.permission_mode.clone()),
                     };
 
@@ -5923,6 +5927,7 @@ mod tests {
             output_style: claurst_core::system_prompt::OutputStyle::Default,
             output_style_prompt: None,
             working_directory: None,
+            cli_session: Default::default(),
             thinking_budget: None,
             temperature: None,
             tool_result_budget: 50_000,
