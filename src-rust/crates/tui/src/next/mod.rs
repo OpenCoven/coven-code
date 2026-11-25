@@ -922,10 +922,17 @@ pub fn render_next(frame: &mut Frame, app: &App) {
     if let (Some(page), Some(inspector)) = (app.next_shell.inspector, layout.inspector) {
         render_inspector(frame, app, &view, page, inspector);
     }
-    frame.render_widget(
-        Paragraph::new(status_line(appearance, app, &view)),
-        layout.status,
-    );
+    let mut status = status_line(appearance, app, &view);
+    if app.prompt_input.vim_enabled {
+        status.spans.insert(
+            0,
+            Span::styled(
+                format!("-- {} --  ", app.prompt_input.vim_mode.label()),
+                appearance.style(Role::Focus),
+            ),
+        );
+    }
+    frame.render_widget(Paragraph::new(status), layout.status);
     if let (Some(hints), Some(rect)) = (&presentation.hints, layout.hints) {
         frame.render_widget(Paragraph::new(hints_line(appearance, hints)), rect);
     }

@@ -173,7 +173,7 @@ fn listing(saved: &Settings, edits: &AppearanceEdits) -> String {
     }
     lines.push("Preview one: /config appearance density compact".to_string());
     lines.push(
-        "/config appearance save keeps a preview, revert drops it, reset previews the defaults."
+        "/config appearance save keeps a preview, revert drops it, reset previews the visual defaults and keeps your motion choice."
             .to_string(),
     );
     lines.join("\n")
@@ -260,7 +260,7 @@ pub fn run_appearance_command(
         }
         AppearanceCommand::Reset => {
             app.next_shell.appearance_edits.reset_all();
-            "Previewing the defaults. Not saved: /config appearance save keeps them, and keeps \
+            "Previewing the defaults for visual settings. Keeping your motion choice. Not saved: /config appearance save keeps them, and keeps \
              any setting this version does not know. /config appearance revert drops the preview."
                 .to_string()
         }

@@ -4,6 +4,8 @@ Global	ctrl+l	redraw
 Global	ctrl+r	historySearch
 Global	ctrl+b	createBranch
 Global	alt+h	openHelp
+VimLine	enter	vimLineAccept
+VimLine	backspace	vimLineBackspace
 Chat	enter	submit
 Chat	shift+enter	newline
 Chat	ctrl+j	newline

@@ -17,6 +17,7 @@ use claurst_tui::image_paste::PastedImage;
 use claurst_tui::next::layout::{plan, SizeClass};
 use claurst_tui::next::style::{Appearance, ColorMode, Glyphs};
 use claurst_tui::next::{InspectorPage, NextPresentation};
+use claurst_tui::prompt_input::VimMode;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
@@ -489,6 +490,28 @@ fn a_scrolled_reader_keeps_position_while_output_streams_and_can_jump_to_live() 
     let live = text_of(&live);
     assert!(live.contains("streamed line"), "{live}");
     assert!(!live.contains("new activity"), "{live}");
+}
+
+#[test]
+fn next_shows_the_active_vim_mode_only_while_enabled() {
+    let mut app = next_app();
+    for mode in [
+        VimMode::Insert,
+        VimMode::Normal,
+        VimMode::Visual,
+        VimMode::VisualLine,
+        VimMode::VisualBlock,
+        VimMode::Command,
+        VimMode::Search,
+    ] {
+        app.prompt_input.vim_mode = mode;
+        let indicator = format!("-- {} --", mode.label());
+        for enabled in [false, true] {
+            app.prompt_input.vim_enabled = enabled;
+            let text = text_of(&draw(&app, 20, 6).0);
+            assert_eq!(text.contains(&indicator), enabled, "{mode:?}:\n{text}");
+        }
+    }
 }
 
 #[test]

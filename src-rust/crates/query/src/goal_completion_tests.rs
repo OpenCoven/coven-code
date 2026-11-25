@@ -1155,7 +1155,7 @@ mod goal_completion {
     }
 
     async fn serve_goal_responses(
-        response: impl Fn(usize) -> String + Send + 'static,
+        response: impl Fn(usize, &[u8]) -> String + Send + 'static,
     ) -> (
         String,
         Arc<std::sync::atomic::AtomicUsize>,
@@ -1177,7 +1177,7 @@ mod goal_completion {
                 };
                 let mut data = Vec::new();
                 let mut buffer = [0u8; 4096];
-                loop {
+                let body_start = loop {
                     let n = tokio::time::timeout(
                         std::time::Duration::from_secs(2),
                         socket.read(&mut buffer),
@@ -1186,7 +1186,7 @@ mod goal_completion {
                     .unwrap()
                     .unwrap();
                     if n == 0 {
-                        break;
+                        break None;
                     }
                     data.extend_from_slice(&buffer[..n]);
                     if let Some(end) = data.windows(4).position(|s| s == b"\r\n\r\n") {
@@ -1200,20 +1200,126 @@ mod goal_completion {
                             })
                             .unwrap();
                         if data.len() >= end + 4 + len {
-                            break;
+                            break Some(end + 4);
                         }
                     }
-                }
-                if data.is_empty() {
+                };
+                let Some(body_start) = body_start else {
                     continue;
-                }
+                };
                 let attempt = server_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // The callback runs after the entire actual request was received.
-                let body = response(attempt);
+                let body = response(attempt, &data[body_start..]);
                 let _ = socket.write_all(body.as_bytes()).await;
             }
         });
         (format!("http://{addr}"), count, stop, server)
+    }
+
+    #[tokio::test]
+    async fn reactive_compaction_waits_until_history_has_a_head() {
+        if isolated_case_completed("reactive_compaction_waits_until_history_has_a_head") {
+            return;
+        }
+        let _lock = REACTIVE_COMPACT_FEATURE_GATE_LOCK.lock().await;
+        std::env::set_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT", "1");
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = scheduling_ctx(temp.path());
+        let config = make_config(None, None);
+        let usage = compact::context_window_for_model(&config.model) * 92 / 100;
+        let summaries = Arc::new(Mutex::new(Vec::new()));
+        let recorded = summaries.clone();
+        let (base, _, stop, server) = serve_goal_responses(move |index, body| {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            if let Some(prompt) = request["messages"][0]["content"]
+                .as_str()
+                .filter(|text| text.contains("<conversation_to_summarize "))
+            {
+                recorded.lock().unwrap().push(prompt.to_owned());
+                sse_response("summary of oldest", 1, true)
+            } else {
+                sse_response(&format!("answer {}", index % 5 + 1), usage, true)
+            }
+        })
+        .await;
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_base: base,
+            api_key: "test-key".into(),
+            max_retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let mut observed = Vec::new();
+        // The first conversation reaches exactly ten messages. One queued user
+        // message in the second shifts its turns to odd lengths, including eleven.
+        for mut history in [Vec::new(), vec![Message::user("queued context")]] {
+            for turn in 1..=5 {
+                history.push(Message::user(format!("question {turn}")));
+                let mut expected: Vec<_> = history.iter().map(Message::get_all_text).collect();
+                expected.push(format!("answer {turn}"));
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let before = summaries.lock().unwrap().len();
+                let outcome = run_query_loop(
+                    &client,
+                    &mut history,
+                    &[],
+                    &ctx,
+                    &config,
+                    ctx.cost_tracker.clone(),
+                    Some(tx),
+                    Default::default(),
+                    None,
+                )
+                .await;
+                assert!(
+                    matches!(outcome, QueryOutcome::EndTurn { .. }),
+                    "{outcome:?}"
+                );
+                let requests = summaries.lock().unwrap().len() - before;
+                let mut announcements = 0;
+                while let Ok(event) = rx.try_recv() {
+                    if matches!(event, QueryEvent::Status(text) if text == "Compacting context...")
+                    {
+                        announcements += 1;
+                    }
+                }
+                let actual: Vec<_> = history.iter().map(Message::get_all_text).collect();
+                observed.push((expected.len(), announcements, requests));
+                if expected.len() == 11 {
+                    assert!(actual[0].contains("summary of oldest"), "{actual:?}");
+                    assert_eq!(actual[1..], expected[1..]);
+                } else {
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        stop.cancel();
+        server.await.unwrap();
+        let summaries = summaries.lock().unwrap();
+        assert_eq!(summaries.len(), 1);
+        let (_, transcript) = summaries[0].rsplit_once("<conversation_to_summarize ").unwrap();
+        let (_, transcript) = transcript.split_once('>').unwrap();
+        assert_eq!(
+            transcript.trim_end().strip_suffix("</conversation_to_summarize>").unwrap().trim(),
+            "Human: queued context",
+        );
+        // (history length including the sampled answer, status count, summary requests)
+        assert_eq!(
+            observed,
+            [
+                (2, 0, 0),
+                (4, 0, 0),
+                (6, 0, 0),
+                (8, 0, 0),
+                (10, 0, 0),
+                (3, 0, 0),
+                (5, 0, 0),
+                (7, 0, 0),
+                (9, 0, 0),
+                (11, 1, 1),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1227,7 +1333,7 @@ mod goal_completion {
             let store = GoalStore::open(&path).unwrap();
             store.set_goal("goal-query", "A", None).unwrap();
             let hook_path = path.clone();
-            let (base, count, stop, server) = serve_goal_responses(move |attempt| {
+            let (base, count, stop, server) = serve_goal_responses(move |attempt, _| {
                 if attempt == 0 {
                     if revoke {
                         GoalStore::open(&hook_path)
@@ -1281,7 +1387,7 @@ mod goal_completion {
         let cancel = tokio_util::sync::CancellationToken::new();
         let (sent, received) = tokio::sync::oneshot::channel();
         let sent = Mutex::new(Some(sent));
-        let (base, count, stop, server) = serve_goal_responses(move |_| {
+        let (base, count, stop, server) = serve_goal_responses(move |_, _| {
             if let Some(sent) = sent.lock().unwrap().take() { let _ = sent.send(()); }
             "HTTP/1.1 429 Busy\r\nRetry-After: 10\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into()
         }).await;
@@ -1380,7 +1486,7 @@ mod goal_completion {
             store
                 .complete_goal_turn(context.captured().unwrap())
                 .unwrap();
-            let (base, count, stop, server) = serve_goal_responses(move |_| {
+            let (base, count, stop, server) = serve_goal_responses(move |_, _| {
                 if ping_only {
                     let body = "event: ping\ndata: {}\n\n";
                     format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
@@ -2266,7 +2372,7 @@ mod goal_completion {
         let context = GoalTurnContext::Captured(store.capture_active_goal("goal-query").unwrap());
         let background = context.for_background_work();
         let (base, count, stop, server) =
-            serve_goal_responses(|_| sse_response("[]", 1, true)).await;
+            serve_goal_responses(|_, _| sse_response("[]", 1, true)).await;
         let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
             api_key: "test-key".into(),
             api_base: base,
@@ -2365,7 +2471,7 @@ mod goal_completion {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let (base, count, stop, server) = serve_goal_responses(|attempt| {
+        let (base, count, stop, server) = serve_goal_responses(|attempt, _| {
             if attempt == 0 {
                 sse_response("Done.", 1, true)
             } else {
@@ -2409,7 +2515,7 @@ mod goal_completion {
         }
         let dir = tempfile::tempdir().unwrap();
         let (base, count, stop, server) =
-            serve_goal_responses(|_| sse_response("[]", 1, true)).await;
+            serve_goal_responses(|_, _| sse_response("[]", 1, true)).await;
         let run = run_goal_fixture(
             dir.path(),
             GoalTurnContext::Captured(None),

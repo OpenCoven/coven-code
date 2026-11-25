@@ -41,7 +41,7 @@ hex = { workspace = true }
 urlencoding = { workspace = true }
 
 # Zip extraction for plugin archives
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Utilities
 once_cell = { workspace = true }

@@ -87,10 +87,12 @@ Under Next, `/config appearance` (or `/settings appearance`) previews these befo
 /config appearance density compact  Preview one; it shows at once and is not saved
 /config appearance save             Keep the preview in your settings file
 /config appearance revert           Drop the preview
-/config appearance reset            Preview the defaults; save keeps them
+/config appearance reset            Preview defaults for the six nextAppearance settings
 ```
 
-A save changes only the settings you previewed. Every other setting keeps its effect, and every key this version does not know is kept with its value. The file is written back with its keys in alphabetical order. Inside `nextAppearance`, `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out whenever they hold their default, including ones you did not preview, since leaving them out means the same; `hints` is written as you set it, and an empty `nextAppearance` is removed. After a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
+A save changes only the settings you previewed. Every other setting keeps its effect, and every key this version does not know is kept with its value. The file is written back with its keys in alphabetical order. Inside `nextAppearance`, `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out whenever they hold their default, including ones you did not preview, since leaving them out means the same; `hints` is written as you set it, and an empty `nextAppearance` is removed. After a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone.
+
+Project values for the six `nextAppearance` settings take precedence inside that folder. Reset preserves your current `reduceMotion` choice, including an unsaved preview. On load, reduced motion is enabled if either your user settings or the project settings enable it. A project value of `false` leaves a user value of `true` in effect. `/config theme` chooses Classic's theme and does not change Next's.
 
 Measured contrast and its limits are in the [contrast record](tui-v2/contrast.md).
 
