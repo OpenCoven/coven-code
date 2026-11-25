@@ -83,7 +83,7 @@ coven-code --provider codex "explain this function"</code></pre>
 
     <p>Each keyless Claude child starts in the working directory of its conversation. For ACP, that is the directory passed to <code>session/new</code>. Follow-up turns in the same conversation reuse its Claude CLI session through <code>--resume</code>. Two ACP sessions keep separate histories even when they share a directory. A subagent also has its own continuation, so the parent resumes its own session when the subagent returns.</p>
 
-    <p>If a resumed CLI exits before producing output, the engine discards that conversation’s stale ID and starts a fresh CLI session with the transcript. Later turns use the replacement ID. Other conversations keep their own IDs.</p>
+    <p>If a resumed CLI exits before producing output, the engine discards that conversation’s stale ID and starts a fresh CLI session with the current prompt and the text of earlier turns. Later turns use the replacement ID. Other conversations keep their own IDs.</p>
 
     <p>The separate direct Anthropic OAuth flow requires a configured <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>. It is not a Claude CLI credential-import path.</p>
 
