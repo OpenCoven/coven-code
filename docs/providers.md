@@ -36,6 +36,10 @@ to the Anthropic Messages API. Without an API key, turns run through the local
 `claude` binary. That CLI owns its authentication; Coven Code does not import or
 replay Claude CLI OAuth tokens.
 
+Each keyless Claude child starts in the working directory of its conversation. For ACP, that is the directory passed to `session/new`. Follow-up turns in the same conversation reuse its Claude CLI session through `--resume`. Two ACP sessions keep separate histories even when they share a directory. A subagent also has its own continuation, so the parent resumes its own session when the subagent returns.
+
+If a resumed CLI exits before producing output, the engine discards that conversation’s stale ID and starts a fresh CLI session with the transcript. Later turns use the replacement ID. Other conversations keep their own IDs.
+
 The CLI also runs its own tools under its own permission settings. Each turn's
 permission mode reaches it as `--permission-mode`. Started on its own, the
 engine otherwise leaves the CLI to whatever the user's and the workspace's
