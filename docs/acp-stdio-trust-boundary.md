@@ -162,6 +162,8 @@ Three facts about this list matter for the boundary.
    (`claude_cli.rs:741-748`), so the child runs in the directory the engine was
    started in, not the session's `cwd`. This path was read, not exercised.
 
+**Working-directory update.** The inspection above describes the November 18 build. Each keyless Claude child now starts in its ACP session’s working directory, and each session owns its continuation. [Provider reference](providers.md#anthropic-default) · [Implementation and fixture evidence](https://github.com/OpenCoven/coven-code/pull/607)
+
 ### What a hostile or confused client can do
 
 - It cannot name a program. No request field that names one is honored.
@@ -538,8 +540,7 @@ to automated tests. None of this has been run.
 - Findings made while reading, none fixed here:
   - `Config` writes `permission_mode` and other keys to the engine-global
     settings with no permission request (`config_tool.rs:65-173`).
-  - On the keyless transport the `claude` child does not run in the session's
-    `cwd`, and a `plan` setting reaches it as `default`.
+  - The keyless working-directory finding was resolved by [#607](https://github.com/OpenCoven/coven-code/pull/607). The separate finding about how ACP passes the permission mode was outside that fix.
   - `-32000` carries both capacity errors while the schema names it
     `AuthRequired`.
   - `initialize` is not required before `session/new`.
