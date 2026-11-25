@@ -150,16 +150,26 @@ tc_appearance() {
   tui_stop
   printf '%s\n' '{}' >"$project_file"
 
-  # Reset previews the defaults; only a save writes them.
+  # Reset all six visual settings while keeping the user's reduced motion.
+  printf '{"hasCompletedOnboarding":true,%s,"reduceMotion":true,"nextAppearance":{"theme":"dark","colorMode":"16","glyphs":"ascii","density":"compact","layout":"inspect","hints":true,"laterKey":42},"someFutureKey":{"kept":[1,2]}}\n' "$seen" >"$file"
   if _look_launch next preview "$scratch"; then
     cp "$file" "$scratch/before.json"
+    _look_run "/config appearance" "Preview one:" "next: the saved appearance is listed"
+    assert_matches "$(tui_capture)" 'reduceMotion +true ' "next: reduced motion is on before reset"
     _look_run "/config appearance reset" "Previewing the defaults" "next: a reset previews"
+    _look_run "/config appearance" "comfortable*" "next: reset previews the default density"
+    assert_matches "$(tui_capture | grep 'reduceMotion ' | tail -1)" 'reduceMotion +true ' "next: reduced motion is on during reset preview"
     if cmp -s "$file" "$scratch/before.json"; then _pass "next: a reset writes nothing yet"
     else _fail "next: a reset writes nothing yet" "$(cat "$file")"; fi
     _look_run "/config appearance save" "Saved." "next: a reset can be saved"
     assert_eq "$(_look_json "$file")" \
-      '{"hasCompletedOnboarding": true, '"$seen"', "nextAppearance": {"laterKey": 42}, "someFutureKey": {"kept": [1, 2]}}' \
-      "next: a reset keeps what this version does not know"
+      '{"hasCompletedOnboarding": true, '"$seen"', "nextAppearance": {"laterKey": 42}, "reduceMotion": true, "someFutureKey": {"kept": [1, 2]}}' \
+      "next: saving reset clears six visual keys and preserves reduced motion and unknown settings"
+  fi
+  tui_stop
+  if _look_launch next preview "$scratch"; then
+    _look_run "/config appearance" "Preview one:" "next: the saved reset loads"
+    assert_matches "$(tui_capture)" 'reduceMotion +true ' "next: reduced motion is on after reload"
   fi
   tui_stop
 

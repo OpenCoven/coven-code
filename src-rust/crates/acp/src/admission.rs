@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol_schema as acp;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::connection::{Inbound, ReadEvent};
@@ -15,18 +15,13 @@ pub(crate) const MAX_HANDLERS: usize = 32;
 const MAX_REJECTIONS: usize = 64;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-struct Admitted {
-    message: Inbound,
-    permit: OwnedSemaphorePermit,
-}
-
 pub(crate) async fn run<R>(server: Arc<AgentServer>, reader: R) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let permits = Arc::new(Semaphore::new(MAX_HANDLERS));
     // Every queued or running message owns one of the same 32 permits.
-    let (tx, mut rx) = mpsc::unbounded_channel::<Admitted>();
+    let (tx, mut rx) = mpsc::unbounded_channel();
     let (reject_tx, mut reject_rx) = mpsc::channel(MAX_REJECTIONS);
     let routing_server = server.clone();
     let reader = crate::connection::run_reader_with_handler(
@@ -40,16 +35,23 @@ where
                 }
                 ReadEvent::Message(message) => match permits.clone().try_acquire_owned() {
                     Ok(permit) => tx
-                        .send(Admitted { message, permit })
+                        .send((routing_server.clone().prepare_message(message), permit))
                         .map_err(|_| anyhow::anyhow!("ACP dispatcher closed")),
                     Err(_) => {
-                        let Inbound::Request { id, .. } = message else {
+                        let Inbound::Request { id, method, .. } = message else {
                             return std::future::ready(Ok(()));
                         };
                         reject_tx
                             .try_send((
                                 id,
-                                acp::Error::new(-32000, "ACP request capacity exceeded"),
+                                routing_server
+                                    .initialization_error(&method)
+                                    .unwrap_or_else(|| {
+                                        capacity_error(
+                                            "request_capacity",
+                                            "ACP request capacity exceeded",
+                                        )
+                                    }),
                             ))
                             .map_err(|_| anyhow::anyhow!("ACP error response capacity exceeded"))
                     }
@@ -64,14 +66,13 @@ where
     let dispatch_server = server.clone();
     let dispatch = async move {
         let mut tasks = JoinSet::new();
-        while let Some(admitted) = rx.recv().await {
+        while let Some((handler, permit)) = rx.recv().await {
             while let Some(result) = tasks.try_join_next() {
                 report_task(result);
             }
-            let server = dispatch_server.clone();
             tasks.spawn(async move {
-                let _permit = admitted.permit;
-                server.handle_message(admitted.message).await;
+                let _permit = permit;
+                handler.await;
             });
         }
         let drain = async {
@@ -134,4 +135,9 @@ fn report_task(result: Result<(), tokio::task::JoinError>) {
             "ACP: dispatch task failed"
         );
     }
+}
+
+pub(crate) fn capacity_error(reason: &'static str, message: &'static str) -> acp::Error {
+    acp::Error::new(acp::ErrorCode::InternalError.into(), message)
+        .data(Some(serde_json::json!({ "reason": reason })))
 }

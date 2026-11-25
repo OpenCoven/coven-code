@@ -150,6 +150,34 @@ fn initialize_returns_spec_compliant_response() {
 }
 
 #[test]
+fn initialization_is_ordered_and_connection_local() {
+    let cwd = std::env::current_dir().unwrap();
+    let new_session = |id| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/new","params":{"cwd":cwd,"mcpServers":[]}});
+    let first = [
+        new_session(1),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}),
+        new_session(3),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":1}}),
+        new_session(5),
+    ].iter().map(|row| format!("{row}\n")).collect::<String>();
+    let (status, stdout, stderr) = run_with_input(&first, Duration::from_secs(20), None);
+    assert!(status.success(), "{stderr}");
+    for id in [1, 3] {
+        assert_eq!(find_response(&stdout, id)["error"]["code"], -32600);
+    }
+    assert_eq!(find_response(&stdout, 2)["error"]["code"], -32602);
+    assert_eq!(find_response(&stdout, 4)["result"]["protocolVersion"], 1);
+    assert!(find_response(&stdout, 5)["result"]["sessionId"].is_string());
+    let (status, stdout, stderr) = run_with_input(
+        &format!("{}\n", new_session(6)),
+        Duration::from_secs(20),
+        None,
+    );
+    assert!(status.success(), "{stderr}");
+    assert_eq!(find_response(&stdout, 6)["error"]["code"], -32600);
+}
+
+#[test]
 fn session_new_returns_session_id() {
     // Use a path that's absolute on both Unix and Windows.
     let cwd = std::env::current_dir().expect("cwd");
@@ -272,7 +300,7 @@ fn large_response_stream_does_not_block_child_exit() {
     let mut actual: Vec<&str> = responses
         .iter()
         .map(|response| {
-            assert_eq!(response["error"]["code"], -32601);
+            assert_eq!(response["error"]["code"], -32600);
             response["id"].as_str().expect("original string request ID")
         })
         .collect();
