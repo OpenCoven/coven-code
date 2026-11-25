@@ -33,19 +33,38 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+fn path_error(operation: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("Could not {operation} {path:?}: {error}"),
+    )
+}
+
 impl WorkspaceScope {
     pub fn read(file: &Path, cwd: &Path) -> io::Result<Self> {
-        if !file.symlink_metadata()?.is_file() {
-            return Err(invalid("Workspace access requires a regular policy file."));
+        if !file
+            .symlink_metadata()
+            .map_err(|e| path_error("inspect workspace policy", file, e))?
+            .is_file()
+        {
+            return Err(invalid(&format!(
+                "Workspace access requires a regular policy file: {file:?}."
+            )));
         }
         let mut bytes = Vec::new();
-        fs::File::open(file)?
+        fs::File::open(file)
+            .map_err(|e| path_error("open workspace policy", file, e))?
             .take(MAX_POLICY_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+            .read_to_end(&mut bytes)
+            .map_err(|e| path_error("read workspace policy", file, e))?;
         if bytes.len() as u64 > MAX_POLICY_BYTES {
-            return Err(invalid("Workspace access policy exceeds its size limit."));
+            return Err(invalid(&format!(
+                "Workspace access policy {file:?} exceeds its size limit."
+            )));
         }
-        let policy: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        let policy: Self = serde_json::from_slice(&bytes).map_err(|e| {
+            io::Error::other(format!("Could not parse workspace policy {file:?}: {e}"))
+        })?;
         policy.validate(cwd, file)?;
         Ok(policy)
     }
@@ -62,29 +81,55 @@ impl WorkspaceScope {
             || self.writable_roots.is_empty()
             || self.writable_roots.len() > 128
             || self.read_only_roots.len() > 128
-            || self.primary_root != cwd.canonicalize()?
         {
-            return Err(invalid("Invalid workspace access scope for this run."));
+            return Err(invalid(&format!(
+                "Invalid workspace access scope in policy {file:?} for this run."
+            )));
         }
-        let policy_path = file.canonicalize()?;
+        let working_folder = cwd
+            .canonicalize()
+            .map_err(|e| path_error("resolve working folder", cwd, e))?;
+        if self.primary_root != working_folder {
+            return Err(invalid(&format!(
+                "Workspace policy {file:?} names primary root {:?}, which does not match working folder {cwd:?}.",
+                self.primary_root
+            )));
+        }
+        let policy_path = file
+            .canonicalize()
+            .map_err(|e| path_error("resolve workspace policy", file, e))?;
         let home = dirs::home_dir().and_then(|path| path.canonicalize().ok());
         for roots in [&self.writable_roots, &self.read_only_roots] {
             if roots.windows(2).any(|pair| pair[0] >= pair[1]) {
-                return Err(invalid("Workspace access roots must be sorted and unique."));
+                return Err(invalid(&format!(
+                    "Workspace access roots in {file:?} must be sorted and unique."
+                )));
             }
             for root in roots {
-                if !root.is_absolute()
-                    || root.parent().is_none()
-                    || !root.is_dir()
-                    || root.canonicalize()? != *root
+                const ROOT_REQUIREMENT: &str =
+                    "Workspace access requires existing canonical dedicated folders.";
+                let invalid_root =
+                    || invalid(&format!("{ROOT_REQUIREMENT} Invalid folder: {root:?}."));
+                if !root.is_absolute() || root.parent().is_none() {
+                    return Err(invalid_root());
+                }
+                // Preserve InvalidInput for metadata failures previously rejected by is_dir().
+                let metadata = root.metadata().map_err(|e| {
+                    invalid(&format!(
+                        "{ROOT_REQUIREMENT} Could not inspect workspace folder {root:?}: {e}"
+                    ))
+                })?;
+                if !metadata.is_dir()
+                    || root
+                        .canonicalize()
+                        .map_err(|e| path_error("resolve workspace folder", root, e))?
+                        != *root
                     || home.as_ref() == Some(root)
                     || root
                         .to_str()
                         .is_none_or(|path| path.chars().any(char::is_control))
                 {
-                    return Err(invalid(
-                        "Workspace access requires existing canonical dedicated folders.",
-                    ));
+                    return Err(invalid_root());
                 }
             }
         }
@@ -102,9 +147,7 @@ impl WorkspaceScope {
                     .any(|write| read.starts_with(write))
             })
         {
-            return Err(invalid(
-                "Workspace access overlaps a protected or read-only folder.",
-            ));
+            return Err(invalid(&format!("Workspace access overlaps a protected or read-only folder. Check the roots in {file:?}.")));
         }
         Ok(())
     }
@@ -181,7 +224,9 @@ impl WorkspaceScope {
     pub async fn verify(self, policy_file: &Path) -> io::Result<VerifiedScope> {
         self.validate(&self.primary_root, policy_file)?;
         let mut args = vec![KERNEL_PROBE.into(), self.writable_roots.len().to_string()];
-        let outside = policy_file.canonicalize()?;
+        let outside = policy_file
+            .canonicalize()
+            .map_err(|e| path_error("resolve workspace policy", policy_file, e))?;
         for path in self
             .writable_roots
             .iter()
@@ -190,14 +235,26 @@ impl WorkspaceScope {
         {
             args.push(
                 path.to_str()
-                    .ok_or_else(|| invalid("Invalid workspace folder path."))?
+                    .ok_or_else(|| {
+                        invalid(&format!(
+                            "Workspace verification requires a UTF-8 folder path: {path:?}."
+                        ))
+                    })?
                     .into(),
             );
         }
-        let (program, argv) = self.command_parts(&std::env::current_exe()?, &args)?;
+        let executable = std::env::current_exe().map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("Could not locate the running executable for workspace verification: {e}"),
+            )
+        })?;
+        let (program, argv) = self
+            .command_parts(&executable, &args)
+            .map_err(|e| path_error("prepare workspace verification for policy", policy_file, e))?;
         let status = tokio::time::timeout(
             Duration::from_secs(5),
-            tokio::process::Command::new(program)
+            tokio::process::Command::new(&program)
                 .args(argv)
                 .current_dir(&self.primary_root)
                 .stdin(Stdio::null())
@@ -210,11 +267,12 @@ impl WorkspaceScope {
         .map_err(|_| {
             io::Error::new(
                 io::ErrorKind::TimedOut,
-                "Workspace sandbox verification timed out.",
+                format!("Workspace sandbox verification timed out for policy {policy_file:?}."),
             )
-        })??;
+        })?
+        .map_err(|e| path_error("run workspace verification command", &program, e))?;
         if !status.success() {
-            return Err(io::Error::other("The workspace sandbox did not allow exactly the saved folders. Check folder access and update Coven Code before retrying."));
+            return Err(io::Error::other(format!("The workspace sandbox did not allow exactly the saved folders. Verification of policy {policy_file:?} returned {status}. Check folder access and update Coven Code before retrying.")));
         }
         Ok(VerifiedScope(self))
     }

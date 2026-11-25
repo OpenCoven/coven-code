@@ -507,7 +507,10 @@ async fn run() -> anyhow::Result<()> {
                 anyhow::bail!("Workspace sandbox verification requires exactly one policy file.");
             };
             let file = Path::new(file);
-            workspace_scope::WorkspaceScope::read(file, &std::env::current_dir()?)?
+            let cwd = std::env::current_dir().with_context(|| {
+                format!("Could not locate the working folder for workspace policy {file:?}")
+            })?;
+            workspace_scope::WorkspaceScope::read(file, &cwd)?
                 .verify(file)
                 .await?
                 .write_receipt(std::io::stdout().lock())?;
