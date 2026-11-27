@@ -522,6 +522,12 @@ in flight, and the process then ends at once.
   and pending actions (#411's protected actions stay unavailable until their
   producer contracts exist).
 
+## Daemon responsiveness qualification
+
+The #580 follow-up uses a private tmux server and a local Unix socket for each renderer and fixture. On the #601 baseline, a silent or trickling daemon delayed composer input for 5.008–5.238 seconds after a handoff and 5.013–5.050 seconds after an events request. With those calls on the background worker, the same measurements were 0.018–0.102 seconds for handoff and 0.012–0.013 seconds for events. Each handoff sent one create request. With the ledger disabled, quit during a pending handoff or events request took 0.171–0.290 seconds.
+
+The familiar menu reads the local roster immediately and applies live badges only to the open menu that requested them. In Classic and Next the menu appeared within 0.017 seconds across the healthy, silent, and trickling fixtures. With the ledger enabled, tmux case 37 observed the unanswered ledger completion and an exit in about two seconds in both renderers. The case also covers duplicate handoffs and clearing the transcript during a pending handoff. In a separate fixture, the daemon returned a successful session ID after the clear. Neither renderer displayed that reply in the replacement conversation. Reconnect epoch handling and release acceptance remain separate checks.
+
 ## Real-daemon recovery journey
 
 Run on 2026-11-18 against Coven v0.5.0, with the implemented part in place.

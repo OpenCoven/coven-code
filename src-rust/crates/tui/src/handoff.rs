@@ -6,6 +6,24 @@
 use claurst_core::coven_shared::{CreateSessionRequest, DaemonClient};
 use claurst_core::types::{Message, Role};
 
+/// Captured on submission so a background handoff uses the original conversation.
+pub struct HandoffRequest {
+    pub familiar: String,
+    pub context: String,
+    pub project_root: String,
+}
+
+impl HandoffRequest {
+    pub fn deliver(self) -> Result<String, String> {
+        let id = send_handoff(&self.familiar, self.context, &self.project_root)
+            .map_err(|error| format!("Handoff failed: {error}"))?;
+        Ok(format!(
+            "Handed off to {}. Session created in Coven daemon. (id: {id})",
+            self.familiar
+        ))
+    }
+}
+
 /// Format the last messages as a markdown context block suitable for handoff.
 pub fn build_handoff_context(messages: &[Message], familiar_name: &str) -> String {
     let conversation = messages
