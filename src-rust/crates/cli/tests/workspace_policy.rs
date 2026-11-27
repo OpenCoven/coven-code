@@ -13,7 +13,7 @@ use std::{
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 mod workspace_policy_fixture;
@@ -258,11 +258,8 @@ fn reaped_within(shell: Pid, limit: Duration) -> bool {
     true
 }
 
-/// Stop a scoped run while a shell command sleeps between its two writes, and
-/// check that the shell is reaped and its second write never lands. With
-/// `background`, the delayed command runs as a background task, and the
-/// fixture's next reply keeps the run busy with a long foreground command, so
-/// the run cannot finish before the stop.
+/// Release the first write while the scoped shell is alive, and the second
+/// only after Stop. The same shell and write operation exercise both gates.
 fn stop_mid_command(background: bool) {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
@@ -272,12 +269,11 @@ fn stop_mid_command(background: bool) {
     let admitted = scope("stop-mid-command", &work, &[&work], &[]);
     fs::write(&policy, admitted.to_string()).unwrap();
     let (started, late) = (work.join("started"), work.join("late"));
-    // The shell records its own PID, then waits before its second write.
-    let delayed = format!(
-        "printf %s $$ > '{}'; sleep 5; printf late > '{}'",
-        started.display(),
-        late.display()
-    );
+    // Relative paths are in the admitted workspace. A stalled runner leaves
+    // the shell waiting at its gate instead of allowing a write by timeout.
+    let delayed = "printf %s $$ > started; for gate in control late; do \
+        while [ ! -f release-$gate ]; do sleep 0.05; done; \
+        printf written > \"$gate\"; done";
     let replies = if background {
         vec![
             tool_call(
@@ -285,7 +281,11 @@ fn stop_mid_command(background: bool) {
                 "Bash",
                 json!({"command": delayed, "run_in_background": true}),
             ),
-            tool_call("hold", "Bash", json!({"command": "sleep 30"})),
+            tool_call(
+                "hold",
+                "Bash",
+                json!({"command": "while [ ! -f release-late ]; do sleep 0.05; done"}),
+            ),
         ]
     } else {
         vec![tool_call("delayed", "Bash", json!({"command": delayed}))]
@@ -312,11 +312,16 @@ fn stop_mid_command(background: bool) {
         );
         thread::sleep(Duration::from_millis(10));
     };
-    let stopped_at = Instant::now();
-    assert!(
-        !late.exists(),
-        "the stop came after the command's own delay; the test runner stalled"
-    );
+    fs::write(work.join("release-control"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while fs::read(work.join("control")).unwrap_or_default() != b"written" {
+        assert!(
+            Instant::now() < deadline && engine.0.try_wait().unwrap().is_none(),
+            "the live shell did not complete its control write\n{}",
+            logs(&base, "stop")
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     // Coven stops the run's process group, so the shell must still be in it.
     match getpgid(Some(shell)) {
         Ok(group) if group == group_of(&engine.0) => {}
@@ -331,15 +336,11 @@ fn stop_mid_command(background: bool) {
             logs(&base, "stop")
         ),
     }
-    // Should the delayed write be found below, these tell a runner that
-    // stalled before the stop from a write that landed after it (#568).
-    let stop_delay = stopped_at.elapsed();
-    let stop_began = SystemTime::now();
     // Coven's Stop for a harness run: one SIGKILL to the run's process group
     // (`terminate_unix_process_group` in coven-cli's pty_runner.rs).
     killpg(group_of(&engine.0), Signal::SIGKILL)
         .unwrap_or_else(|error| panic!("the stop failed: {error}\n{}", logs(&base, "stop")));
-    let stop_ended = SystemTime::now();
+    fs::write(work.join("release-late"), "").unwrap();
     let status = engine.0.wait().unwrap();
     assert_eq!(
         status.signal(),
@@ -351,54 +352,11 @@ fn stop_mid_command(background: bool) {
     if !reaped_within(shell, Duration::from_secs(3)) {
         kill_and_fail(shell, "the scoped shell outlived the stop", &base, "stop");
     }
-    // The shell is gone, so nothing should write now. Outlast the command's
-    // own delay anyway before looking for its write.
-    thread::sleep((stopped_at + Duration::from_secs(6)).saturating_duration_since(Instant::now()));
-    if late.exists() {
-        // The cause of one hosted failure here is not established (#568):
-        // say when the shell started and whether its write landed before the
-        // stop, during it or after it.
-        let dated = |file: &Path| fs::metadata(file).and_then(|meta| meta.modified());
-        let shell_started = match dated(&started).map(|at| stop_began.duration_since(at)) {
-            Ok(Ok(before)) => format!("{before:?} before the stop"),
-            Ok(Err(after)) => format!("{:?} after the stop began", after.duration()),
-            Err(error) => format!("at an unknown time ({error})"),
-        };
-        // Only a write clearly before the stop counts as a stall; one within
-        // the clock's margin of it is reported as during the stop.
-        let (when, stalled) = match dated(&late) {
-            Ok(written) if written + Duration::from_millis(50) < stop_began => (
-                format!(
-                    "{:?} before the stop",
-                    stop_began.duration_since(written).unwrap_or_default()
-                ),
-                true,
-            ),
-            Ok(written) if written <= stop_ended + Duration::from_millis(50) => {
-                ("while the stop was sent".to_string(), false)
-            }
-            Ok(written) => (
-                format!(
-                    "{:?} after the stop",
-                    written.duration_since(stop_ended).unwrap_or_default()
-                ),
-                false,
-            ),
-            Err(error) => (format!("at an unknown time ({error})"), false),
-        };
-        panic!(
-            "a stopped scoped run still wrote after its delay: the shell started {shell_started}, \
-             the stop came {stop_delay:?} after the test read the shell's PID, and the write \
-             is dated {when}{}\n{}",
-            if stalled {
-                "; the test runner stalled before the stop, so the host is likely too busy \
-                 to run this test"
-            } else {
-                ""
-            },
-            logs(&base, "stop")
-        );
-    }
+    assert!(
+        !late.try_exists().unwrap(),
+        "the shell wrote after Stop released its gate\n{}",
+        logs(&base, "stop")
+    );
     let frames = frames(&base, "stop");
     assert_eq!(
         admission(&frames),
