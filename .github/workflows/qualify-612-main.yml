@@ -1,0 +1,55 @@
+name: Verify familiar account routing on merged main
+on:
+  push:
+    branches: [qualify/612-main-rerun]
+    paths: ['.github/workflows/qualify-612-main.yml']
+permissions:
+  contents: read
+  statuses: write
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          ref: 77497f91af0b3de12a6c33554d1d6b11fe60cced
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - run: sudo apt-get update && sudo apt-get install -y tmux pkg-config libasound2-dev
+      - name: Build merged commit and run isolated Claude CLI accounts
+        working-directory: candidate/src-rust
+        run: |
+          test "$(git rev-parse HEAD)" = 77497f91af0b3de12a6c33554d1d6b11fe60cced
+          cargo build --locked --package claurst --bin coven-code
+          python3 ../../qualification/612/claude.py target/debug/coven-code
+      - name: Route Codex fixture to loopback endpoints
+        working-directory: candidate/src-rust
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('crates/core/src/codex_oauth.rs')
+          s=p.read_text()
+          for a,b in [('https://auth.openai.com','http://127.0.0.1:41612'),('https://chatgpt.com','http://127.0.0.1:41612'),('localhost:1455','127.0.0.1:41613'),('= 1455;','= 41613;')]:
+              assert a in s;s=s.replace(a,b)
+          p.write_text(s)
+          p=Path('crates/cli/src/codex_oauth_flow.rs')
+          s=p.read_text()
+          assert 'open::that(&auth_url)' in s
+          p.write_text(s.replace('open::that(&auth_url)','std::process::Command::new("/usr/bin/curl").args(["--silent","--location","--output","/dev/null",&auth_url]).spawn()'))
+          PY
+          cargo build --locked --package claurst --bin coven-code
+          python3 ../../qualification/612/codex.py target/debug/coven-code
+      - name: Record result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          state=failure
+          if [ "$RESULT" = success ]; then state=success; fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state="$state" -f context=merged-main-612 -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
