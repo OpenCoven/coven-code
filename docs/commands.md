@@ -869,9 +869,9 @@ Manage named provider accounts. The active profile for each provider is marked w
 
 Use a provider-qualified ID to distinguish profiles that share a name. An unqualified ID works when exactly one provider has it. Coven Code exits after switching. Relaunch it to load the selected credentials. Account selection is per provider. Choose a model from that provider when you want to use the account.
 
-Use the intended browser account during OAuth sign-in. Codex also accepts `--codex`. Anthropic OAuth requires a configured Coven OAuth client ID and supports `--console` for Console login.
+Named Claude subscription login opens the installed Claude CLI in a separate profile directory. Choose the intended account in its browser sign-in. Only the separate Console OAuth flow uses a configured client ID. Codex also accepts `--codex`.
 
-Use `/account list --viable` to see locally eligible named accounts, their labels, and the active marker. Codex accepts an unexpired or refreshable profile. Anthropic accepts a stored Console API key or a usable OAuth profile minted by the configured Coven Code client. Keyless Claude uses the local Claude CLI’s session. A successful request is the check for provider access.
+Use `/account list --viable` to see provider-qualified IDs, labels, and the active marker. A signed-in named Claude CLI profile, a stored Console key, an eligible engine OAuth profile, or an unexpired or refreshable Codex profile can appear here. The list reports the last successful familiar request time for each profile that has served one.
 
 Use `/familiar account <familiar> <provider>/<profile-id>` to bind a roster familiar. The selection applies on its next turn and survives relaunch. Choose a model from the same provider. Run `/familiar account <familiar>` to see the selection and `/familiar account <familiar> default` to return to the session account. If a bound account expires without a refresh token or is removed, select an eligible replacement with the same command.
 

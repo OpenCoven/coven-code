@@ -522,6 +522,12 @@ in flight, and the process then ends at once.
   and pending actions (#411's protected actions stay unavailable until their
   producer contracts exist).
 
+## Familiar account selection
+
+For #412 identity checks, record the selected familiar, model provider, bound profile ID, and active session default before and after relaunch. Exercise a bound familiar and an unbound familiar after switching the default. Clear the binding and check the next request at the provider boundary. If a bound profile becomes unavailable, show repair guidance before dispatch. A previous successful-request timestamp describes that profile’s history. See the [familiar account guide](../familiars.md#choose-an-account-for-a-familiar).
+
+On the integrated #612 candidate, Classic and Next both dispatched the bound Codex familiar to synthetic identity A and an unbound familiar to the switched default B after relaunch. An isolated refresh updated A while B’s credential file stayed byte-identical. An expired A without refresh credentials stopped before a provider request. Rebinding and clearing both sent the next request to B. A separate Claude CLI fixture observed the named profile for the bound familiar and the default CLI directory after clearing. These observations used disposable profiles and loopback or synthetic provider boundaries.
+
 ## Daemon responsiveness qualification
 
 Local tmux runs exercised Classic and Next with the daemon ledger enabled. Each range below covers both renderers against a listener that accepts a request and stays silent or sends one byte every half second. The baseline was #601 at `4632fd9d`. The follow-up used the same commands, fixture, and terminal size.

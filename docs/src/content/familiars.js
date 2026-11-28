@@ -5,6 +5,14 @@ export function render() {
     <h1>Coven Familiars</h1>
     <p class="lead">Coven Code integrates natively with the Coven daemon's familiar roster. When the daemon is installed and running, every familiar you have configured under <code>~/.coven/</code> is automatically available inside Coven Code as a selectable agent persona — no extra setup required.</p>
 
+    <h2>Choose an account for a familiar</h2>
+
+    <p>Run <code>/account login anthropic --label work</code> to open Claude Code’s subscription sign-in for a separate profile. For Codex, use <code>/account login codex --label work</code>. Run <code>/account list --viable</code> and copy the provider-qualified ID. Two profiles can share a label.</p>
+
+    <p>For a roster familiar named <code>dev</code>, run <code>/familiar account dev anthropic/work</code>, substituting the ID from your list. Choose a model from the same provider. Inspect the binding with <code>/familiar account dev</code>. It survives relaunch. To change the default Codex account, run <code>/account switch</code> with a Codex profile ID and relaunch. To make dev follow the session account for its model, run <code>/familiar account dev default</code>.</p>
+
+    <p>The viable list checks local credential eligibility. A signed-in CLI profile can appear before it has served a turn. After a successful bound request, the list shows that profile’s last successful familiar request time. If a binding becomes unavailable, sign in again or bind the familiar to another viable ID before retrying.</p>
+
     <h2>When the daemon is slow</h2>
 
     <p>Open <code>/familiar</code> to see locally configured familiars. The menu fetches live badges in the background. You can select a familiar or close the menu while the daemon is busy.</p>
