@@ -45,3 +45,6 @@ jobs:
           $actual = (Get-FileHash -LiteralPath (Join-Path $dir $name) -Algorithm SHA256).Hash
           Write-Host "Published SHA-256: $expected; computed SHA-256: $actual"
           if ($expected -ne $actual) { throw 'Archive checksum mismatch' }
+      - name: Install the prepared npm tarball and run its launcher
+        shell: pwsh
+        run: ./scripts/windows-npm-install.ps1 -ReleaseDir (Join-Path $env:RUNNER_TEMP 'verified-release')
