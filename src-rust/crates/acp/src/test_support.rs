@@ -18,7 +18,7 @@ pub(crate) fn server(connection: Arc<Connection>) -> Arc<AgentServer> {
         ..Default::default()
     })
     .unwrap();
-    AgentServer::new(
+    let server = AgentServer::new(
         connection,
         Arc::new(AgentRuntime {
             config,
@@ -32,5 +32,11 @@ pub(crate) fn server(connection: Arc<Connection>) -> Arc<AgentServer> {
             permission_manager,
             working_dir: std::path::PathBuf::from("/unused-fixture"),
         }),
-    )
+    );
+    server
+        .on_initialize(agent_client_protocol_schema::InitializeRequest::new(
+            agent_client_protocol_schema::ProtocolVersion::V1,
+        ))
+        .unwrap();
+    server
 }

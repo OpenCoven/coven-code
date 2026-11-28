@@ -74,7 +74,10 @@ async fn run_scheduler_loop(
             let client = client.clone();
             let tools = tools.clone();
             let tool_ctx = tool_ctx.clone();
-            let query_config = query_config.clone();
+            let query_config = QueryConfig {
+                cli_session: Default::default(),
+                ..query_config.clone()
+            };
             let cost_tracker = tool_ctx.cost_tracker.clone();
             let cancel_child = cancel.clone();
             let task_id = task.id.clone();

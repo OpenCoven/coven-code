@@ -15,6 +15,8 @@ use std::path::PathBuf;
 // so its import can't be gated on `cfg(unix)` even though the only real
 // implementation lives there.
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -396,28 +398,53 @@ impl DaemonClient {
     /// ignores the timeout and reports `Offline` outright.
     const DEFAULT_TIMEOUT_MS: u64 = 200;
 
-    /// Per-call timeout for substantive request/response verbs routed through
+    /// Whole budget for one substantive request/response verb routed through
     /// [`Self::request`] (`create_session`, `session_log`, `session_events`,
-    /// `capabilities`, `control_action`, …). These can legitimately take
-    /// longer than the [`Self::DEFAULT_TIMEOUT_MS`] poll budget on a busy
-    /// daemon, so they get a wider budget to avoid spurious `Transport`
-    /// timeouts. The quick-poll path ([`Self::is_online`]) keeps the short
-    /// budget via [`Self::check_reachability`].
+    /// `capabilities`, `control_action`, …): connecting, sending the request
+    /// and reading the whole answer, so neither a daemon that never answers
+    /// nor one that sends a byte now and then can hold a request longer
+    /// (#580). These can legitimately take longer than the
+    /// [`Self::DEFAULT_TIMEOUT_MS`] poll budget on a busy daemon, so they get
+    /// a wider budget to avoid spurious `Transport` timeouts. The quick-poll
+    /// path ([`Self::is_online`]) keeps the short budget via
+    /// [`Self::check_reachability`].
     #[cfg(unix)]
     const REQUEST_TIMEOUT_MS: u64 = 5000;
 
-    /// Open a fresh `UnixStream` connection with the request timeout budget.
+    /// Connect to the daemon socket, giving up at `deadline`, and set the
+    /// stream's read and write timeouts to the time left.
+    ///
+    /// `UnixStream::connect` takes no timeout. On Linux a connect to a socket
+    /// whose listen queue is full waits for room for as long as the socket's
+    /// send timeout allows, so that is set before connecting; macOS refuses
+    /// such a connect at once.
     #[cfg(unix)]
-    fn connect(&self) -> std::io::Result<UnixStream> {
-        self.connect_with_timeout(Duration::from_millis(Self::REQUEST_TIMEOUT_MS))
-    }
+    fn connect_by(&self, deadline: Instant) -> std::io::Result<UnixStream> {
+        use socket2::{Domain, SockAddr, Socket, Type};
+        use std::os::fd::OwnedFd;
 
-    /// Open a fresh `UnixStream` connection with a caller-supplied timeout.
-    #[cfg(unix)]
-    fn connect_with_timeout(&self, timeout: Duration) -> std::io::Result<UnixStream> {
-        let stream = UnixStream::connect(&self.sock_path)?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+        // socket2 passes a timeout under 1 µs as zero, which means none.
+        socket.set_write_timeout(Some(time_left(deadline)?.max(Duration::from_millis(1))))?;
+        socket
+            .connect(&SockAddr::unix(&self.sock_path)?)
+            .map_err(|e| match e.kind() {
+                // With a send timeout set, Linux does not restart a connect
+                // waiting on a full queue after a signal (a terminal resize):
+                // the daemon is busy, not gone.
+                std::io::ErrorKind::Interrupted => std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the connect to the daemon was interrupted while it waited",
+                ),
+                _ => e,
+            })?;
+        let stream = UnixStream::from(OwnedFd::from(socket));
+        // A daemon that has already answered and closed makes these fail on
+        // macOS (EINVAL); its answer is still there to read, and reading a
+        // closed connection does not wait.
+        let left = time_left(deadline)?;
+        let _ = stream.set_read_timeout(Some(left));
+        let _ = stream.set_write_timeout(Some(left));
         Ok(stream)
     }
 
@@ -427,34 +454,17 @@ impl DaemonClient {
     /// response — no need to parse `Content-Length` or chunked encoding.
     /// Non-2xx responses are surfaced via [`DaemonError::BadStatus`] with
     /// the daemon's structured error envelope parsed out.
+    ///
+    /// The whole exchange has [`Self::REQUEST_TIMEOUT_MS`].
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String, DaemonError> {
         #[cfg(unix)]
         {
-            let mut stream = self.connect().map_err(|e| DaemonError::Offline {
-                reason: e.to_string(),
-            })?;
-            let request = match body {
-                Some(body) => format!(
-                    "{method} {path} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                ),
-                None => format!(
-                    "{method} {path} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n"
-                ),
-            };
-            stream
-                .write_all(request.as_bytes())
-                .map_err(|e| DaemonError::Transport(e.to_string()))?;
-            stream
-                .flush()
-                .map_err(|e| DaemonError::Transport(e.to_string()))?;
-
-            let mut raw = Vec::new();
-            stream
-                .read_to_end(&mut raw)
-                .map_err(|e| DaemonError::Transport(e.to_string()))?;
-
-            parse_response(&raw)
+            self.request_within(
+                method,
+                path,
+                body,
+                Duration::from_millis(Self::REQUEST_TIMEOUT_MS),
+            )
         }
         #[cfg(not(unix))]
         {
@@ -463,6 +473,73 @@ impl DaemonClient {
                 reason: "unix sockets unavailable on this platform".to_string(),
             })
         }
+    }
+
+    /// [`Self::request`] with `budget` for the whole exchange: the connect,
+    /// every write and every read stop at one deadline.
+    #[cfg(unix)]
+    fn request_within(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        budget: Duration,
+    ) -> Result<String, DaemonError> {
+        use std::io::ErrorKind;
+
+        let deadline = Instant::now() + budget;
+        let ran_out = || DaemonError::Transport(format!("no complete answer within {budget:?}"));
+        let failed = |e: std::io::Error| match e.kind() {
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => ran_out(),
+            _ => DaemonError::Transport(e.to_string()),
+        };
+        let mut stream = self.connect_by(deadline).map_err(|e| match e.kind() {
+            // Connected to nothing in time: a full listen queue (Linux).
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => ran_out(),
+            _ => DaemonError::Offline {
+                reason: e.to_string(),
+            },
+        })?;
+        let request = match body {
+            Some(body) => format!(
+                "{method} {path} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            None => format!(
+                "{method} {path} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n"
+            ),
+        };
+
+        // Each write and read may wait only for what is left of the budget.
+        // Setting a timeout fails once the peer has shut the connection down
+        // (macOS reports EINVAL). A write or read then returns at once, so
+        // the timeout set before, never longer than the budget, is kept.
+        let mut unsent = request.as_bytes();
+        while !unsent.is_empty() {
+            let _ = stream.set_write_timeout(Some(time_left(deadline).map_err(failed)?));
+            match stream.write(unsent) {
+                Ok(0) => {
+                    return Err(DaemonError::Transport(
+                        "the daemon stopped reading the request".to_string(),
+                    ))
+                }
+                Ok(n) => unsent = &unsent[n..],
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(failed(e)),
+            }
+        }
+        let mut raw = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let _ = stream.set_read_timeout(Some(time_left(deadline).map_err(failed)?));
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(failed(e)),
+            }
+        }
+        parse_response(&raw)
     }
 
     /// Send a minimal HTTP/1.0 GET and return the body string.
@@ -497,9 +574,16 @@ impl DaemonClient {
         {
             use std::io::{Read, Write};
 
-            let mut stream = match self.connect_with_timeout(timeout) {
+            let mut stream = match self.connect_by(Instant::now() + timeout) {
                 Ok(s) => s,
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // No room in a full listen queue (Linux) within the budget:
+                // the daemon is there, but busy.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
                     return DaemonReachability::TimedOut;
                 }
                 Err(_) => return DaemonReachability::Offline,
@@ -631,8 +715,8 @@ impl DaemonClient {
     }
 
     /// Read the daemon's health once and say which instance answered.
-    /// `timeout` bounds sending the request and, as a whole, reading the
-    /// answer: a peer that keeps sending bytes cannot extend it.
+    /// `timeout` bounds the whole look: connecting, sending the request and
+    /// reading the answer. A peer that keeps sending bytes cannot extend it.
     ///
     /// Like [`Self::check_reachability`], only a refused connection or one
     /// that fails or closes before any byte of an answer reads as gone. A
@@ -654,7 +738,7 @@ impl DaemonClient {
             let socket_file = std::fs::metadata(&self.sock_path)
                 .ok()
                 .map(|meta| (meta.dev(), meta.ino()));
-            let mut stream = match self.connect_with_timeout(timeout) {
+            let mut stream = match self.connect_by(deadline) {
                 Ok(stream) => stream,
                 Err(e) => return unanswered(&e),
             };
@@ -675,12 +759,13 @@ impl DaemonClient {
             let mut chunk = [0_u8; 4096];
             loop {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
-                if left.is_zero()
-                    || raw.len() > LARGEST_ANSWER
-                    || stream.set_read_timeout(Some(left)).is_err()
-                {
+                if left.is_zero() || raw.len() > LARGEST_ANSWER {
                     break;
                 }
+                // Fails on macOS once the daemon has answered and closed;
+                // its answer is still there to read, and that read does not
+                // wait.
+                let _ = stream.set_read_timeout(Some(left));
                 match stream.read(&mut chunk) {
                     Ok(0) if raw.is_empty() => return DaemonSighting::Gone,
                     Ok(0) => break,
@@ -891,6 +976,21 @@ impl DaemonClient {
             .map_err(|e| DaemonError::MalformedResponse(format!("encode request: {e}")))?;
         let path = format!("/api/v1/sessions/{}/complete", url_quote(session_id));
         self.request("POST", &path, Some(&body)).map(|_| ())
+    }
+}
+
+/// What is left of a request's budget before `deadline`, or a timed-out
+/// error once nothing is.
+#[cfg(unix)]
+fn time_left(deadline: Instant) -> std::io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the daemon request ran out of time",
+        ))
+    } else {
+        Ok(left)
     }
 }
 
@@ -1912,6 +2012,118 @@ mod tests {
             elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(3),
             "sight took {elapsed:?} against a 300 ms budget"
         );
+    }
+
+    /// #580: one deadline covers a whole request. A peer that sends a byte
+    /// every second never lets a single read time out, so it must not be
+    /// able to hold the request past the request timeout.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_to_a_trickling_daemon_ends_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            // One byte a second for 15 s, or until the client hangs up.
+            for _ in 0..15 {
+                if stream.write_all(b"H").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let started = std::time::Instant::now();
+        let result = client.health();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(result.is_err(), "a trickled answer never completes");
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "the request took {elapsed:?} against its 5 s deadline"
+        );
+    }
+
+    /// #580: a daemon that accepts and never answers ends a request at its
+    /// deadline, as a transport error that says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_to_a_silent_daemon_ends_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let accepted = listener.accept();
+            let _ = held.recv();
+            drop(accepted);
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let started = std::time::Instant::now();
+        let result =
+            client.request_within("GET", "/api/v1/sessions", None, Duration::from_millis(300));
+        let elapsed = started.elapsed();
+        drop(release);
+        server.join().unwrap();
+
+        match result {
+            Err(DaemonError::Transport(reason)) => {
+                assert_eq!(reason, "no complete answer within 300ms")
+            }
+            other => panic!("expected a transport error, got {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(3),
+            "the request took {elapsed:?} against a 300 ms budget"
+        );
+    }
+
+    /// #580: the connect has a deadline too. On Linux a connect to a socket
+    /// whose listen queue is full waits for room; macOS refuses it at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_connect_to_a_full_listen_queue_ends_at_its_deadline() {
+        use socket2::{Domain, SockAddr, Socket, Type};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let address = SockAddr::unix(&sock).unwrap();
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        listener.bind(&address).unwrap();
+        // Room for at most one waiting connection, and nothing accepts.
+        listener.listen(0).unwrap();
+        let mut waiting = Vec::new();
+        for _ in 0..64 {
+            let filler = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+            filler.set_nonblocking(true).unwrap();
+            if filler.connect(&address).is_err() {
+                break;
+            }
+            waiting.push(filler);
+        }
+
+        let client = DaemonClient { sock_path: sock };
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = client.health();
+            let _ = done.send((result.is_err(), started.elapsed()));
+        });
+        let (failed, elapsed) = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the request was still connecting after 10 s");
+        assert!(failed, "nothing accepted the connection");
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "the request took {elapsed:?} against its 5 s deadline"
+        );
+        drop((listener, waiting));
     }
 
     /// A daemon that answers in full and then keeps the connection open is

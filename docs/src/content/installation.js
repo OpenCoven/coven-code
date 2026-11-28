@@ -9,7 +9,7 @@ export function render() {
     <p>Release archives target Windows x86_64, Linux x86_64/aarch64, and macOS x86_64/aarch64. These are build targets, not a guarantee of compatibility with every OS version. Windows ARM64 has no native release artifact.</p>
 
     <h3>Linux Runtime Requirements</h3>
-    <p>A Linux release binary cannot start without two system libraries. It needs at least the glibc of the image it was built on: the v0.9.2 archives need glibc 2.39, which Ubuntu 24.04 has and Debian 12, Ubuntu 22.04, RHEL 9 and Amazon Linux 2023 do not. It also needs the ALSA library <code>libasound.so.2</code> (<code>libasound2t64</code> or <code>libasound2</code> on Debian and Ubuntu, <code>alsa-lib</code> on Fedora and RHEL), even on a server that never uses voice.</p>
+    <p>A Linux release binary cannot start without two system libraries. It needs at least the glibc of the image it was built on: the v0.9.2 and v0.9.3 archives need glibc 2.39, which Ubuntu 24.04 has and Debian 12, Ubuntu 22.04, RHEL 9 and Amazon Linux 2023 do not. It also needs the ALSA library <code>libasound.so.2</code> (<code>libasound2t64</code> or <code>libasound2</code> on Debian and Ubuntu, <code>alsa-lib</code> on Fedora and RHEL), even on a server that never uses voice.</p>
     <p>On Linux, the shell installer runs the binary before it installs it. If the binary cannot start, the installer says which requirement is missing and installs nothing. <code>coven engine install</code> does not make this check; <code>coven doctor</code> reports whether the engine can run. On a system with an older glibc, build from source on that system.</p>
 
     <h2>Quick Install</h2>
