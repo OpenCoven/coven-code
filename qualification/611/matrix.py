@@ -45,7 +45,8 @@ def test(ui,mode):
   cmd='env -i '+shlex.join([k+'='+v for k,v in env.items()]+[str(exe)])
   tm('new-session','-d','-s','s','-x','120','-y','40','-c',str(p),'sleep 0.5; '+cmd+'; echo $? > exit-code; sleep 80')
   tm('pipe-pane','-t','s','cat > '+shlex.quote(str(p/'tty')))
-  wait(lambda:'shortcuts' in pane() or 'Coven v' in pane(),22)
+  wait(lambda:'shortcuts' in pane() or 'Coven v' in pane() or 'Coven · preview' in pane(),22)
+  time.sleep(.4)
   tm('send-keys','-l','/update');time.sleep(.25);tm('send-keys','Enter')
   if mode=='current':
    wait(lambda:'up to date' in pane(),12)
