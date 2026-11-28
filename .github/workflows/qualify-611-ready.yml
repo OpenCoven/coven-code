@@ -1,0 +1,38 @@
+name: Verify PR 611 readiness
+on:
+  push:
+    branches: [qualify/611-readiness]
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  actions: read
+  statuses: write
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: 7e6544ea9211f3df9a958e7847e17ac7f6fef122
+      - name: Check the integrated head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 35); do
+            test "$(gh api repos/OpenCoven/coven-code/pulls/611 --jq .head.sha)" = 50f5fe2648efed1fc0d8cfea76db9301b42a8467 || exit 1
+            if scripts/agent/pr-ready.sh 611 --require-workflow 'Rust CI' --require-workflow 'TUI Tests' --require-workflow 'Version stamp tests'; then exit 0; fi
+            sleep 60
+          done
+          exit 1
+      - name: Record the readiness result on this verification commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          state=failure
+          if [ "$RESULT" = success ]; then state=success; fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state="$state" -f context=pr-ready-verification -f description="Repository readiness script for PR 611" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
