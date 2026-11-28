@@ -257,6 +257,8 @@ impl AnthropicProvider {
                 error_type,
                 message,
             }),
+            AnthropicStreamEvent::ProviderLimit(limit) => Some(StreamEvent::ProviderLimit(limit)),
+            AnthropicStreamEvent::ProviderTask(task) => Some(StreamEvent::ProviderTask(task)),
             AnthropicStreamEvent::Ping => Some(StreamEvent::Ping),
         }
     }

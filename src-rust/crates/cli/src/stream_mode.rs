@@ -55,6 +55,7 @@ pub struct StreamLoopParams {
 
 /// A user/assistant frame parsed off stdin.
 enum InputFrame {
+    Recover(claurst_api::providers::claude_cli::recovery::TaskCheckpoint),
     User(Message),
     AssistantPrefill(String),
     Ignored,
@@ -70,6 +71,11 @@ fn parse_input_frame(line: &str) -> Result<InputFrame, String> {
     // Claude/Coven shape: {"type":"user","message":{"role":...,"content":...}}
     if let Some(kind) = v.get("type").and_then(|t| t.as_str()) {
         return match kind {
+            "recover_provider_task" if v["version"] == 1 => {
+                serde_json::from_value(v["checkpoint"].clone())
+                    .map(InputFrame::Recover)
+                    .map_err(|_| "Invalid provider recovery checkpoint.".to_string())
+            }
             "user" | "assistant" => {
                 let msg = v
                     .get("message")
@@ -204,6 +210,30 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
                 }
                 continue;
             }
+            Ok(InputFrame::Recover(checkpoint)) => {
+                tool_ctx.goal_turn.capture(&session_id)?;
+                if scoped || tool_ctx.goal_turn.captured().is_some() || query_config.max_budget_usd.is_some() || query_config.max_turns_override.is_some() {
+                    input_error(&session_id, "This run policy requires a new scoped request. Review the remaining work in the conversation.");
+                    break;
+                }
+                let result = claurst_api::providers::claude_cli::recovery::resume_research(
+                    &checkpoint, &tool_ctx.working_dir, &model, &tool_ctx.config.permission_mode, |event| {
+                        use claurst_api::StreamEvent;
+                        let frame = match event {
+                            StreamEvent::ProviderTask(task) => serde_json::json!({"type":"provider_task","version":1,"task":task,"session_id":session_id}),
+                            StreamEvent::ProviderLimit(limit) => serde_json::json!({"type":"provider_limit","version":1,"limit":limit,"session_id":session_id}),
+                            StreamEvent::TextDelta{text,..} => serde_json::json!({"type":"text_delta","text":text,"session_id":session_id}),
+                            _ => return,
+                        };
+                        emit(&frame);
+                    }
+                ).await;
+                match result {
+                    Ok(()) => emit(&serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":session_id,"provider_task_recovered":true})),
+                    Err(error) => input_error(&session_id,&error.to_string()),
+                }
+                break;
+            }
             Ok(InputFrame::Ignored) => continue,
             Err(e) => {
                 input_error(&session_id, &e);
@@ -307,6 +337,16 @@ async fn run_turn(
 
     while let Some(event) = event_rx.recv().await {
         match &event {
+            QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ProviderLimit(limit)) => {
+                emit(
+                    &serde_json::json!({"type":"provider_limit","version":1,"session_id":session_id,"limit":limit}),
+                );
+            }
+            QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ProviderTask(task)) => {
+                emit(
+                    &serde_json::json!({"type":"provider_task","version":1,"session_id":session_id,"task":task}),
+                );
+            }
             QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ContentBlockDelta {
                 delta: claurst_api::streaming::ContentDelta::TextDelta { text },
                 ..
@@ -566,6 +606,7 @@ mod tests {
         match frame {
             Ok(InputFrame::User(_)) => "user",
             Ok(InputFrame::AssistantPrefill(_)) => "assistant_prefill",
+            Ok(InputFrame::Recover(_)) => "recover_provider_task",
             Ok(InputFrame::Ignored) => "ignored",
             Err(_) => "error",
         }

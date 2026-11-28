@@ -131,6 +131,36 @@ pub struct ProviderResponse {
     pub model: String,
 }
 
+/// A rejected request, identified by the provider itself. Its original notice
+/// remains in the text stream for clients that keep diagnostic transcripts.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderLimit {
+    pub provider_session_id: String,
+    pub notice: Option<String>,
+    pub resets_at: Option<i64>,
+}
+
+/// Provider-reported lifecycle of one delegated task attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTaskPhase {
+    Started,
+    Continuable,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderTask {
+    pub provider_session_id: String,
+    pub task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub phase: ProviderTaskPhase,
+    pub detail: String,
+}
+
 // ---------------------------------------------------------------------------
 // StreamEvent
 // ---------------------------------------------------------------------------
@@ -141,6 +171,8 @@ pub struct ProviderResponse {
 /// so that the rest of the application can consume a single unified stream.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    ProviderTask(ProviderTask),
+    ProviderLimit(ProviderLimit),
     /// The message has started; carries the provider-assigned id and model.
     MessageStart {
         id: String,
@@ -155,19 +187,33 @@ pub enum StreamEvent {
     },
 
     /// Incremental text delta for an in-progress block.
-    TextDelta { index: usize, text: String },
+    TextDelta {
+        index: usize,
+        text: String,
+    },
 
     /// Incremental thinking / reasoning delta.
-    ThinkingDelta { index: usize, thinking: String },
+    ThinkingDelta {
+        index: usize,
+        thinking: String,
+    },
 
     /// Incremental delta for tool-call JSON arguments.
-    InputJsonDelta { index: usize, partial_json: String },
+    InputJsonDelta {
+        index: usize,
+        partial_json: String,
+    },
 
     /// Incremental delta for a cryptographic signature block.
-    SignatureDelta { index: usize, signature: String },
+    SignatureDelta {
+        index: usize,
+        signature: String,
+    },
 
     /// An in-progress content block is now complete.
-    ContentBlockStop { index: usize },
+    ContentBlockStop {
+        index: usize,
+    },
 
     /// Final message-level delta carrying the stop reason and updated usage.
     MessageDelta {
@@ -179,10 +225,16 @@ pub enum StreamEvent {
     MessageStop,
 
     /// A provider-level error occurred mid-stream.
-    Error { error_type: String, message: String },
+    Error {
+        error_type: String,
+        message: String,
+    },
 
     /// Incremental reasoning / scratchpad delta (alias used by some providers).
-    ReasoningDelta { index: usize, reasoning: String },
+    ReasoningDelta {
+        index: usize,
+        reasoning: String,
+    },
 
     /// Content-free keepalive that resets the consuming stream stall timer.
     Ping,

@@ -381,10 +381,14 @@ fn tool_notice(name: &str, input: &Value) -> String {
 // Envelope mapping
 // ---------------------------------------------------------------------------
 
+pub mod recovery;
+mod task_events;
+
 /// Maps `claude --output-format stream-json` stdout lines onto provider
 /// [`StreamEvent`]s. Pure state machine — the process plumbing lives in the
 /// stream generator so this part stays unit-testable.
 struct EnvelopeMapper {
+    tasks: task_events::TaskEvents,
     fallback_model: String,
     message_started: bool,
     block_index: usize,
@@ -411,6 +415,7 @@ struct LineOutcome {
 impl EnvelopeMapper {
     fn new(fallback_model: &str) -> Self {
         Self {
+            tasks: task_events::TaskEvents::default(),
             fallback_model: fallback_model.to_string(),
             message_started: false,
             block_index: 0,
@@ -485,8 +490,14 @@ impl EnvelopeMapper {
             };
         };
 
+        if let Some(limit) = self.tasks.limit(&envelope) {
+            events.push(StreamEvent::ProviderLimit(limit));
+        }
         match envelope.get("type").and_then(|value| value.as_str()) {
             Some("system") => {
+                if let Some(task) = self.tasks.observe(&envelope) {
+                    events.push(StreamEvent::ProviderTask(task));
+                }
                 if let Some(session_id) = envelope.get("session_id").and_then(|v| v.as_str()) {
                     self.session_id = Some(session_id.to_string());
                 }
@@ -557,7 +568,12 @@ impl EnvelopeMapper {
                 }
             }
             // The CLI's own tool results — internal to its agent loop.
-            Some("user") => self.turn_open = true,
+            Some("user") => {
+                self.turn_open = true;
+                if let Some(task) = self.tasks.launch_receipt(&envelope) {
+                    events.push(StreamEvent::ProviderTask(task));
+                }
+            }
             Some("result") => {
                 self.start_message_if_needed(&mut events, None);
                 let is_error = envelope

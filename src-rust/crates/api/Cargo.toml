@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+uuid = { workspace = true }
 claurst-core = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -21,4 +22,3 @@ async-stream = { workspace = true }
 
 [dev-dependencies]
 # Unique temporary fixture directories in Codex goal tests.
-uuid = { workspace = true }
