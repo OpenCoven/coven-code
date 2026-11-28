@@ -74,6 +74,7 @@ pub enum CommandResult {
     /// Trigger the OAuth login flow (handled by the REPL in main.rs).
     /// The bool indicates whether to use Claude.ai auth (true) or Console auth (false).
     StartOAuthFlow(bool),
+    InstallUpdate(String),
     /// Trigger the OAuth login flow for a specific provider with optional
     /// human-friendly label for the new account profile.
     ///
@@ -104,7 +105,10 @@ pub enum CommandResult {
     RefreshProviderState,
     /// Activate a speech mode (caveman/rocky) with level, or deactivate (normal).
     /// (mode, level) — mode=None means deactivate.
-    SpeechMode { mode: Option<String>, level: String },
+    SpeechMode {
+        mode: Option<String>,
+        level: String,
+    },
     /// A Coven daemon listing to run off the interactive loop's thread
     /// (#580); see [`DaemonListing`].
     DaemonListing(DaemonListing),
@@ -7542,8 +7546,7 @@ impl SlashCommand for UpgradeCommand {
     }
     fn help(&self) -> &str {
         "Usage: /update [version|notes]\n\n\
-         Checks GitHub releases for the latest version of Coven.\n\
-         If a newer version is available, shows where to download it.\n\
+         Installs the latest release and exits so you can restart Coven Code.\n\
          Use /update version to show the installed version or /update notes for highlights."
     }
 
@@ -7554,30 +7557,21 @@ impl SlashCommand for UpgradeCommand {
             "notes" | "release-notes" => {
                 return ReleaseNotesCommand.execute(remaining_args, ctx).await
             }
-            _ => {}
+            "" => {}
+            _ => return CommandResult::Error(self.help().to_string()),
         }
         let current = claurst_core::constants::APP_VERSION;
 
         match fetch_latest_release(current).await {
             Ok(latest) => {
-                if latest.version == current {
+                if !claurst_core::update_check::is_newer(&latest.version, current) {
                     CommandResult::Message(format!(
                         "Coven v{current} - you are up to date.\n\
                          Release page: {}",
                         latest.url
                     ))
                 } else {
-                    CommandResult::Message(format!(
-                        "Update available!\n\
-                         Current version:  v{current}\n\
-                         Latest version:   v{}\n\
-                         Release page:     {}\n\n\
-                         Upgrade in place (recommended):\n\
-                           coven-code upgrade\n\n\
-                         Or build from source:\n\
-                           cargo install coven-code --force",
-                        latest.version, latest.url
-                    ))
+                    CommandResult::InstallUpdate(latest.version)
                 }
             }
             Err(e) => CommandResult::Message(format!(

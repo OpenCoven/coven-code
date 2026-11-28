@@ -4226,6 +4226,7 @@ async fn run_interactive(
     // When the loop last saw a permission panel open, or closed one; cleared
     // when a turn ends. See `open_permission_panel`.
     let mut panel_last_open: Option<std::time::Instant> = None;
+    let mut update_version = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -4427,6 +4428,14 @@ async fn run_interactive(
                     let submit_enter = key.code == KeyCode::Enter
                         && !app.any_blocking_modal_open()
                         && (auto_submit || !app.vim_line_open());
+                    if submit_enter && (app.is_streaming || current_query.is_some()) {
+                        let (name, args) = claurst_tui::input::parse_slash_command(&app.prompt_input.text);
+                        if args.is_empty() && (name.eq_ignore_ascii_case("update") || name.eq_ignore_ascii_case("upgrade")) {
+                            app.take_input();
+                            app.show_command_error("Wait for the current response to finish before running /update.".to_string());
+                            continue;
+                        }
+                    }
                     if submit_enter && app.is_streaming {
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
@@ -4648,6 +4657,10 @@ async fn run_interactive(
 
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
+                                Some(CommandResult::InstallUpdate(version)) => {
+                                    update_version = Some(version);
+                                    break 'main;
+                                }
                                 Some(CommandResult::ClearConversation) => {
                                     base_query_config.cli_session = Default::default();
                                     daemon_listings.forget(&mut app);
@@ -6745,6 +6758,9 @@ async fn run_interactive(
         .await;
 
     terminal_result?;
+    if let Some(version) = update_version {
+        upgrade::run_upgrade(&["--version".to_string(), version]).await?;
+    }
     Ok(())
 }
 

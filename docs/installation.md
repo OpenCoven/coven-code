@@ -184,6 +184,8 @@ coven engine which
 coven doctor
 ```
 
+In a standalone build with the in-app updater, enter `/update` in an idle Classic or Next session. If a newer release is available, the session exits and the updater checks the archive against that release’s `SHA256SUMS` before replacing the running executable. Relaunch the same path with `--version` to confirm the installed version. If the checksum is rejected, relaunch the original executable and retry once the release archive and manifest agree. If a response is active, wait for it to finish before updating.
+
 For a standalone installation, use the selected release's verified installer or
 archive, then check the exact installed path and version. Updating a standalone
 binary does not override a managed engine.

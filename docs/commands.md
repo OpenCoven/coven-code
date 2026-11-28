@@ -1022,7 +1022,7 @@ Show the "What's new" highlights for the current Coven Code release — the same
 
 ### /update
 
-Check for available updates. Queries the GitHub releases API and displays the latest version. If a newer version exists, prints the download URL or upgrade instructions. Does not auto-update. (`/upgrade` is a hidden compatibility alias.)
+Check GitHub for a newer release. When one is available, Coven Code exits the interactive session, verifies the release archive against the published SHA-256 manifest, and replaces the installed executable. Relaunch the same executable path and run `--version` to confirm the installed version. During an active response, wait for the turn to finish and enter `/update` again. If the checksum is rejected, the original executable can be relaunched at that path. Use `/update version` or `/update notes` to inspect the version or release notes.
 
 ```
 /update

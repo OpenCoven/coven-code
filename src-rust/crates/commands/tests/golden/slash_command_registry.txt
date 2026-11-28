@@ -118,7 +118,7 @@ theme	Customize	removed:/config theme	-	Use /config theme	Removed compatibility 
 think-back	Conversation	removed:/thinking back	thinkback	Use /thinking back	Removed compatibility command
 thinking	Conversation	active	think	/thinking <back>	Toggle extended thinking mode
 thinking back	Conversation	active	-	/thinking back	View earlier thinking traces
-update	Coven & Advanced	active	upgrade	/update <version|notes>	Check for updates and download the latest release
+update	Coven & Advanced	active	upgrade	/update [version|notes]	Check for updates and download the latest release
 update notes	Coven & Advanced	active	-	/update notes	Show recent Coven release notes
 update version	Coven & Advanced	active	-	/update version	Show the installed Coven version
 usage	Account & Models	active	-	/usage [cost|context|stats]	Show API usage, quotas, and rate limit status
