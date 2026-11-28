@@ -27,6 +27,8 @@ for row in [{'type':'system','subtype':'init','session_id':'synth-'+identity},{'
    time.sleep(.08)
   raise AssertionError((ui,str(p),pane()[-4500:]))
  def start(agent):
+  global tag
+  tag=p.name+'-'+str(time.monotonic_ns())
   env={'HOME':str(p),'COVEN_HOME':str(p),'COVEN_CODE_HOME':str(home),'COVEN_CODE_UI':ui,'COVEN_CODE_CLAUDE_BIN':str(cli),'COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','PATH':os.environ['PATH'],'LANG':'C.UTF-8','TERM':'xterm-256color'}
   cmd='exec env -i '+shlex.join([k+'='+v for k,v in env.items()]+[str(binary),'--agent',agent])
   tm('new-session','-d','-x','140','-y','45','-s','s','-c',str(p),cmd);wait(lambda:any(x in pane() for x in ['shortcuts','preview','Coven v']));time.sleep(.45)
