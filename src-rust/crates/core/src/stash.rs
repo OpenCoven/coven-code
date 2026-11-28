@@ -242,6 +242,8 @@ impl StashStore {
     }
 
     fn insert(&self, item: &StashItem) -> Result<(), StashError> {
+        let created_at_ms = i64::try_from(item.created_at_ms)
+            .map_err(|_| StashError::Db("created_at_ms exceeds SQLite integer range".into()))?;
         self.conn
             .execute(
                 "INSERT INTO stash_items
@@ -257,7 +259,7 @@ impl StashStore {
                     item.tags.join(","),
                     item.project,
                     item.session_id,
-                    item.created_at_ms,
+                    created_at_ms,
                 ],
             )
             .map_err(|e| StashError::Db(e.to_string()))?;
@@ -378,6 +380,7 @@ impl StashStore {
             .query_map([], |row| {
                 let kind_str: String = row.get(1)?;
                 let tags_str: String = row.get(6)?;
+                let created_at_ms: i64 = row.get(9)?;
                 Ok(StashItem {
                     id: row.get(0)?,
                     kind: StashKind::parse(&kind_str).unwrap_or(StashKind::Link),
@@ -392,7 +395,8 @@ impl StashStore {
                         .collect(),
                     project: row.get(7)?,
                     session_id: row.get(8)?,
-                    created_at_ms: row.get(9)?,
+                    created_at_ms: u64::try_from(created_at_ms)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(9, created_at_ms))?,
                 })
             })
             .map_err(|e| StashError::Db(e.to_string()))?;
@@ -443,6 +447,43 @@ mod tests {
         assert_eq!(tagged.len(), 1);
         assert_eq!(tagged[0].value, "https://example.com/a");
         assert_eq!(tagged[0].title.as_deref(), Some("Example A"));
+    }
+
+    #[test]
+    fn timestamp_sqlite_range_is_checked() {
+        let (_dir, store) = temp_store();
+        let mut item = store
+            .add_link("https://example.com", None, None, &[], None, None)
+            .unwrap();
+        assert_eq!(
+            store.get(&item.id, None).unwrap().created_at_ms,
+            item.created_at_ms
+        );
+
+        item.id = "max".to_string();
+        item.created_at_ms = i64::MAX as u64;
+        store.insert(&item).unwrap();
+        assert_eq!(
+            store.get(&item.id, None).unwrap().created_at_ms,
+            item.created_at_ms
+        );
+
+        item.id = "overflow".to_string();
+        item.created_at_ms += 1;
+        assert!(matches!(store.insert(&item), Err(StashError::Db(_))));
+        assert_eq!(store.list(&StashFilter::default()).unwrap().len(), 2);
+
+        store
+            .conn
+            .execute(
+                "UPDATE stash_items SET created_at_ms = -1 WHERE id = 'max'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.list(&StashFilter::default()),
+            Err(StashError::Db(_))
+        ));
     }
 
     #[test]
