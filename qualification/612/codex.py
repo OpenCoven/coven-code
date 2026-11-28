@@ -38,6 +38,8 @@ for ui in ['classic','next']:
    time.sleep(.08)
   raise AssertionError((ui,str(p),'timed out at '+str(sys._getframe(1).f_lineno)))
  def start(agent):
+  global tag
+  tag=p.name+'-'+str(time.monotonic_ns())
   env={'HOME':str(p),'COVEN_HOME':str(p),'COVEN_CODE_HOME':str(home),'COVEN_CODE_UI':ui,'COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','PATH':os.environ['PATH'],'LANG':'C.UTF-8','TERM':'xterm-256color'}
   cmd='exec env -i '+shlex.join([k+'='+v for k,v in env.items()]+[str(binary),'--agent',agent,'--model','codex/gpt-5-codex'])
   tm('new-session','-d','-x','140','-y','45','-s','s','-c',str(p),cmd);wait(lambda:any(x in pane() for x in ['shortcuts','preview','Coven v']));time.sleep(.45)
