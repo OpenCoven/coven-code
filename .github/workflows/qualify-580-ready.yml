@@ -7,7 +7,7 @@ permissions:
   pull-requests: read
   checks: read
   actions: read
-  statuses: read
+  statuses: write
 jobs:
   readiness:
     runs-on: ubuntu-latest
@@ -27,3 +27,12 @@ jobs:
             sleep 60
           done
           exit 1
+      - name: Record the readiness result on this verification commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          state=failure
+          if [ "$RESULT" = success ]; then state=success; fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state="$state" -f context=pr-ready-verification -f description="Repository readiness script for PR 601" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
