@@ -10,6 +10,8 @@ permissions:
 jobs:
   conpty:
     runs-on: windows-2022
+    env:
+      PYTHONUTF8: '1'
     timeout-minutes: 65
     steps:
       - uses: actions/checkout@v5
@@ -21,7 +23,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for attempt in $(seq 1 90); do
-            if gh run download 46123165208 --repo "$GITHUB_REPOSITORY" -n windows-611-native-fixtures -D binaries; then break; fi
+            if gh run download 46123571349 --repo "$GITHUB_REPOSITORY" -n windows-611-native-fixtures -D binaries; then break; fi
             sleep 30
           done
           test -f binaries/exact/coven-code.exe && test -f binaries/fixture/coven-code.exe
