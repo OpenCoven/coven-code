@@ -105,7 +105,10 @@ pub enum CommandResult {
     RefreshProviderState,
     /// Activate a speech mode (caveman/rocky) with level, or deactivate (normal).
     /// (mode, level) — mode=None means deactivate.
-    SpeechMode { mode: Option<String>, level: String },
+    SpeechMode {
+        mode: Option<String>,
+        level: String,
+    },
     /// A Coven daemon listing to run off the interactive loop's thread
     /// (#580); see [`DaemonListing`].
     DaemonListing(DaemonListing),

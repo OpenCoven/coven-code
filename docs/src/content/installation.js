@@ -60,6 +60,8 @@ bun install -g @opencoven/cli@latest</code></pre>
 coven engine which
 coven doctor</code></pre>
 
+    <p>In a standalone build with the in-app updater, enter <code>/update</code> in an idle Classic or Next session. If a newer release is available, the session exits and the updater checks the archive against that release’s <code>SHA256SUMS</code> before replacing the running executable. Relaunch the same path with <code>--version</code> to confirm the installed version. If the checksum is rejected, relaunch the original executable and retry once the release archive and manifest agree. If a response is active, wait for it to finish before updating.</p>
+
     <p>For standalone installs, use the chosen release's verified installer or archive. A standalone update does not override the managed engine. Back up affected engine configuration and sessions and retain a verified prior binary before upgrading. Standalone data normally lives in <code>~/.coven-code</code>; under Coven, in <code>~/.coven/code</code>. Inspect environment overrides and migration symlinks before backup or removal.</p>
 
     <p>For releases with <code>SHA256SUMS</code>, verify the selected archive against the exact entry from the same release before extraction. The next-release checksum-verifying installers require the full five-archive manifest and reject historical releases without it, including v0.8.0. Do not bypass verification for rollback; use an independently verified prior artifact and compatible data. Same-release HTTPS checksums are not independently signed attestations.</p>
