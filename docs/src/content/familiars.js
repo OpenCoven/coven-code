@@ -11,6 +11,8 @@ export function render() {
 
     <p>After <code>/familiar handoff &lt;name&gt;</code>, you can keep typing while Coven waits for the session ID. A request times out after five seconds without a complete reply. If a handoff times out, check <code>/coven sessions</code> before trying again. The daemon may have created the session before its reply was lost.</p>
 
+    <p>If you quit while the daemon is busy, Coven waits up to two seconds for pending ledger registration and up to two more for completion. You can close the familiar menu while its live badges are loading.</p>
+
     <h2>What Is a Familiar?</h2>
 
     <p>A familiar is a named AI persona defined in the Coven ecosystem. Each familiar has an identity (display name, emoji, pronouns), a role description, and optional metadata used to shape how the model presents itself and reasons about tasks. Familiars are user-defined and live in <code>~/.coven/familiars.toml</code>, managed by the Coven daemon.</p>

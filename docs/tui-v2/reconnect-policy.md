@@ -524,9 +524,20 @@ in flight, and the process then ends at once.
 
 ## Daemon responsiveness qualification
 
-The #580 follow-up uses a private tmux server and a local Unix socket for each renderer and fixture. On the #601 baseline, a silent or trickling daemon delayed composer input for 5.008–5.238 seconds after a handoff and 5.013–5.050 seconds after an events request. With those calls on the background worker, the same measurements were 0.018–0.102 seconds for handoff and 0.012–0.013 seconds for events. Each handoff sent one create request. With the ledger disabled, quit during a pending handoff or events request took 0.171–0.290 seconds.
+Local tmux runs exercised Classic and Next with the daemon ledger enabled. Each range below covers both renderers against a listener that accepts a request and stays silent or sends one byte every half second. The baseline was #601 at `4632fd9d`. The follow-up used the same commands, fixture, and terminal size.
 
-The familiar menu reads the local roster immediately and applies live badges only to the open menu that requested them. In Classic and Next the menu appeared within 0.017 seconds across the healthy, silent, and trickling fixtures. With the ledger enabled, tmux case 37 observed the unanswered ledger completion and an exit in about two seconds in both renderers. The case also covers duplicate handoffs and clearing the transcript during a pending handoff. In a separate fixture, the daemon returned a successful session ID after the clear. Neither renderer displayed that reply in the replacement conversation. Reconnect epoch handling and release acceptance remain separate checks.
+| Observation | Baseline | Follow-up |
+| --- | --- | --- |
+| Handoff keypress to redraw | 5.022–5.056 s | 0.015–0.021 s |
+| Events keypress to redraw | 5.030–5.060 s | 0.014–0.103 s |
+| Open the familiar menu | 5.023–5.066 s | 0.011–0.085 s |
+| Quit following a handoff | 2.915–3.025 s | 4.190–4.283 s |
+
+The healthy control returned one new session for each handoff with the expected familiar, project, harness, and context. Both renderers showed success. A repeated handoff while the first was pending sent one create request in total. A successful reply released after a clear or confirmed rewind reached neither replacement conversation.
+
+Quit was timed from the first Ctrl+C until the process exited. In the baseline the composer accepted the marker after the request had timed out, so the registration had a head start by the time quit was tested. In the follow-up quit began while the request and launch registration were pending. That path has two separate two-second ledger waits. In the settled-registration fixture, exit took about two seconds. Connect, write, and read share one five-second request deadline, including when a peer trickles bytes.
+
+Hosted Rust CI and TUI Tests check the PR heads independently. The response times above come from the local fixtures. Reconnect epoch handling and release acceptance remain separate checks.
 
 ## Real-daemon recovery journey
 

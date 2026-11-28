@@ -39,6 +39,8 @@ Open `/familiar` to see locally configured familiars. The menu fetches live badg
 
 After `/familiar handoff <name>`, you can keep typing while Coven waits for the session ID. A request times out after five seconds without a complete reply. If a handoff times out, check `/coven sessions` before trying again. The daemon may have created the session before its reply was lost.
 
+If you quit while the daemon is busy, Coven waits up to two seconds for pending ledger registration and up to two more for completion. You can close the familiar menu while its live badges are loading.
+
 ## The `/agents` overlay
 
 Open the agents panel with the `/agents` slash command inside an interactive session. The overlay splits the list into two sections:

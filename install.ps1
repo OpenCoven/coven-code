@@ -13,6 +13,7 @@ param(
     [string]$Binary = "",
     [string]$InstallDir = "",
     [switch]$NoModifyPath,
+    [switch]$Force,
     [switch]$Help
 )
 
@@ -141,11 +142,14 @@ Options:
     -Binary <path>          Install from a local binary instead of downloading
     -InstallDir <path>      Override install location (default: %USERPROFILE%\.coven-code\bin)
     -NoModifyPath           Don't add the install dir to user PATH
+    -Force                  Replace an existing coven-code that differs from this one
+                            without asking (or set COVEN_CODE_INSTALL_FORCE=1)
 
 Examples:
     irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
     .\install.ps1 -Version 0.1.0
     .\install.ps1 -Binary C:\path\to\coven-code.exe
+    $env:COVEN_CODE_INSTALL_FORCE = '1'; try { irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex } finally { Remove-Item Env:COVEN_CODE_INSTALL_FORCE }
 "@
 }
 
@@ -186,21 +190,27 @@ function Resolve-Version {
 }
 
 # ----- Already-installed check -----
+# The version an engine reports as 'coven-code <version>', or 'unknown'.
+function Get-EngineVersion([string]$Path) {
+    try {
+        $vline = [string]($null | & $Path --version 2>&1 | Select-Object -First 1)
+    } catch {
+        return 'unknown'
+    }
+    if ($vline.Trim() -cmatch '^coven-code\s+v?(\S+)$') { return $Matches[1] }
+    return 'unknown'
+}
+
 function Check-Existing($desiredVersion) {
     $existing = Get-Command coven-code -ErrorAction SilentlyContinue
     if ($null -eq $existing) { return }
-    try {
-        $vline = (& coven-code --version) 2>&1 | Select-Object -First 1
-        $installed = ($vline -split '\s+')[-1]
-    } catch {
-        $installed = 'unknown'
-    }
+    $installed = Get-EngineVersion 'coven-code'
     if ($installed -eq $desiredVersion) {
         Write-Muted "Version $desiredVersion already installed at $($existing.Source)"
         Write-Muted "Use -Version to install a different one."
         exit 0
     }
-    Write-Muted "Found existing coven-code at $($existing.Source) (v$installed) - upgrading to v$desiredVersion"
+    Write-Muted "Found existing coven-code at $($existing.Source) (v$installed) - installing v$desiredVersion"
 }
 
 # ----- Download & extract -----
@@ -261,9 +271,9 @@ function Download-And-Install($desiredVersion, $arch, $Boundaries = $null) {
 
     try {
         if ($null -eq $Boundaries) {
-            Install-Binary $extractedExe
+            Install-Binary $extractedExe $desiredVersion
         } else {
-            & $Boundaries.Install $extractedExe
+            & $Boundaries.Install $extractedExe $desiredVersion
         }
     } finally {
         Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
@@ -287,9 +297,33 @@ function Install-FromBinary {
     }
 }
 
-function Install-Binary($source) {
+# Replacing an engine that differs from the one being installed needs the
+# user's consent (#369): -Force, COVEN_CODE_INSTALL_FORCE=1, or a yes at the
+# prompt. The same bytes, or a download of the version the existing engine
+# reports, need none.
+function Confirm-Replace([string]$Source, [string]$Target, [string]$DesiredVersion) {
+    if ($Force -or $env:COVEN_CODE_INSTALL_FORCE -eq '1') { return }
+    if (-not (Test-Path -LiteralPath $Target -PathType Leaf)) { return }
+    $new = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+    if ($new -eq (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash) { return }
+    $installed = Get-EngineVersion $Target
+    if (-not [string]::IsNullOrEmpty($DesiredVersion) -and $installed -eq $DesiredVersion) { return }
+    $incoming = if ([string]::IsNullOrEmpty($DesiredVersion)) { 'the local binary' } else { "v$DesiredVersion" }
+    $found = if ($installed -eq 'unknown') { 'version unknown' } else { "v$installed" }
+    Write-Warn "$Target is a different coven-code ($found) from the one being installed ($incoming)."
+    if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+        # Read-Host fails under -NonInteractive; that is a no.
+        try { $reply = Read-Host 'Replace it? [y/N]' } catch { $reply = '' }
+        if ($reply -match '^(y|yes)$') { return }
+    }
+    Write-Err "Left the existing coven-code in place. To replace it, rerun with -Force, or set COVEN_CODE_INSTALL_FORCE=1 (with irm: `$env:COVEN_CODE_INSTALL_FORCE = '1' first)."
+    throw "Existing coven-code at $Target was not replaced"
+}
+
+function Install-Binary($source, $desiredVersion = '') {
     $target = Join-Path $InstallDir 'coven-code.exe'
     $aliasTarget = Join-Path $InstallDir 'coven-cave.exe'
+    Confirm-Replace $source $target $desiredVersion
     # `coven.exe` belongs to the Coven daemon CLI (@opencoven/cli); older
     # installers shipped it as an alias, so clean it up on upgrade.
     $staleShort = Join-Path $InstallDir 'coven.exe'

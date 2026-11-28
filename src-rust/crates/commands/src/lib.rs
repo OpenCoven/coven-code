@@ -3154,11 +3154,15 @@ fn finish_doctor_report(
     client: Option<claurst_core::coven_shared::DaemonClient>,
 ) -> String {
     match client {
+        #[cfg(not(unix))]
+        None => {
+            lines.push("  • The Coven daemon client is unsupported on this platform.".to_string())
+        }
+        #[cfg(unix)]
         None => {
             // Name the socket path the client uses, which follows
             // COVEN_HOME. On Unix that is the file `DaemonClient::new`
-            // just looked for; elsewhere it opens no socket and always
-            // lands here.
+            // just looked for.
             lines.push(match claurst_core::coven_shared::daemon_socket_path() {
                 Some(sock) => format!("  • Daemon not installed (no {})", sock.display()),
                 None => "  • Daemon not installed (no socket path: COVEN_HOME is unset or \
@@ -4042,6 +4046,8 @@ impl SlashCommand for ReviewCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            working_dir: Some(ctx.working_dir.clone()),
+            cli_session: Default::default(),
             permission_mode: None,
         };
 
@@ -6298,6 +6304,8 @@ impl SlashCommand for RenameCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            working_dir: Some(ctx.working_dir.clone()),
+            cli_session: Default::default(),
             permission_mode: None,
         };
 
@@ -13473,9 +13481,15 @@ mod tests {
                 // Either the daemon is installed and we report status/version,
                 // or it isn't and we point at the install hint. Both paths
                 // must produce a non-empty section.
+                #[cfg(unix)]
                 let has_status = msg.contains("Daemon online")
                     || msg.contains("Daemon socket present")
                     || msg.contains("Daemon not installed");
+                #[cfg(not(unix))]
+                let has_status = msg
+                    .contains("The Coven daemon client is unsupported on this platform.")
+                    && !msg.contains("Daemon not installed")
+                    && !msg.contains("npm install -g @opencoven/coven");
                 assert!(
                     has_status,
                     "/doctor substrate section is empty, got:\n{msg}"
@@ -14223,6 +14237,7 @@ mod tests {
     /// (`$COVEN_HOME/coven.sock`), not a fixed `~/.coven` path. The guard
     /// points HOME and COVEN_HOME at a fresh tempdir with no socket, so this
     /// never reads the real `~/.coven` or reaches a running daemon.
+    #[cfg(unix)]
     #[test]
     fn doctor_names_the_socket_under_coven_home() {
         let guard = CommandEnvGuard::with_coven_home(None);

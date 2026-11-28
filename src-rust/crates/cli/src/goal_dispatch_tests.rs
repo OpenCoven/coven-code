@@ -65,21 +65,31 @@ fn goal_dispatch_recovery_blocks_actual_idle_selector() {
     app.context_window_size = 100;
     app.context_used_tokens = 99;
     app.auto_compact_threshold = 90;
-    assert_eq!(select_idle_compaction(&app, false), Some(99));
+    // Long enough to have a head to summarise (#571).
+    let history: Vec<claurst_core::types::Message> = (0..12)
+        .map(|n| claurst_core::types::Message::user(format!("m {n}")))
+        .collect();
+    assert_eq!(
+        select_idle_compaction(&app, false, &history),
+        Some(IdleCompaction::Start(99))
+    );
     app.open_rate_limit_recovery("limited".into(), Some(60));
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "visible recovery must own idle time"
     );
     app.rate_limit_recovery.request_retry(None);
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "pending retry must own idle time"
     );
     assert!(app.rate_limit_recovery.take_retry_directive().is_some());
-    assert_eq!(select_idle_compaction(&app, false), Some(99));
+    assert_eq!(
+        select_idle_compaction(&app, false, &history),
+        Some(IdleCompaction::Start(99))
+    );
 }
 
 fn context(path: PathBuf) -> ToolContext {
@@ -1352,17 +1362,21 @@ fn goal_dispatch_file_preparation_blocks_idle_compaction() {
     app.context_window_size = 100;
     app.context_used_tokens = 99;
     app.auto_compact_threshold = 90;
+    // Long enough to have a head to summarise (#571).
+    let history: Vec<claurst_core::types::Message> = (0..12)
+        .map(|n| claurst_core::types::Message::user(format!("m {n}")))
+        .collect();
     app.file_injection_dialog
         .show("@large.txt".into(), vec![], vec![], 1, None);
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "file preparation must retain its original owner"
     );
     app.file_injection_dialog.dismiss();
     app.file_injection_force = true;
     assert_eq!(
-        select_idle_compaction(&app, false),
+        select_idle_compaction(&app, false, &history),
         None,
         "prepared resubmission must retain its owner"
     );
@@ -1492,4 +1506,85 @@ fn goal_dispatch_file_confirmation_retains_original_capture_and_abort_releases_i
                 }
             }
         });
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn keyless_parent_resumes_after_agent_tool_returns() {
+    use claurst_tools::Tool;
+    use std::os::unix::fs::PermissionsExt;
+
+    if isolated("keyless_parent_resumes_after_agent_tool_returns") {
+        return;
+    }
+    let home = PathBuf::from(std::env::var_os("COVEN_CODE_HOME").unwrap())
+        .canonicalize()
+        .unwrap();
+    let fixture = PathBuf::from(std::env::var_os("COVEN_CODE_CLAUDE_BIN").unwrap());
+    std::fs::write(
+        &fixture,
+        include_str!("../tests/fixtures/keyless_claude.py"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut ctx = context(home.join("goals.sqlite"));
+    ctx.goal_turn = claurst_core::goal::GoalTurnContext::Captured(None);
+    let settings = claurst_api::client::ClientConfig::default();
+    let config = claurst_query::QueryConfig {
+        provider_registry: Some(Arc::new(claurst_api::ProviderRegistry::from_config(
+            &ctx.config,
+            settings.clone(),
+        ))),
+        ..Default::default()
+    };
+    let client = Arc::new(claurst_api::AnthropicClient::new(settings).unwrap());
+    let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    for label in ["P1", "P2"] {
+        messages
+            .lock()
+            .await
+            .push(claurst_core::types::Message::user(label));
+        let (events, mut receiver) = tokio::sync::mpsc::channel(16);
+        let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+        let outcome = InteractiveQuery {
+            client: client.clone(),
+            context: ctx.clone(),
+            tools: Arc::new(Vec::new()),
+            config: config.clone(),
+            tracker: ctx.cost_tracker.clone(),
+            events,
+            generation: Default::default(),
+            cancel: Default::default(),
+        }
+        .spawn(messages.clone())
+        .await
+        .unwrap();
+        drain.await.unwrap();
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        if label == "P1" {
+            let child = claurst_query::AgentTool
+                .execute(
+                    serde_json::json!({"description":"fixture","prompt":"S1","tools":[]}),
+                    &ctx,
+                )
+                .await;
+            assert!(!child.is_error, "{}", child.content);
+        }
+    }
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(home.join("launches"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        serde_json::json!(rows),
+        serde_json::json!([
+            ["P1", home, null],
+            ["S1", home, null],
+            ["P2", home, "fixture-P1"]
+        ])
+    );
 }

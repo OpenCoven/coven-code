@@ -141,6 +141,31 @@ fn each_setting_shows_at_once_and_a_revert_restores_the_same_frame() {
 }
 
 #[test]
+fn reset_preserves_an_explicit_motion_preview_until_revert() {
+    for (saved_motion, preview_value, preview, reverted) in [
+        (false, "true", Motion::Reduced, Motion::Full),
+        (true, "false", Motion::Full, Motion::Reduced),
+    ] {
+        let saved = Settings {
+            reduce_motion: saved_motion,
+            ..Settings::default()
+        };
+        let mut app = app();
+        run(
+            &mut app,
+            &saved,
+            &format!("reduceMotion {preview_value}"),
+            SPLIT,
+        );
+        assert_eq!(app.next_presentation.appearance.motion, preview);
+        run(&mut app, &saved, "reset", SPLIT);
+        assert_eq!(app.next_presentation.appearance.motion, preview);
+        run(&mut app, &saved, "revert", SPLIT);
+        assert_eq!(app.next_presentation.appearance.motion, reverted);
+    }
+}
+
+#[test]
 fn a_refused_value_changes_nothing_and_says_what_is_accepted() {
     let saved = Settings::default();
     let mut app = app();

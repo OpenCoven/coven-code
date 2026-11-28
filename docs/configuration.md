@@ -87,10 +87,12 @@ Under Next, `/config appearance` (or `/settings appearance`) previews these befo
 /config appearance density compact  Preview one; it shows at once and is not saved
 /config appearance save             Keep the preview in your settings file
 /config appearance revert           Drop the preview
-/config appearance reset            Preview the defaults; save keeps them
+/config appearance reset            Preview defaults for the six nextAppearance settings
 ```
 
-A save changes only the settings you previewed. Every other setting keeps its effect, and every key this version does not know is kept with its value. The file is written back with its keys in alphabetical order. Inside `nextAppearance`, `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out whenever they hold their default, including ones you did not preview, since leaving them out means the same; `hints` is written as you set it, and an empty `nextAppearance` is removed. After a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
+A save changes only the settings you previewed. Every other setting keeps its effect, and every key this version does not know is kept with its value. The file is written back with its keys in alphabetical order. Inside `nextAppearance`, `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out whenever they hold their default, including ones you did not preview, since leaving them out means the same; `hints` is written as you set it, and an empty `nextAppearance` is removed. After a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone.
+
+Project values for the six `nextAppearance` settings take precedence inside that folder. Reset preserves your current `reduceMotion` choice, including an unsaved preview. On load, reduced motion is enabled if either your user settings or the project settings enable it. A project value of `false` leaves a user value of `true` in effect. `/config theme` chooses Classic's theme and does not change Next's.
 
 Measured contrast and its limits are in the [contrast record](tui-v2/contrast.md).
 
@@ -386,13 +388,26 @@ loaded. Changing the saved mode with the `Config` tool needs the same approval
 as any other write; a session in `bypassPermissions` gives it without asking.
 The settings screen never saves the session's mode.
 
-Two limits to know about:
+`/config import` reloads your engine-global settings into the open session
+under the same rule. A mode chosen at launch (`--permission-mode` or
+`--dangerously-skip-permissions`) stays. Otherwise a saved `acceptEdits` or
+`plan` applies, as at a start, even over a mode chosen in the session (a
+saved `acceptEdits` replaces a session's `plan`). A saved `default` or
+`bypassPermissions` leaves the session's mode as it is, so the reload never
+moves it to `default` or to bypass. A notification says when the mode changed
+or a saved bypass was not restored.
 
-- `coven-code acp` takes no `--permission-mode` and is not covered by the list
-  above: it loads the mode saved in engine-global settings, including a saved
-  `bypassPermissions`, with `plan` treated as `default`. Its tool approvals
-  still go to the connected client; the saved mode reaches the keyless
-  `claude` transport and the PowerShell risk gate.
+`coven-code acp` takes no `--permission-mode` and reads no setting or variable
+that opts in to bypass. It loads the mode saved in engine-global settings: a
+saved `acceptEdits` applies, `plan` runs as `default` (ACP has no interactive
+plan approval), and a saved `bypassPermissions` is never restored. ACP then
+runs in `default` and logs `Saved bypass mode not restored` to stderr (at the
+default `COVEN_CODE_ACP_LOG` level); the protocol stream is unchanged. The
+mode decides which tool calls ask the connected client, and reaches the
+keyless `claude` transport and the PowerShell risk gate.
+
+One limit to know about:
+
 - An engine-global `default` cannot be told apart from no saved mode, so it
   does not override an `acceptEdits`, `plan` or `bypassPermissions` in the
   shared file: `/config set permission-mode default` reports success and the
@@ -605,7 +620,8 @@ and `api_base` override the corresponding environment variables.
 | `COVEN_CODE_PROVIDER` | Active provider. Equivalent to `--provider`. |
 | `COVEN_CODE_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api-base`. |
 | `COVEN_CODE_GOALS` | Set to `0` to disable the goal system (`/coven goal` command and `GoalCompleteTool`). |
-| `COVEN_CODE_DISABLE_UPDATE_CHECK` | Set to skip the release check an interactive session makes at startup: a request to GitHub's releases API unless a result from the last 24 hours is cached, and the update notice that follows. The variable only has to be present, so `0` or an empty value also disables the check; unset it to restore the default. `/update` and `coven-code upgrade` still contact GitHub when you run them. The model catalog refresh at startup is separate: see `COVEN_CODE_DISABLE_MODELS_FETCH` in [providers.md](providers.md). |
+| `COVEN_CODE_DISABLE_UPDATE_CHECK` | Set to skip the release check an interactive session makes at startup: a request to GitHub's releases API unless a result from the last 24 hours is cached, and the update notice that follows. The variable only has to be present, so `0` or an empty value also disables the check; unset it to restore the default. `/update` and `coven-code upgrade` still contact GitHub when you run them. The model catalog refresh at startup is separate: see `COVEN_CODE_DISABLE_MODELS_FETCH` in [providers.md](providers.md). `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` turns off both. |
+| `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Set to turn off the startup release check (as `COVEN_CODE_DISABLE_UPDATE_CHECK` does) and the model catalog refresh from models.dev (as `COVEN_CODE_DISABLE_MODELS_FETCH` does, so `coven-code models --refresh` fetches nothing either). These are the two requests this build makes without being asked. Like the other two variables, it only has to be present, so `0` or an empty value counts. Other requests still run: model turns, MCP servers you configured, web tools, `/update` and `coven-code upgrade`. It does not reach the `claude` program that Claude turns run through when no API key is set; that program has its own settings. |
 | `COVEN_CODE_BRIDGE_URL` | Enable the remote-control bridge by setting the server URL. |
 | `COVEN_CODE_BRIDGE_TOKEN` | Bearer token for the remote-control bridge. |
 | `RUST_LOG` | Tracing filter (e.g. `debug`, `claurst_core=trace`). |

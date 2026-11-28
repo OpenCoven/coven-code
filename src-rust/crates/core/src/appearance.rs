@@ -122,9 +122,9 @@ impl AppearanceEdits {
         Ok(())
     }
 
-    /// Clear every appearance setting back to its default.
+    /// Reset the six nextAppearance keys while keeping any pending motion edit.
     pub fn reset_all(&mut self) {
-        self.changes = EDITABLE_KEYS.iter().map(|key| (*key, None)).collect();
+        self.changes.extend(KEYS.iter().map(|key| (*key, None)));
     }
 
     pub fn is_empty(&self) -> bool {
@@ -449,7 +449,7 @@ mod tests {
         let mut edits = AppearanceEdits::default();
         edits.reset_all();
         edits.apply_to(&mut layer);
-        assert_eq!(edits.reduce_motion(), Some(false));
+        assert_eq!(edits.reduce_motion(), None);
         assert_eq!(layer.density, Density::Comfortable);
         assert_eq!(layer.layout, LayoutChoice::Focus);
         assert!(!layer.hints);

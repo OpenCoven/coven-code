@@ -574,6 +574,7 @@ pub struct QueryConfig {
     pub output_style: claurst_core::system_prompt::OutputStyle,
     pub output_style_prompt: Option<String>,
     pub working_directory: Option<String>,
+    pub cli_session: claurst_api::ClaudeCliSession,
     pub thinking_budget: Option<u32>,
     pub temperature: Option<f32>,
     /// Maximum cumulative character count of all tool results in the message
@@ -635,6 +636,7 @@ impl Default for QueryConfig {
             output_style: claurst_core::system_prompt::OutputStyle::Default,
             output_style_prompt: None,
             working_directory: None,
+            cli_session: Default::default(),
             thinking_budget: None,
             temperature: None,
             tool_result_budget: 50_000,
@@ -1846,6 +1848,8 @@ pub async fn run_query_loop_with_receipt(
     cancel_token: tokio_util::sync::CancellationToken,
     pending_messages: Option<&mut Vec<String>>,
 ) -> QueryRun {
+    // A backpressured consumer must not hold a cancelled turn (#572).
+    let event_tx = event_tx.map(|sink| sink.watching(cancel_token.clone()));
     let overload_observer = event_tx.clone();
     let mut retrievals = retrieval_journal::RetrievalJournal::default();
     let mut num_turns = 0;
@@ -2516,6 +2520,8 @@ async fn run_query_loop_inner(
                             config.effort_level,
                             effective_thinking_budget,
                         ),
+                        working_dir: Some(tool_ctx.working_dir.clone()),
+                        cli_session: config.cli_session.clone(),
                         permission_mode: Some(tool_ctx.config.permission_mode.clone()),
                     };
 
@@ -3536,7 +3542,9 @@ async fn run_query_loop_inner(
                         return QueryOutcome::Error(e);
                     }
                 }
-            } else if compact::should_compact(usage.input_tokens, context_limit) {
+            } else if compact::should_compact(usage.input_tokens, context_limit)
+                && compact::reactive_head_len(messages) > 0
+            {
                 if let Some(ref tx) = event_tx {
                     let _ = tx
                         .emit(QueryEvent::Status("Compacting context...".to_string()))
@@ -3600,8 +3608,6 @@ async fn run_query_loop_inner(
             }
         } else if stop == "end_turn" || stop == "tool_use" {
             // Proactive auto-compact (original path, used when reactive compact is off).
-            let compaction_required =
-                compact::should_auto_compact(usage.input_tokens, &config.model, &compact_state);
             let original_messages = messages.clone();
             let compaction_result = {
                 let compaction = compact::auto_compact_if_needed(
@@ -3631,7 +3637,7 @@ async fn run_query_loop_inner(
                     .await;
                     return QueryOutcome::Cancelled;
                 }
-                Some(Some(new_messages)) => {
+                Some(compact::AutoCompactOutcome::Compacted(new_messages)) => {
                     require_goal_work!(assistant_msg);
                     *messages = new_messages;
                     if let Some(ref tx) = event_tx {
@@ -3642,7 +3648,7 @@ async fn run_query_loop_inner(
                             .await;
                     }
                 }
-                Some(None) if compaction_required => {
+                Some(compact::AutoCompactOutcome::Failed) => {
                     *messages = original_messages;
                     require_goal_work!(assistant_msg);
                     finalize_terminal_assistant_with_unexecuted_tool_results(
@@ -3658,7 +3664,13 @@ async fn run_query_loop_inner(
                         "Auto-compaction failed after a completed response".to_string(),
                     ));
                 }
-                Some(None) => {}
+                // Over the threshold with too few messages to summarise
+                // (#571): nothing changed, so nothing is reported and the
+                // turn goes on exactly as below the threshold.
+                Some(
+                    compact::AutoCompactOutcome::NotNeeded
+                    | compact::AutoCompactOutcome::NothingToCompact,
+                ) => {}
             }
         }
 
@@ -5730,6 +5742,109 @@ mod tests {
         (outcome, events, messages, cost_tracker)
     }
 
+    /// #572: an interactive turn whose consumer has stopped draining, with
+    /// its backpressured buffer full, still ends promptly once cancelled.
+    #[tokio::test]
+    async fn a_cancelled_turn_does_not_wait_on_a_stalled_backpressured_consumer() {
+        const HELD_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"held\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"one\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"two\"}}\n\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let api_base = serve_anthropic_partial_sse(HELD_SSE).await;
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "test-key".to_string(),
+            api_base,
+            max_retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let cost_tracker = claurst_core::cost::CostTracker::new();
+        let tool_ctx = ToolContext {
+            working_dir: temp.path().to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: cost_tracker.clone(),
+            session_id: "stalled-consumer".to_string(),
+            goal_turn: Default::default(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+        let mut messages = vec![Message::user("test a stalled consumer")];
+        // One slot, and the receiver is never read: the consumer is stalled.
+        let (event_tx, mut stalled_consumer) = mpsc::channel(1);
+        let probe = event_tx.clone();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let query_config = make_config(None, None);
+        let query = run_query_loop_with_events(
+            &client,
+            &mut messages,
+            &[],
+            &tool_ctx,
+            &query_config,
+            cost_tracker,
+            Some(event_tx.into()),
+            cancel_token.clone(),
+            None,
+        );
+        tokio::pin!(query);
+        // Run the turn until its one slot is full and it waits for the next.
+        let filled = async {
+            while probe.capacity() > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        tokio::select! {
+            outcome = &mut query => panic!("the turn ended before the buffer filled: {outcome:?}"),
+            _ = tokio::time::timeout(std::time::Duration::from_secs(10), filled) => {}
+        }
+        assert_eq!(probe.capacity(), 0, "the buffer is full");
+        cancel_token.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), &mut query)
+            .await
+            .expect("a cancelled turn ends without waiting for the consumer");
+        assert!(matches!(outcome, QueryOutcome::Cancelled), "{outcome:?}");
+        // The consumer catches up: what the turn handed over after the cancel
+        // arrives, no stream event follows a durable one, and the channel
+        // then closes, so nothing is left holding it.
+        drop(probe);
+        let mut seen = Vec::new();
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stalled_consumer.recv())
+                .await
+                .expect("the channel closes once the turn's events are delivered")
+        {
+            seen.push(event);
+        }
+        let first_durable = seen
+            .iter()
+            .position(|event| !matches!(event, QueryEvent::Stream(_)))
+            .unwrap_or(seen.len());
+        assert!(
+            seen[first_durable..]
+                .iter()
+                .all(|event| !matches!(event, QueryEvent::Stream(_))),
+            "{seen:?}"
+        );
+    }
+
     async fn run_anthropic_sse_sequence_in_worktree(
         bodies: Vec<&'static str>,
         working_dir: &std::path::Path,
@@ -5812,6 +5927,7 @@ mod tests {
             output_style: claurst_core::system_prompt::OutputStyle::Default,
             output_style_prompt: None,
             working_directory: None,
+            cli_session: Default::default(),
             thinking_budget: None,
             temperature: None,
             tool_result_budget: 50_000,
@@ -7996,6 +8112,67 @@ mod tests {
         assert!(events
             .iter()
             .all(|event| !matches!(event, QueryEvent::TurnComplete { .. })));
+    }
+
+    /// #571: a response whose usage is over the auto-compact threshold, in a
+    /// history too short to have a head to summarise, is not compacted. The
+    /// turn ends as it would have, and no status claims a compaction.
+    #[tokio::test]
+    async fn a_full_window_in_a_short_history_is_not_reported_as_compacted() {
+        // The proactive path runs only with reactive compaction off.
+        let _feature_gate_lock = REACTIVE_COMPACT_FEATURE_GATE_LOCK.lock().await;
+
+        struct FeatureGateGuard {
+            prior: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for FeatureGateGuard {
+            fn drop(&mut self) {
+                match self.prior.take() {
+                    Some(value) => std::env::set_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT", value),
+                    None => std::env::remove_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT"),
+                }
+            }
+        }
+
+        let _feature_gate = FeatureGateGuard {
+            prior: std::env::var_os("COVEN_CODE_FEATURE_REACTIVE_COMPACT"),
+        };
+        std::env::remove_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT");
+        const FULL_WINDOW_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"full-window\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":190000,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a full answer\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+        let (outcome, events, messages) =
+            run_anthropic_sse(FULL_WINDOW_SSE, Config::default()).await;
+
+        assert!(
+            matches!(&outcome, QueryOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        let statuses: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::Status(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !statuses.iter().any(|text| text.contains("compacted")),
+            "nothing was compacted: {statuses:?}"
+        );
+        let texts: Vec<String> = messages.iter().map(Message::get_all_text).collect();
+        assert_eq!(texts, ["test Anthropic outcome", "a full answer"]);
     }
 
     #[tokio::test]

@@ -234,6 +234,15 @@ fn cells(text: &str) -> usize {
     text.graphemes(true).map(UnicodeWidthStr::width).sum()
 }
 
+/// Byte offset where the current line's content ends. A lone CR is content.
+fn line_end(text: &str, cursor: usize) -> usize {
+    let rest = &text[cursor..];
+    match rest.find('\n') {
+        Some(lf) => cursor + rest[..lf].strip_suffix('\r').map_or(lf, str::len),
+        None => text.len(),
+    }
+}
+
 /// `w` — start of next word.
 fn motion_w(text: &str, cursor: usize) -> usize {
     let rest = &text[cursor..];
@@ -703,10 +712,7 @@ fn vim_normal(
         }
         "A" => {
             *mode = VimMode::Insert;
-            *cursor = text[*cursor..]
-                .find('\n')
-                .map(|p| *cursor + p)
-                .unwrap_or(text.len());
+            *cursor = line_end(text, *cursor);
             false
         }
         "v" => {
@@ -735,10 +741,7 @@ fn vim_normal(
             false
         }
         "$" => {
-            *cursor = text[*cursor..]
-                .find('\n')
-                .map(|p| *cursor + p)
-                .unwrap_or(text.len());
+            *cursor = line_end(text, *cursor);
             false
         }
         "w" => {
@@ -884,10 +887,7 @@ fn vim_normal(
             false
         }
         "D" => {
-            let end = text[*cursor..]
-                .find('\n')
-                .map(|p| *cursor + p)
-                .unwrap_or(text.len());
+            let end = line_end(text, *cursor);
             if end > *cursor {
                 *yank_buf = text[*cursor..end].to_string();
                 text.drain(*cursor..end);
@@ -896,10 +896,7 @@ fn vim_normal(
             false
         }
         "C" => {
-            let end = text[*cursor..]
-                .find('\n')
-                .map(|p| *cursor + p)
-                .unwrap_or(text.len());
+            let end = line_end(text, *cursor);
             *yank_buf = text[*cursor..end].to_string();
             text.drain(*cursor..end);
             *mode = VimMode::Insert;
@@ -1071,49 +1068,27 @@ fn vim_g(
             *cursor = if count > 1 { motion_gg(text, count) } else { 0 };
             false
         }
-        "e" => {
-            // `ge` — end of previous word
+        "e" | "E" => {
             for _ in 0..count.max(1) {
                 if *cursor == 0 {
                     break;
                 }
-                let before = &text[..*cursor];
-                let chars = cluster_leads(before);
-                let n = chars.len();
-                let mut i = n;
-                while i > 0 && chars[i - 1].is_whitespace() {
-                    i -= 1;
-                }
-                if i == 0 {
-                    *cursor = 0;
-                    break;
-                }
-                let is_wc = is_word_char(chars[i - 1]);
-                while i > 1 && is_word_char(chars[i - 2]) == is_wc && !chars[i - 2].is_whitespace()
-                {
-                    i -= 1;
-                }
-                *cursor = cluster_idx_to_byte(before, i - 1);
-            }
-            false
-        }
-        "E" => {
-            // `gE` — end of previous WORD
-            for _ in 0..count.max(1) {
-                if *cursor == 0 {
-                    break;
-                }
-                let before = &text[..*cursor];
-                let chars = cluster_leads(before);
-                let n = chars.len();
-                let mut i = n;
-                while i > 0 && chars[i - 1].is_whitespace() {
-                    i -= 1;
-                }
-                while i > 1 && !chars[i - 2].is_whitespace() {
-                    i -= 1;
-                }
-                *cursor = cluster_idx_to_byte(before, i - 1);
+                let current = text[*cursor..].chars().next();
+                // Skip the rest of the current word to the left, then any
+                // whitespace. The next cluster is the previous word's end.
+                *cursor = text[..*cursor]
+                    .grapheme_indices(true)
+                    .rev()
+                    .filter_map(|(at, cluster)| Some((at, cluster.chars().next()?)))
+                    .skip_while(|&(_, ch)| {
+                        current.is_some_and(|c| {
+                            !c.is_whitespace()
+                                && !ch.is_whitespace()
+                                && (key == "E" || is_word_char(c) == is_word_char(ch))
+                        })
+                    })
+                    .find(|(_, ch)| !ch.is_whitespace())
+                    .map_or(0, |(at, _)| at);
             }
             false
         }
@@ -2031,8 +2006,9 @@ pub struct PromptInputState {
     pub vim_marks: std::collections::HashMap<char, (String, usize)>,
     /// The last modifying command for dot-repeat.
     pub vim_dot_action: Option<DotRepeatAction>,
-    /// Pending insert-mode text (accumulates between entering and leaving insert mode).
-    vim_insert_text_before: Option<String>,
+    /// The cursor and the text when Insert was last entered from a vim
+    /// command, for dot-repeat of what is typed before Escape.
+    vim_insert_start: Option<(usize, String)>,
     /// Command-line buffer for `:` command mode.
     pub vim_command_buf: String,
     /// In-prompt search buffer for `/` search mode.
@@ -2073,7 +2049,7 @@ impl PromptInputState {
             vim_macro_content: std::collections::HashMap::new(),
             vim_marks: std::collections::HashMap::new(),
             vim_dot_action: None,
-            vim_insert_text_before: None,
+            vim_insert_start: None,
             vim_command_buf: String::new(),
             vim_search_buf: String::new(),
             vim_search_last: None,
@@ -2207,13 +2183,9 @@ impl PromptInputState {
         if self.mode == InputMode::Readonly {
             return;
         }
-        let line_end = self.text[self.cursor..]
-            .find('\n')
-            .map(|p| self.cursor + p)
-            .unwrap_or(self.text.len());
-
-        if line_end > self.cursor {
-            let killed = self.text.drain(self.cursor..line_end).collect::<String>();
+        let end = line_end(&self.text, self.cursor);
+        if end > self.cursor {
+            let killed = self.text.drain(self.cursor..end).collect::<String>();
             self.kill_ring.push(killed);
             self.update_token_estimate();
         }
@@ -2442,27 +2414,26 @@ impl PromptInputState {
     pub fn vim_command(&mut self, key: &str) {
         // ---- Escape always cancels recording, pending state, returns to Normal ----
         if key == "Escape" {
-            // If leaving insert mode, finalise dot-repeat insert action
+            // Leaving Insert records what was typed since entering it, for
+            // dot-repeat: the text from the cursor at entry to the cursor
+            // now. It is recorded only when the text before the entry cursor
+            // and the text after the cursor are both as they were at entry,
+            // so the net edit was that one insertion. After any other edit,
+            // such as a delete before the insert or typing after moving away,
+            // nothing is recorded.
             if self.vim_mode == VimMode::Insert {
-                if let Some(before) = self.vim_insert_text_before.take() {
-                    // Compute inserted text as the new characters added since mode entry
-                    let inserted = if self.text.len() >= before.len() {
-                        // Simple case: text only grew (cursor at end of inserted span)
-                        let from = before.len().min(self.cursor);
-                        let _ = from; // use cursor-based diff below
-                                      // Find the diff between before/after texts at current cursor
-                                      // Inserted = text[insert_start..cursor] but we don't track start.
-                                      // Approximate: whole text minus before, substring at cursor.
-                                      // Better: store cursor-at-entry and extract.
-                        self.text
-                            [before.len().min(self.text.len())..self.cursor.min(self.text.len())]
-                            .to_string()
+                if let Some((start, before)) = self.vim_insert_start.take() {
+                    let one_insertion = self.cursor >= start
+                        && self.text.get(..start) == before.get(..start)
+                        && self.text.get(self.cursor..) == before.get(start..);
+                    let inserted = if one_insertion {
+                        self.text.get(start..self.cursor)
                     } else {
-                        String::new()
+                        None
                     };
-                    if !inserted.is_empty() {
+                    if let Some(inserted) = inserted.filter(|text| !text.is_empty()) {
                         self.vim_dot_action = Some(DotRepeatAction::Insert {
-                            text: inserted,
+                            text: self.expand_pastes(inserted.to_owned()),
                             mode_after_insert: false,
                         });
                     }
@@ -2832,7 +2803,7 @@ impl PromptInputState {
                         self.cursor = sel_start;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_text_before = Some(self.text.clone());
+                        self.vim_insert_start = Some((self.cursor, self.text.clone()));
                         self.normalize();
                         return;
                     }
@@ -2876,7 +2847,7 @@ impl PromptInputState {
                         self.cursor = from;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_text_before = Some(self.text.clone());
+                        self.vim_insert_start = Some((self.cursor, self.text.clone()));
                         self.normalize();
                         return;
                     }
@@ -2919,7 +2890,7 @@ impl PromptInputState {
                         self.cursor = from;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_text_before = Some(self.text.clone());
+                        self.vim_insert_start = Some((self.cursor, self.text.clone()));
                         self.normalize();
                         return;
                     }
@@ -2961,9 +2932,10 @@ impl PromptInputState {
             }
         }
 
-        // If we just entered insert mode from normal mode, record text snapshot for dot-repeat
+        // If we just entered insert mode from normal mode, record where the
+        // insert starts for dot-repeat
         if was_normal && self.vim_mode == VimMode::Insert {
-            self.vim_insert_text_before = Some(self.text.clone());
+            self.vim_insert_start = Some((self.cursor, self.text.clone()));
         }
 
         // Handle `r` replace pending → after confirm, store dot action
@@ -3145,6 +3117,8 @@ impl PromptInputState {
         self.visual_anchor = None;
         self.vim_command_buf.clear();
         self.vim_search_buf.clear();
+        // An insert into the old text is not one into the new text.
+        self.vim_insert_start = None;
         // Placeholders live in `text`, so once that is gone the stored paste
         // contents are unreachable. `paste_counter` stays monotonic so a
         // stale placeholder (e.g. restored via undo) can never collide with
@@ -3158,14 +3132,19 @@ impl PromptInputState {
     /// stored paste contents, so callers receive what the user actually
     /// pasted rather than the `[Pasted ~N lines #K]` marker.
     pub fn take(&mut self) -> String {
-        let mut text = std::mem::take(&mut self.text);
+        let draft = std::mem::take(&mut self.text);
+        let text = self.expand_pastes(draft);
+        self.clear();
+        text
+    }
+
+    fn expand_pastes(&self, mut text: String) -> String {
         for (id, content) in &self.paste_contents {
             let placeholder = paste_placeholder(content.lines().count(), *id);
             if text.contains(&placeholder) {
                 text = text.replace(&placeholder, content);
             }
         }
-        self.clear();
         text
     }
 
@@ -3382,7 +3361,8 @@ impl PromptInputState {
     }
 
     /// Map the current cursor (byte offset) to a (visual_row, visual_col) pair
-    /// given the wrap width. `width` is the usable column count for text.
+    /// given the wrap width. At the end of a full logical line, the column
+    /// equals `width`, immediately after that row's last text cell.
     pub fn cursor_visual_pos(&self, width: usize) -> (usize, usize) {
         if width == 0 {
             return (0, 0);
@@ -3404,13 +3384,9 @@ impl PromptInputState {
                     .find(|(_, range)| range.start <= at)
                     .map_or((0, 0), |(index, range)| (index, range.start));
                 let col = cells(&line[start..at]);
-                // After a row that is full to the last cell, the cursor
-                // counts as the start of a row below it.
-                return if col >= width {
-                    (row + index + 1, 0)
-                } else {
-                    (row + index, col)
-                };
+                // At a logical line's end the cursor is drawn immediately
+                // after its final cell, even when that row is full.
+                return (row + index, col);
             }
             row += rows.len();
         }
@@ -3463,14 +3439,19 @@ impl PromptInputState {
         let mut row = 0usize;
         for (byte, line) in drawn_lines(&self.text) {
             let rows = wrap_ranges(line, width);
-            if let Some(range) = rows.get(target_row - row) {
+            let index = target_row - row;
+            if let Some(range) = rows.get(index) {
                 // The last character edge at or before the target column,
-                // so the cursor never lands inside a wide character.
+                // so the cursor never lands inside a wide character. The end
+                // of any row but a line's last is the start of the next row,
+                // where the cursor would be drawn, so it stops one grapheme
+                // cluster short of it.
+                let last_row = index + 1 == rows.len();
                 let mut at = range.start;
                 let mut col = 0usize;
                 for cluster in line[range.clone()].graphemes(true) {
                     col += UnicodeWidthStr::width(cluster);
-                    if col > target_col {
+                    if col > target_col || (!last_row && at + cluster.len() == range.end) {
                         break;
                     }
                     at += cluster.len();
@@ -4227,6 +4208,67 @@ mod tests {
         assert!(s.is_empty());
         s.text = "  x  ".to_string();
         assert!(!s.is_empty());
+    }
+
+    /// A CRLF line ends at its CR (#570). At the end of such a line there
+    /// is nothing to cut; from inside it the cut leaves the CRLF whole.
+    #[test]
+    fn kill_line_stops_before_the_cr_of_a_crlf_line() {
+        let mut s = composer("a\r\nb", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nb");
+        assert!(s.kill_ring.entries.is_empty());
+
+        let mut s = composer("abc\r\nd", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nd");
+        assert_eq!(s.kill_ring.entries, ["bc"]);
+
+        // A line ending in a bare LF is cut up to the LF, as before.
+        let mut s = composer("abc\nd", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\nd");
+        assert_eq!(s.kill_ring.entries, ["bc"]);
+
+        // A cursor between the CR and the LF cuts nothing.
+        let mut s = composer("a\r\nb", 2);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nb");
+        assert!(s.kill_ring.entries.is_empty());
+
+        // A CR with no LF after it is line content, as it is drawn.
+        let mut s = composer("ab\r", 0);
+        s.kill_line();
+        assert_eq!(s.text, "");
+        assert_eq!(s.kill_ring.entries, ["ab\r"]);
+
+        // Only the CR right before the LF belongs to the line break.
+        let mut s = composer("a\r\r\nb", 1);
+        s.kill_line();
+        assert_eq!(s.text, "a\r\nb");
+        assert_eq!(s.kill_ring.entries, ["\r"]);
+    }
+
+    /// `gE` with only whitespace before the cursor goes to the start of the
+    /// text (#570), as `ge` does. It used to subtract past zero.
+    #[test]
+    fn g_upper_e_after_only_whitespace_moves_to_the_start() {
+        let mut s = vim_composer("  a", 2);
+        s.vim_command("g");
+        s.vim_command("E");
+        assert_eq!(s.cursor, 0);
+
+        let mut s = vim_composer("  a", 2);
+        s.vim_command("g");
+        s.vim_command("e");
+        assert_eq!(s.cursor, 0);
+
+        // With a count, the step that runs out of words stops at the start.
+        let mut s = vim_composer("  a b", 4);
+        for key in ["2", "g", "E"] {
+            s.vim_command(key);
+        }
+        assert_eq!(s.cursor, 0);
     }
 
     // ---- handle_paste ---------------------------------------------------
@@ -5441,6 +5483,106 @@ mod tests {
         assert!(s.text.len() < "lo world".len());
     }
 
+    /// The text the last Insert recorded for dot-repeat, if any.
+    fn recorded_insert(s: &PromptInputState) -> Option<&str> {
+        match &s.vim_dot_action {
+            Some(DotRepeatAction::Insert { text, .. }) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Leaving an insert made before the end of the text records exactly
+    /// what was typed (#569). It used to slice from the old text's length
+    /// to the cursor, which panicked here or dropped the first characters.
+    #[test]
+    fn escape_records_an_insert_made_before_the_end_of_the_text() {
+        let mut s = vim_composer("ab", 0);
+        s.vim_command("i");
+        s.insert_char('x');
+        s.vim_command("Escape");
+        assert_eq!(s.vim_mode, VimMode::Normal);
+        assert_eq!(s.text, "xab");
+        assert_eq!(recorded_insert(&s), Some("x"));
+
+        let mut s = vim_composer("ab", 1);
+        s.vim_command("i");
+        for c in "xyz".chars() {
+            s.insert_char(c);
+        }
+        s.vim_command("Escape");
+        assert_eq!(s.text, "axyzb");
+        assert_eq!(recorded_insert(&s), Some("xyz"));
+        s.vim_command(".");
+        assert_eq!(s.text, "axyzxyzb");
+
+        // Offsets are bytes, so multi-byte text around the insert is fine.
+        let mut s = vim_composer("\u{65E5}\u{672C}", 3);
+        s.vim_command("i");
+        s.insert_char('\u{E9}');
+        s.vim_command("Escape");
+        assert_eq!(s.text, "\u{65E5}\u{E9}\u{672C}");
+        assert_eq!(recorded_insert(&s), Some("\u{E9}"));
+    }
+
+    /// When the cursor left the inserted span, the span from the entry
+    /// cursor is not what was typed, so nothing is recorded (#569).
+    #[test]
+    fn escape_after_the_cursor_left_the_insert_records_nothing() {
+        let mut s = vim_composer("ab", 1);
+        s.vim_command("i");
+        s.insert_char('x');
+        s.move_left();
+        s.move_left();
+        s.vim_command("Escape");
+        assert_eq!(s.vim_mode, VimMode::Normal);
+        assert_eq!(s.text, "axb");
+        assert_eq!(recorded_insert(&s), None);
+
+        // Backspace past the entry cursor shrinks the text.
+        let mut s = vim_composer("abc", 2);
+        s.vim_command("i");
+        s.backspace();
+        s.vim_command("Escape");
+        assert_eq!(s.text, "ac");
+        assert_eq!(recorded_insert(&s), None);
+
+        // A delete before the insert, then typing as much as was deleted
+        // and one more, so the text grew by as much as the cursor moved.
+        let mut s = vim_composer("abc", 2);
+        s.vim_command("i");
+        s.backspace();
+        for c in "xy".chars() {
+            s.insert_char(c);
+        }
+        s.vim_command("Escape");
+        assert_eq!(s.text, "axyc");
+        assert_eq!(recorded_insert(&s), None);
+
+        // Typing before the entry cursor, then moving back to where the
+        // text grew by as much as the cursor moved.
+        let mut s = vim_composer("abc", 1);
+        s.vim_command("i");
+        s.move_left();
+        s.insert_char('x');
+        s.move_right();
+        s.vim_command("Escape");
+        assert_eq!(s.text, "xabc");
+        assert_eq!(recorded_insert(&s), None);
+
+        // An insert into a draft that was then sent is not one into the
+        // next draft, even when the old draft was empty.
+        let mut s = vim_composer("", 0);
+        s.vim_command("i");
+        s.insert_char('d');
+        s.take();
+        for c in "hi".chars() {
+            s.insert_char(c);
+        }
+        s.vim_command("Escape");
+        assert_eq!(s.text, "hi");
+        assert_eq!(recorded_insert(&s), None);
+    }
+
     // ---- Visual line mode (V) -------------------------------------------
 
     #[test]
@@ -6081,6 +6223,33 @@ mod tests {
         assert_eq!(s.cursor, 3);
     }
 
+    /// Up or Down onto a row that a wide character ended early lands on that
+    /// row (#410). With width 4, `abc漢d` is drawn as `abc` and `漢d`: the
+    /// end of `abc` is the start of `漢d`, so the cursor stops on `c`.
+    #[test]
+    fn moving_onto_a_row_a_wide_character_ended_early_stays_on_that_row() {
+        let text = "abc\u{6F22}d";
+        let mut s = composer(text, text.len());
+        assert_eq!(s.cursor_visual_pos(4), (1, 3));
+        assert!(s.move_visual_up(4));
+        assert_eq!(s.cursor_visual_pos(4).0, 0);
+        assert_eq!(s.cursor, 2);
+
+        // On a line's last row the end of the row is the end of the line,
+        // drawn on that row, so the cursor may still go there.
+        let text = "abcd\n\u{6F22}\u{6F22}x";
+        let mut s = composer(text, text.len());
+        assert_eq!(s.cursor_visual_pos(8), (1, 5));
+        assert!(s.move_visual_up(8));
+        assert_eq!((s.cursor, s.cursor_visual_pos(8)), (4, (0, 4)));
+
+        // Down onto such a row stays on it too, instead of skipping it.
+        let text = "xyz\nabc\u{6F22}d";
+        let mut s = composer(text, 3);
+        assert!(s.move_visual_down(4));
+        assert_eq!((s.cursor, s.cursor_visual_pos(4)), (6, (1, 2)));
+    }
+
     #[test]
     fn moving_up_and_down_stops_before_a_crlf() {
         // The CR is not drawn, so column 3 of "ab\r" is past its end: the
@@ -6141,6 +6310,7 @@ mod tests {
         }
         assert_eq!(s.cursor, "zzzz\u{1F1E9}".len());
         s.vim_command("Escape");
+        assert_eq!(recorded_insert(&s), Some("zzzz\u{1F1E9}"));
         assert_eq!(s.cursor, "zzzz".len());
         s.vim_command("x");
         assert_eq!(s.text, "zzzz\u{1F1F5}");
@@ -6350,6 +6520,73 @@ mod tests {
         assert_eq!(s.text, format!("{E_ACUTE}b"));
         s.vim_command(".");
         assert_eq!((s.text.as_str(), s.cursor), ("b", 0));
+    }
+
+    #[test]
+    fn dot_repeat_expands_a_paste_after_submit() {
+        let mut s = vim_composer("ab", 1);
+        s.vim_command("i");
+        s.insert_char('[');
+        s.paste("one\ntwo\nthree");
+        s.insert_char(']');
+        s.vim_command("Escape");
+        assert_eq!(s.take(), "a[one\ntwo\nthree]b");
+        s.vim_command(".");
+        assert_eq!(s.take(), "[one\ntwo\nthree]");
+    }
+
+    #[test]
+    fn vim_line_end_commands_preserve_crlf() {
+        for key in ["A", "$", "D", "C"] {
+            let mut s = vim_composer("old\r\nabc\r\ntail", 6);
+            s.vim_command(key);
+            match key {
+                "A" | "$" => assert_eq!(s.cursor, 8, "{key}"),
+                _ => {
+                    assert_eq!(s.text, "old\r\na\r\ntail", "{key}");
+                    assert_eq!(s.yank_buf, "bc", "{key}");
+                }
+            }
+            if s.vim_mode == VimMode::Insert {
+                s.insert_char('!');
+                assert!(s.text.contains("!\r\ntail"), "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn vim_previous_word_end_respects_word_classes_and_counts() {
+        let text = "界é abc--def";
+        for (key, cursor, expected) in [
+            ("e", "界é a".len(), "界".len()),
+            ("E", "界é a".len(), "界".len()),
+            ("e", text.len() - 1, "界é abc-".len()),
+            ("E", text.len() - 1, "界".len()),
+            ("e", "界é".len(), "界".len()),
+            ("e", text.len(), text.len() - 1),
+        ] {
+            let mut s = vim_composer(text, cursor);
+            s.vim_command("g");
+            s.vim_command(key);
+            assert_eq!(s.cursor, expected, "g{key} at {cursor}");
+        }
+        let mut s = vim_composer(text, text.len() - 1);
+        for key in ["2", "g", "e"] {
+            s.vim_command(key);
+        }
+        assert_eq!(s.cursor, "界é ab".len());
+    }
+
+    #[test]
+    fn down_from_end_of_full_last_row_reaches_next_line() {
+        for (text, cursor, row) in [("abcd\nxy", 4, 0), ("1234漢字\r\nxy", "1234漢字".len(), 1)]
+        {
+            let mut s = composer(text, cursor);
+            assert_eq!(s.cursor_visual_pos(4), (row, 4));
+            assert!(s.move_visual_down(4));
+            assert_eq!(s.cursor, text.len());
+            assert!(!s.move_visual_down(4));
+        }
     }
 
     #[test]

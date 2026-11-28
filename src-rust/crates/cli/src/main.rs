@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use clap::{ArgAction, Parser, ValueEnum};
 use claurst_core::types::ToolDefinition;
 use claurst_core::{
-    config::{Config, PermissionMode, Settings},
+    config::{Config, PermissionMode, RestoredPermissionMode, Settings},
     constants::APP_VERSION,
     context::ContextBuilder,
     cost::CostTracker,
@@ -354,17 +354,6 @@ impl From<CliPermissionMode> for PermissionMode {
     }
 }
 
-/// The permission mode a start runs in, and what an interactive session
-/// should say about the saved mode.
-#[derive(Debug, PartialEq, Eq)]
-struct StartupPermissionMode {
-    mode: PermissionMode,
-    /// What to show once when the saved mode decided `mode` or was refused,
-    /// short enough for the one-row notification both renderers draw. Always
-    /// `None` for a headless run, which prints nothing extra.
-    notice: Option<&'static str>,
-}
-
 /// Decide the permission mode for a start without
 /// `--dangerously-skip-permissions`.
 ///
@@ -373,34 +362,24 @@ struct StartupPermissionMode {
 /// `/config set permission-mode` lasts across restarts. Two limits keep a
 /// settings file from loosening approvals unseen: a saved bypass mode is
 /// never restored, and a headless run, which has nowhere to say what it
-/// restored, keeps `default`.
+/// restored, keeps `default`. The notice is always `None` for a headless
+/// run, which prints nothing extra.
 fn permission_mode_for_invocation(
     flag: Option<CliPermissionMode>,
     saved: &PermissionMode,
     has_github_context: bool,
     is_headless: bool,
-) -> StartupPermissionMode {
-    let (mode, notice) = if has_github_context {
-        (PermissionMode::BypassPermissions, None)
+) -> RestoredPermissionMode {
+    let mode = if has_github_context {
+        PermissionMode::BypassPermissions
     } else if let Some(flag) = flag {
-        (flag.into(), None)
+        flag.into()
     } else if is_headless {
-        (PermissionMode::Default, None)
+        PermissionMode::Default
     } else {
-        match saved {
-            PermissionMode::Default => (PermissionMode::Default, None),
-            PermissionMode::AcceptEdits => (
-                PermissionMode::AcceptEdits,
-                Some("Saved accept-edits mode restored"),
-            ),
-            PermissionMode::Plan => (PermissionMode::Plan, Some("Saved plan mode restored")),
-            PermissionMode::BypassPermissions => (
-                PermissionMode::Default,
-                Some("Saved bypass mode not restored"),
-            ),
-        }
+        return saved.restored_from_settings();
     };
-    StartupPermissionMode { mode, notice }
+    RestoredPermissionMode { mode, notice: None }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -492,8 +471,30 @@ fn abandon_interactive_turn(
     app.take_cancellation_request();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// How long work still on the runtime's blocking pool may take to finish
+/// once the engine is done (#535). The pool also reads child processes'
+/// output pipes, and on Windows such a read ends only when every process
+/// holding the pipe has exited. A process that a background command started
+/// can hold it for as long as it runs; dropping the runtime used to wait for
+/// it, and an exit in that state now takes this long. Saved state and the
+/// output of `--print` and stream-json are complete before `run` returns.
+/// What is left is work started without waiting for it, such as an append
+/// to the prompt history, or, for ACP, a write to stdout that a client which
+/// has stopped reading still holds up.
+const RUNTIME_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    // A panic in `run` would drop the runtime while unwinding, which waits
+    // without a limit; shut it down first, then go on unwinding.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(run())));
+    runtime.shutdown_timeout(RUNTIME_EXIT_GRACE);
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+async fn run() -> anyhow::Result<()> {
     use claurst_tools::workspace_scope;
     use std::path::Path;
     let raw_args: Vec<String> = std::env::args().collect();
@@ -506,7 +507,10 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Workspace sandbox verification requires exactly one policy file.");
             };
             let file = Path::new(file);
-            workspace_scope::WorkspaceScope::read(file, &std::env::current_dir()?)?
+            let cwd = std::env::current_dir().with_context(|| {
+                format!("Could not locate the working folder for workspace policy {file:?}")
+            })?;
+            workspace_scope::WorkspaceScope::read(file, &cwd)?
                 .verify(file)
                 .await?
                 .write_receipt(std::io::stdout().lock())?;
@@ -746,6 +750,12 @@ async fn main() -> anyhow::Result<()> {
         config.hosted_review.allow_auto_memory_persistence = false;
     }
     let mut permission_mode_notice = None;
+    // Whether the launch, not the saved settings, chose the session's mode.
+    // A later reload of the settings (`/config import`) then keeps it.
+    let permission_mode_from_launch = cli.dangerously_skip_permissions
+        || cli.permission_mode.is_some()
+        || github_context.is_some()
+        || scoped_workspace.is_some();
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
         #[cfg(unix)]
@@ -1238,6 +1248,7 @@ async fn main() -> anyhow::Result<()> {
         user_question_rx,
         diagnostic_log,
         permission_mode_notice,
+        permission_mode_from_launch,
     )
     .await;
 
@@ -1589,13 +1600,18 @@ fn cache_is_fresh(path: &std::path::Path, ttl: std::time::Duration) -> bool {
 /// Background-refresh the models cache from the configured source URL.
 ///
 /// Honors:
-/// * `COVEN_CODE_DISABLE_MODELS_FETCH` — skips the network call entirely.
+/// * `COVEN_CODE_DISABLE_MODELS_FETCH` or
+///   `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` — skips the network call entirely.
 /// * `COVEN_CODE_MODELS_URL` / `MODELS_DEV_URL` — overrides the source URL.
 /// * 5-minute mtime-based freshness check — avoids hammering models.dev
 ///   on every CLI invocation.
 fn spawn_models_cache_refresh() {
-    if std::env::var("COVEN_CODE_DISABLE_MODELS_FETCH").is_ok() {
-        tracing::debug!("COVEN_CODE_DISABLE_MODELS_FETCH set — skipping models.dev refresh");
+    if claurst_core::traffic_opt_out::traffic_opted_out(
+        claurst_core::traffic_opt_out::DISABLE_MODELS_FETCH_ENV,
+    ) {
+        tracing::debug!(
+            "Model catalog refresh turned off by environment — skipping models.dev refresh"
+        );
         return;
     }
 
@@ -1647,27 +1663,22 @@ fn spawn_models_cache_refresh() {
     });
 }
 
-/// Turns off the startup release check when present, whatever its value
-/// (`0` and the empty string included), like `COVEN_CODE_DISABLE_MODELS_FETCH`
-/// for the model list.
-const UPDATE_CHECK_OPT_OUT_ENV: &str = "COVEN_CODE_DISABLE_UPDATE_CHECK";
-
 /// Start an interactive session's background release check and return where
 /// its answer arrives: the newer version, if there is one.
 ///
-/// `opt_out` is the value of [`UPDATE_CHECK_OPT_OUT_ENV`]. When it is set,
-/// `check` is never called, so no request is made and no update is announced.
-/// `/update` and `coven-code upgrade` make their own requests and do not come
-/// through here.
+/// When `opted_out` is true (`COVEN_CODE_DISABLE_UPDATE_CHECK` or
+/// `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is present), `check` is never
+/// called, so no request is made and no update is announced. `/update` and
+/// `coven-code upgrade` make their own requests and do not come through here.
 fn spawn_update_check<F>(
-    opt_out: Option<&std::ffi::OsStr>,
+    opted_out: bool,
     check: impl FnOnce() -> F,
 ) -> tokio::sync::mpsc::Receiver<Option<String>>
 where
     F: std::future::Future<Output = Option<claurst_core::UpdateInfo>> + Send + 'static,
 {
     let (update_tx, update_rx) = tokio::sync::mpsc::channel(1);
-    if opt_out.is_none() {
+    if !opted_out {
         let check = check();
         tokio::spawn(async move {
             let version = check.await.map(|info| info.latest_version);
@@ -2837,7 +2848,7 @@ async fn compact_idle_conversation(
         result = claurst_query::compact_conversation(client, &original, model) => result,
     };
     match compacted {
-        Ok(compacted) => {
+        Ok(Some(compacted)) => {
             let message = compacted
                 .first()
                 .cloned()
@@ -2848,6 +2859,13 @@ async fn compact_idle_conversation(
                 usage: claurst_core::types::UsageInfo::default(),
             }
         }
+        // `select_idle_compaction` does not start a worker for a history this
+        // short (#571). Should one start anyway, it ends as a failure, not as
+        // a compaction: the history and the context count stay as they were,
+        // and, as after any failure, auto-compaction is off for the session.
+        Ok(None) => claurst_query::QueryOutcome::Error(claurst_core::error::ClaudeError::Other(
+            "Too few messages to compact".to_string(),
+        )),
         Err(err) => claurst_query::QueryOutcome::Error(err),
     }
 }
@@ -2954,7 +2972,10 @@ impl InteractiveQuery {
             // ends the forwarder; joining both keeps the worker's lifetime
             // covering delivery of every event it produced. The buffer is
             // bounded: when it is full the query loop waits for the
-            // forwarder instead of growing it.
+            // forwarder instead of growing it. After a cancel the loop no
+            // longer waits (#572); events it could not queue go to a relay
+            // that holds a sender until they are queued, so the worker still
+            // ends only once the forwarder has taken everything.
             let (turn_tx, turn_rx) =
                 tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
             let forward = forward_scoped_events(turn_rx, self.events, self.generation);
@@ -3030,37 +3051,35 @@ async fn persist_interactive_session(
         let db_path = claurst_core::config::Settings::config_dir().join("sessions.db");
         if let Ok(store) = claurst_core::SqliteSessionStore::open(&db_path) {
             let _ = store.save_session(&session.id, session.title.as_deref(), &session.model);
-            for msg in &session.messages {
-                if pending_uuid.is_some() && msg.uuid.as_deref() == pending_uuid {
-                    continue;
-                }
-                let content_str = match &msg.content {
-                    claurst_core::types::MessageContent::Text(t) => t.clone(),
-                    claurst_core::types::MessageContent::Blocks(blocks) => blocks
-                        .iter()
-                        .filter_map(|b| {
-                            if let claurst_core::types::ContentBlock::Text { text } = b {
-                                Some(text.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
-                let role = match msg.role {
-                    claurst_core::types::Role::User => "user",
-                    claurst_core::types::Role::Assistant => "assistant",
-                };
-                let msg_id = msg.uuid.as_deref().unwrap_or("unknown");
-                let _ = store.save_message(&session.id, msg_id, role, &content_str, None);
+            if let Err(error) = store.index_messages(
+                &session.id,
+                session
+                    .messages
+                    .iter()
+                    .filter(|msg| pending_uuid.is_none() || msg.uuid.as_deref() != pending_uuid),
+            ) {
+                warn!(session_id = %session.id, %error, "Failed to index session for search");
             }
         }
     }
     saved
 }
 
-fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option<u64> {
+/// What idle auto-compaction does once the context is over its threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleCompaction {
+    /// Summarise the history; the context is this many percent full.
+    Start(u64),
+    /// The history is too short to have a head to summarise (#571), so
+    /// nothing starts; the context is this many percent full.
+    NothingToCompact(u64),
+}
+
+fn select_idle_compaction(
+    app: &claurst_tui::App,
+    query_running: bool,
+    messages: &[claurst_core::types::Message],
+) -> Option<IdleCompaction> {
     if !app.auto_compact_enabled
         || app.context_window_size == 0
         || app.is_streaming
@@ -3075,7 +3094,34 @@ fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option
         return None;
     }
     let used_pct = (app.context_used_tokens as f64 / app.context_window_size as f64 * 100.0) as u64;
-    (used_pct >= u64::from(app.auto_compact_threshold)).then_some(used_pct)
+    if used_pct < u64::from(app.auto_compact_threshold) {
+        return None;
+    }
+    if claurst_query::compact::has_messages_to_compact(messages) {
+        Some(IdleCompaction::Start(used_pct))
+    } else {
+        Some(IdleCompaction::NothingToCompact(used_pct))
+    }
+}
+
+/// The context is over the auto-compact threshold but the history is too
+/// short to summarise (#571). The context count is kept, since nothing was
+/// summarised. The status says so once for each history length: the loop
+/// asks every pass, and a turn that adds messages asks again.
+fn note_nothing_to_compact(
+    app: &mut claurst_tui::App,
+    used_pct: u64,
+    history_len: usize,
+    noted_len: &mut Option<usize>,
+) {
+    if *noted_len == Some(history_len) {
+        return;
+    }
+    *noted_len = Some(history_len);
+    app.status_message = Some(format!(
+        "Context {}% full — too few messages to compact yet.",
+        used_pct
+    ));
 }
 
 #[derive(Debug, Clone)]
@@ -3697,6 +3743,7 @@ async fn run_interactive(
     >,
     diagnostic_log: Option<diagnostics::DiagnosticLog>,
     permission_mode_notice: Option<&'static str>,
+    permission_mode_from_launch: bool,
 ) -> anyhow::Result<()> {
     use claurst_bridge::{BridgeOutbound, TuiBridgeEvent};
     use claurst_commands::{execute_command, CommandContext, CommandResult};
@@ -3807,6 +3854,7 @@ async fn run_interactive(
     let mut terminal = setup_terminal(renderer)?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
+    app.permission_mode_from_launch = permission_mode_from_launch;
     // What the saved permission mode did to this session, said once in a
     // notification, which both renderers draw. The newest notification is
     // the one shown, so this goes in before the renderer warning and outlasts
@@ -4122,6 +4170,9 @@ async fn run_interactive(
     let (bg_completion_tx, mut bg_completion_rx) =
         mpsc::unbounded_channel::<claurst_tools::BgTaskCompletion>();
     let mut current_query: Option<(tokio::task::JoinHandle<QueryOutcome>, MessagesArc)> = None;
+    // History length at which idle auto-compaction last found nothing to
+    // compact (#571), so it says so once per length.
+    let mut nothing_to_compact_at: Option<usize> = None;
     // Active effort level (None = use model default / High).
     // Tracks the user's /effort selection; flows into qcfg each turn.
     let mut current_effort: Option<claurst_core::effort::EffortLevel> = None;
@@ -4133,7 +4184,9 @@ async fn run_interactive(
     // Background update check: spawned once at startup unless the user opted
     // out; result delivered via channel.
     let mut update_rx = spawn_update_check(
-        std::env::var_os(UPDATE_CHECK_OPT_OUT_ENV).as_deref(),
+        claurst_core::traffic_opt_out::traffic_opted_out(
+            claurst_core::traffic_opt_out::DISABLE_UPDATE_CHECK_ENV,
+        ),
         claurst_core::check_for_updates,
     );
 
@@ -4312,6 +4365,7 @@ async fn run_interactive(
             None
         };
 
+        let auto_submit = synthetic_event.is_some();
         let evt_opt: Option<Event> = if let Some(e) = synthetic_event {
             Some(e)
         } else if let Some(k) = app.take_pending_key() {
@@ -4370,8 +4424,10 @@ async fn run_interactive(
                     // `any_modal_open` also counts passive banners that render
                     // as overlays but never take a keystroke, and those would
                     // silently eat Enter and strand the conversation.
-                    let any_dialog_open = app.any_blocking_modal_open();
-                    if key.code == KeyCode::Enter && app.is_streaming && !any_dialog_open {
+                    let submit_enter = key.code == KeyCode::Enter
+                        && !app.any_blocking_modal_open()
+                        && (auto_submit || !app.vim_line_open());
+                    if submit_enter && app.is_streaming {
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
                         let input = app.take_input();
@@ -4392,7 +4448,7 @@ async fn run_interactive(
                         }
                         continue;
                     }
-                    if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
+                    if submit_enter && !app.is_streaming {
                         // A plain Enter on an empty prompt opens the latest completed
                         // response reader. Route it through App before take_input(),
                         // which would otherwise consume the key as a no-op.
@@ -4593,6 +4649,7 @@ async fn run_interactive(
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
                                 Some(CommandResult::ClearConversation) => {
+                                    base_query_config.cli_session = Default::default();
                                     daemon_listings.forget(&mut app);
                                     replace_conversation(
                                         &mut session_scope,
@@ -4604,6 +4661,7 @@ async fn run_interactive(
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
+                                    base_query_config.cli_session = Default::default();
                                     daemon_listings.forget(&mut app);
                                     let removed = messages.len().saturating_sub(new_msgs.len());
                                     replace_conversation(
@@ -4643,6 +4701,7 @@ async fn run_interactive(
                                 Some(CommandResult::ResumeSession(resumed_session)) => {
                                     daemon_listings.forget(&mut app);
                                     session_scope.advance();
+                                    base_query_config.cli_session = Default::default();
                                     session = resumed_session;
                                     app.enter_session_scope(&session.id);
                                     messages = session.messages.clone();
@@ -4689,7 +4748,7 @@ async fn run_interactive(
                                         .map(|title| claurst_tui::terminal_title_topic(renderer, title));
                                     claurst_tui::update_terminal_title(title.as_deref());
                                     app.status_message =
-                                        Some(format!("Resumed session {}.", &session.id[..8]));
+                                        Some(format!("Resumed session {}.", claurst_core::truncate::short_id(&session.id)));
                                 }
                                 Some(CommandResult::RenameSession(title)) => {
                                     session.title = Some(title.clone());
@@ -5433,6 +5492,10 @@ async fn run_interactive(
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
                     }
+                    if app.rewind_confirmed_at.is_some() {
+                        base_query_config.cli_session = Default::default();
+                        daemon_listings.forget(&mut app);
+                    }
                     adopt_in_app_rewind(&mut session_scope, &mut app, &mut messages, &mut session);
                 }
                 Event::Paste(data)
@@ -5656,7 +5719,21 @@ async fn run_interactive(
         // Auto-compact: when enabled and context usage reaches the configured
         // threshold with no query running, summarize through the dedicated
         // no-tools compaction path instead of starting an agentic turn.
-        if let Some(used_pct) = select_idle_compaction(&app, current_query.is_some()) {
+        let idle_compaction = select_idle_compaction(&app, current_query.is_some(), &messages);
+        if idle_compaction.is_none() {
+            // A turn, a cleared conversation or a lower count: say it again
+            // the next time there is nothing to compact.
+            nothing_to_compact_at = None;
+        }
+        if let Some(IdleCompaction::NothingToCompact(used_pct)) = idle_compaction {
+            note_nothing_to_compact(
+                &mut app,
+                used_pct,
+                messages.len(),
+                &mut nothing_to_compact_at,
+            );
+        }
+        if let Some(IdleCompaction::Start(used_pct)) = idle_compaction {
             app.auto_compact_running = true;
             app.status_message = Some(format!("Context {}% full — auto-compacting…", used_pct));
 
@@ -7819,6 +7896,114 @@ mod tests {
         server.abort();
     }
 
+    /// #571: idle compaction of a history too short to summarise is not a
+    /// finished compaction. No request is sent, the conversation is as it
+    /// was, and the status neither says it completed nor zeroes the count.
+    #[tokio::test]
+    async fn idle_compaction_of_a_short_history_is_not_reported_as_complete() {
+        let (client, mut requests, server) = compaction_fixture(true).await;
+        let history: Vec<_> = compactable_history().into_iter().take(11).collect();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        assert_eq!(
+            serde_json::to_value(&*messages.lock().await).unwrap(),
+            serde_json::to_value(&history).unwrap(),
+            "the conversation is unchanged"
+        );
+        assert!(requests.try_recv().is_err(), "no summary request was sent");
+
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        app.context_used_tokens = 9_000;
+        finish_idle_compaction(&mut app, Some(&outcome));
+        assert_ne!(
+            app.status_message.as_deref(),
+            Some("Auto-compact complete."),
+            "{outcome:?}"
+        );
+        assert_eq!(app.context_used_tokens, 9_000, "nothing was summarised");
+        server.abort();
+    }
+
+    /// #571: the worker is not started for a short history, but one that is
+    /// ends as a failure, the same as any other failed compaction.
+    #[tokio::test]
+    async fn an_idle_compaction_worker_given_a_short_history_fails() {
+        let (client, _requests, server) = compaction_fixture(true).await;
+        let history: Vec<_> = compactable_history().into_iter().take(11).collect();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::Error(_)),
+            "{outcome:?}"
+        );
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        finish_idle_compaction(&mut app, Some(&outcome));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Auto-compact failed and was disabled for this session.")
+        );
+        assert!(!app.auto_compact_enabled);
+        server.abort();
+    }
+
+    /// An App whose context is 95% full, over its 90% auto-compact threshold.
+    fn app_with_a_full_context() -> claurst_tui::App {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_threshold = 90;
+        app.context_window_size = 200_000;
+        app.context_used_tokens = 190_000;
+        app
+    }
+
+    /// #571: over the threshold, idle auto-compaction starts only when the
+    /// history has a head to summarise, that is more than 11 messages.
+    #[test]
+    fn idle_compaction_starts_only_with_a_head_to_summarise() {
+        let mut app = app_with_a_full_context();
+        let history = compactable_history();
+        assert_eq!(
+            select_idle_compaction(&app, false, &history[..11]),
+            Some(IdleCompaction::NothingToCompact(95))
+        );
+        assert_eq!(
+            select_idle_compaction(&app, false, &history[..12]),
+            Some(IdleCompaction::Start(95))
+        );
+        app.context_used_tokens = 100_000;
+        assert_eq!(select_idle_compaction(&app, false, &history[..11]), None);
+    }
+
+    /// #571: a full context in a short history is reported once for each
+    /// history length.
+    #[test]
+    fn nothing_to_compact_is_said_once_per_history_length() {
+        let mut app = app_with_a_full_context();
+        let mut noted = None;
+        note_nothing_to_compact(&mut app, 95, 9, &mut noted);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Context 95% full — too few messages to compact yet.")
+        );
+        app.status_message = None;
+        note_nothing_to_compact(&mut app, 95, 9, &mut noted);
+        assert_eq!(app.status_message, None, "not repeated on every pass");
+        note_nothing_to_compact(&mut app, 96, 11, &mut noted);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Context 96% full — too few messages to compact yet."),
+            "a turn that added messages is reported again"
+        );
+    }
+
     /// #408: a worker that does not watch the token (a tool or approval that
     /// ignores it) is waited for. If it finishes within `TURN_EXIT_WAIT`, the
     /// conversation it wrote is what is kept. Idle auto-compaction watches the
@@ -8713,8 +8898,8 @@ mod tests {
         PermissionMode::Plan,
     ];
 
-    fn startup_mode(mode: PermissionMode) -> StartupPermissionMode {
-        StartupPermissionMode { mode, notice: None }
+    fn startup_mode(mode: PermissionMode) -> RestoredPermissionMode {
+        RestoredPermissionMode { mode, notice: None }
     }
 
     /// Classic and Next each draw a notification on one row of a 52-column
@@ -8995,7 +9180,7 @@ mod tests {
     #[tokio::test]
     async fn the_startup_release_check_runs_once_and_reports_the_newer_version_by_default() {
         let calls = std::cell::Cell::new(0);
-        let mut answer = spawn_update_check(None, || {
+        let mut answer = spawn_update_check(false, || {
             calls.set(calls.get() + 1);
             async { newer_release("9.9.9") }
         });
@@ -9004,21 +9189,19 @@ mod tests {
         assert_eq!(answer.recv().await, Some(Some("9.9.9".to_string())));
     }
 
-    /// The opt-out is presence-based: `0` and an empty value disable the
-    /// check as well. A check that had run would deliver its answer; here
-    /// the channel closes with nothing sent.
+    /// Which variables opt out is tested in `claurst_core::traffic_opt_out`.
+    /// A check that had run would deliver its answer; here the channel closes
+    /// with nothing sent.
     #[tokio::test]
-    async fn the_startup_release_check_never_runs_once_the_opt_out_variable_is_present() {
-        for value in ["1", "0", ""] {
-            let calls = std::cell::Cell::new(0);
-            let mut answer = spawn_update_check(Some(std::ffi::OsStr::new(value)), || {
-                calls.set(calls.get() + 1);
-                async { newer_release("9.9.9") }
-            });
+    async fn the_startup_release_check_never_runs_once_opted_out() {
+        let calls = std::cell::Cell::new(0);
+        let mut answer = spawn_update_check(true, || {
+            calls.set(calls.get() + 1);
+            async { newer_release("9.9.9") }
+        });
 
-            assert_eq!(calls.get(), 0, "opt-out value {value:?}");
-            assert_eq!(answer.recv().await, None, "opt-out value {value:?}");
-        }
+        assert_eq!(calls.get(), 0);
+        assert_eq!(answer.recv().await, None);
     }
 
     fn accounting_goal(
