@@ -1,0 +1,47 @@
+name: Native Windows npm installation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-npm-install.yml'
+      - 'scripts/windows-npm-install*'
+      - 'npm/**'
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify runner and published Windows archive
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          Write-Host "Runner OS architecture: $arch"
+          if ($arch -ne 'X64') { throw "Expected native x64 Windows" }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/v0.9.3" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read published release v0.9.3" }
+          $name = 'coven-code-windows-x86_64.zip'
+          $asset = @($release.assets | Where-Object name -eq $name)
+          if ($release.draft -or $asset.Count -ne 1) { throw "Expected one published $name" }
+          Write-Host "Release $($release.tag_name), archive ID $($asset[0].id), digest $($asset[0].digest)"
+          $dir = Join-Path $env:RUNNER_TEMP 'verified-release'
+          New-Item -ItemType Directory $dir | Out-Null
+          gh release download v0.9.3 --repo $env:GITHUB_REPOSITORY --pattern $name --pattern SHA256SUMS --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw 'Release download failed' }
+          $pattern = '^([0-9A-Fa-f]{64})\s+\*?' + [regex]::Escape($name) + '$'
+          $lines = @(Get-Content -LiteralPath (Join-Path $dir 'SHA256SUMS') | Where-Object { $_ -match $pattern })
+          if ($lines.Count -ne 1) { throw 'Missing or ambiguous published checksum' }
+          $expected = [regex]::Match($lines[0], $pattern).Groups[1].Value
+          $actual = (Get-FileHash -LiteralPath (Join-Path $dir $name) -Algorithm SHA256).Hash
+          Write-Host "Published SHA-256: $expected; computed SHA-256: $actual"
+          if ($expected -ne $actual) { throw 'Archive checksum mismatch' }
