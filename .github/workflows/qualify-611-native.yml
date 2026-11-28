@@ -72,6 +72,16 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           python3 qualification/611/active.py /tmp/u611act binaries/exact/coven-code
           python3 qualification/611/matrix.py /tmp/u611mat binaries/fixture/coven-code /tmp/u611assets coven-code-linux-x86_64.tar.gz
+      - name: Run Classic and Next in Windows ConPTY
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install pywinpty
+          mkdir -p native-assets
+          cd native-assets
+          for f in SHA256SUMS coven-code-windows-x86_64.zip; do curl -fsSLO "https://github.com/OpenCoven/coven-code/releases/download/v0.9.3/$f"; done
+          grep 'coven-code-windows-x86_64.zip' SHA256SUMS | sha256sum -c -
+          cd ..
+          python qualification/611/windows.py native-results binaries native-assets
       - name: Report qualification step result
         if: always()
         env:
