@@ -1,0 +1,50 @@
+name: Confirm stalled daemon behavior on merged main
+on:
+  push:
+    branches: [qualify/580-merged-main]
+permissions:
+  contents: read
+  statuses: write
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: f31c2a5ae37513a175edc2c6b735af2e1a074c2c
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - run: sudo apt-get update && sudo apt-get install -y tmux libasound2-dev pkg-config
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-rust/target
+          key: tui-tests-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
+      - name: Build merged main
+        working-directory: src-rust
+        run: |
+          test "$(git rev-parse HEAD)" = f31c2a5ae37513a175edc2c6b735af2e1a074c2c
+          test "$(git rev-parse HEAD^{tree})" = ef026c5092e2c33371c1be3272165020432ec73e
+          cargo clean -p claurst -p claurst-tui -p claurst-commands
+          cargo build --locked --package claurst --bin coven-code
+      - name: Verify silent daemon in Classic and Next
+        env:
+          REQUIRE_TMUX: '1'
+          TUI_WIDTH: '80'
+          TUI_HEIGHT: '24'
+        run: |
+          set -o pipefail
+          bash scripts/tui-tests/run.sh 37_silent_daemon_keeps_input | tee "$RUNNER_TEMP/focused.log"
+          grep -F '56 passed  0 failed  0 skipped' "$RUNNER_TEMP/focused.log"
+      - name: Record focused result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          state=failure
+          if [ "$RESULT" = success ]; then state=success; fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state="$state" -f context=merged-main-fixture -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
