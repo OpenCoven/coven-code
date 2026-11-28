@@ -522,6 +522,23 @@ in flight, and the process then ends at once.
   and pending actions (#411's protected actions stay unavailable until their
   producer contracts exist).
 
+## Daemon responsiveness qualification
+
+Local tmux runs exercised Classic and Next with the daemon ledger enabled. Each range below covers both renderers against a listener that accepts a request and stays silent or sends one byte every half second. The baseline was #601 at `4632fd9d`. The follow-up used the same commands, fixture, and terminal size.
+
+| Observation | Baseline | Follow-up |
+| --- | --- | --- |
+| Handoff keypress to redraw | 5.022–5.056 s | 0.015–0.021 s |
+| Events keypress to redraw | 5.030–5.060 s | 0.014–0.103 s |
+| Open the familiar menu | 5.023–5.066 s | 0.011–0.085 s |
+| Quit following a handoff | 2.915–3.025 s | 4.190–4.283 s |
+
+The healthy control returned one new session for each handoff with the expected familiar, project, harness, and context. Both renderers showed success. A repeated handoff while the first was pending sent one create request in total. A successful reply released after a clear or confirmed rewind reached neither replacement conversation.
+
+Quit was timed from the first Ctrl+C until the process exited. In the baseline the composer accepted the marker after the request had timed out, so the registration had a head start by the time quit was tested. In the follow-up quit began while the request and launch registration were pending. That path has two separate two-second ledger waits. In the settled-registration fixture, exit took about two seconds. Connect, write, and read share one five-second request deadline, including when a peer trickles bytes.
+
+Hosted Rust CI and TUI Tests check the PR heads independently. The response times above come from the local fixtures. Reconnect epoch handling and release acceptance remain separate checks.
+
 ## Real-daemon recovery journey
 
 Run on 2026-11-18 against Coven v0.5.0, with the implemented part in place.

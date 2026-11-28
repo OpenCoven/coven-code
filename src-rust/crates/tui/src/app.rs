@@ -735,6 +735,7 @@ pub struct App {
     pub scope_views: std::collections::HashMap<String, crate::application::ScopeView>,
     /// A session the browser asked to resume; the loop performs it.
     pub pending_resume: Option<String>,
+    pub pending_handoff: Option<crate::handoff::HandoffRequest>,
     /// The current view was saved by a resume request still in flight.
     resume_saved_view: bool,
     /// Permission decisions by tool use id (true = allowed).
@@ -1377,6 +1378,7 @@ impl App {
             ownership: crate::application::SessionOwnership::default(),
             scope_views: std::collections::HashMap::new(),
             pending_resume: None,
+            pending_handoff: None,
             resume_saved_view: false,
             permission_decisions: std::collections::HashMap::new().into(),
             queued_approvals: Vec::new().into(),
@@ -2406,26 +2408,11 @@ impl App {
             return true;
         }
 
-        let context = crate::handoff::build_handoff_context(&self.messages, familiar);
-        let root = self.project_root().to_string_lossy().to_string();
-        match crate::handoff::send_handoff(familiar, context, &root) {
-            Ok(session_id) => {
-                self.push_notification(
-                    NotificationKind::Info,
-                    format!(
-                        "Handed off to {familiar}. Session created in Coven daemon. (id: {session_id})"
-                    ),
-                    Some(5),
-                );
-            }
-            Err(err) => {
-                self.push_notification(
-                    NotificationKind::Warning,
-                    format!("Handoff failed: {err}"),
-                    Some(5),
-                );
-            }
-        }
+        self.pending_handoff = Some(crate::handoff::HandoffRequest {
+            familiar: familiar.to_owned(),
+            context: crate::handoff::build_handoff_context(&self.messages, familiar),
+            project_root: self.project_root().to_string_lossy().into_owned(),
+        });
         true
     }
 

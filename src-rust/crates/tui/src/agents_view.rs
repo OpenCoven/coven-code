@@ -10,7 +10,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use claurst_core::coven_shared;
@@ -243,6 +243,7 @@ pub enum AgentsRoute {
 #[derive(Debug, Clone)]
 pub struct AgentsMenuState {
     pub visible: bool,
+    pending_badges: Option<Arc<OnceLock<FamiliarStatuses>>>,
     pub route: AgentsRoute,
     pub definitions: Vec<AgentDefinition>,
     pub active_agents: Vec<AgentInfo>,
@@ -256,6 +257,7 @@ impl AgentsMenuState {
     pub fn new() -> Self {
         Self {
             visible: false,
+            pending_badges: None,
             route: AgentsRoute::List,
             definitions: Vec::new(),
             active_agents: Vec::new(),
@@ -267,15 +269,39 @@ impl AgentsMenuState {
     }
 
     pub fn open(&mut self, project_root: &std::path::Path) {
-        self.definitions = load_agent_definitions(project_root);
+        self.definitions = load_local_agent_definitions(project_root);
         self.selected_row = 0;
         self.list_scroll = 0;
         self.route = AgentsRoute::List;
         self.project_root = Some(project_root.to_path_buf());
         self.visible = true;
+        self.pending_badges = None;
+        if self
+            .definitions
+            .iter()
+            .any(|d| d.source.starts_with("coven:familiar:"))
+        {
+            let badges = Arc::new(OnceLock::new());
+            self.pending_badges = Some(Arc::clone(&badges));
+            std::thread::spawn(move || {
+                let _ = badges.set(daemon_familiar_statuses());
+            });
+        }
+    }
+
+    pub fn settle_badges(&mut self) {
+        if let Some(statuses) = self
+            .pending_badges
+            .as_ref()
+            .and_then(|pending| pending.get())
+        {
+            apply_familiar_badges(&mut self.definitions, statuses);
+            self.pending_badges = None;
+        }
     }
 
     pub fn close(&mut self) {
+        self.pending_badges = None;
         self.visible = false;
     }
 
@@ -402,7 +428,7 @@ impl AgentsMenuState {
             });
 
         write_editor_to_disk(&file_path, &self.editor)?;
-        self.definitions = load_agent_definitions(&root);
+        self.definitions = load_local_agent_definitions(&root);
 
         let saved_idx = self
             .definitions
@@ -457,7 +483,7 @@ impl AgentsMenuState {
                 Ok(removed) => {
                     crate::coven_status::invalidate_roster_cache();
                     if let Some(root) = self.project_root.clone() {
-                        self.definitions = load_agent_definitions(&root);
+                        self.definitions = load_local_agent_definitions(&root);
                     } else {
                         self.definitions.remove(idx);
                     }
@@ -484,7 +510,7 @@ impl AgentsMenuState {
             .map_err(|err| format!("Failed to remove {}: {}", def.file_path.display(), err))?;
 
         if let Some(root) = self.project_root.clone() {
-            self.definitions = load_agent_definitions(&root);
+            self.definitions = load_local_agent_definitions(&root);
         } else {
             self.definitions.remove(idx);
         }
@@ -507,7 +533,7 @@ impl AgentsMenuState {
             .map_err(|err| format!("Failed to reset agents and familiars: {err}"))?;
         crate::coven_status::invalidate_roster_cache();
         if let Some(root) = root {
-            self.definitions = load_agent_definitions(&root);
+            self.definitions = load_local_agent_definitions(&root);
         } else {
             self.definitions.clear();
         }
@@ -531,6 +557,32 @@ impl Default for AgentsMenuState {
 
 /// Load agent definitions from `.coven-code/agents/` in project root and home dir.
 pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefinition> {
+    let mut definitions = load_local_agent_definitions(project_root);
+    if definitions
+        .iter()
+        .any(|d| d.source.starts_with("coven:familiar:"))
+    {
+        apply_familiar_badges(&mut definitions, &daemon_familiar_statuses());
+    }
+    definitions
+}
+
+type FamiliarStatuses = HashMap<String, coven_shared::FamiliarStatus>;
+
+fn apply_familiar_badges(definitions: &mut [AgentDefinition], statuses: &FamiliarStatuses) {
+    for definition in definitions {
+        if let Some(badge) = definition
+            .source
+            .strip_prefix("coven:familiar:")
+            .and_then(|id| statuses.get(id))
+            .and_then(familiar_live_badge)
+        {
+            definition.description.push_str(&badge);
+        }
+    }
+}
+
+fn load_local_agent_definitions(project_root: &Path) -> Vec<AgentDefinition> {
     let mut defs = Vec::new();
     let dirs = [
         Some(claurst_core::config::config_home().join("agents")),
@@ -570,9 +622,6 @@ pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefini
         let familiar_names: std::collections::HashSet<String> =
             defs.iter().map(|d| d.name.to_lowercase()).collect();
 
-        // Tier B: fetch live status from the daemon (degrades gracefully).
-        let daemon_statuses = daemon_familiar_statuses();
-
         for fam in &familiars {
             let display = fam.display_name.as_deref().unwrap_or(&fam.id).to_string();
             // Reserved familiar names are limited to the user — never surface a
@@ -586,14 +635,7 @@ pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefini
             if familiar_names.contains(&display.to_lowercase()) {
                 continue;
             }
-            let mut agent_def = familiar_as_agent_def(fam);
-            // Annotate with live daemon status when available.
-            if let Some(live) = daemon_statuses.get(&fam.id) {
-                if let Some(badge) = familiar_live_badge(live) {
-                    agent_def.description.push_str(&badge);
-                }
-            }
-            defs.push(agent_def);
+            defs.push(familiar_as_agent_def(fam));
         }
     }
 

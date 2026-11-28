@@ -179,6 +179,43 @@ _sdk_journey() { # renderer, dir
     assert_eq "$(_sdk_count "$log" "GET /api/v1/familiars ")" "$before" \
       "$r: the daemon never saw the second listing's request"
 
+    # The local roster must open and close before the live badge request times out.
+    tui_type "/familiar"; sleep 0.3; tui_keys Enter
+    if _sdk_seen_within "j/k navigate" 25; then
+      _pass "$r: the familiar menu opens while live badges are pending"
+    else
+      _fail "$r: the familiar menu opens while live badges are pending" "$(tui_capture)"
+    fi
+    tui_keys Escape; sleep 0.2
+
+    before="$(_sdk_count "$log" "POST /api/v1/sessions ")"
+    tui_type "/familiar handoff wisp"; sleep 0.3; tui_keys Enter
+    if _sdk_seen_within "Waiting for Coven" 25; then
+      _pass "$r: handoff leaves the interface responsive"
+    else
+      _fail "$r: handoff leaves the interface responsive" "$(tui_capture)"
+    fi
+    tui_type "/familiar handoff wisp"; sleep 0.3; tui_keys Enter
+    if _sdk_seen_within "Not sent; waiting on" 20; then
+      _pass "$r: repeating a pending handoff reports that it was not sent"
+    else
+      _fail "$r: repeating a pending handoff reports that it was not sent" "$(tui_capture)"
+    fi
+    tui_type "/clear"; sleep 0.3; tui_keys Enter
+    if _sdk_seen_within "Conversation cleared" 20; then
+      _pass "$r: clearing the transcript works during handoff"
+    else
+      _fail "$r: clearing the transcript works during handoff" "$(tui_capture)"
+    fi
+    sleep 5
+    assert_eq "$(_sdk_count "$log" "POST /api/v1/sessions ")" "$((before + 1))" \
+      "$r: the daemon received exactly one handoff"
+    if grep -qF "Handoff failed" <<<"$(tui_capture)"; then
+      _fail "$r: the old handoff error stays out of the cleared conversation" "$(tui_capture)"
+    else
+      _pass "$r: the old handoff error stays out of the cleared conversation"
+    fi
+
     # The launch registration has long given up (2 s health, 5 s request).
     assert_eq "$(_sdk_count "$log" "POST /api/v1/sessions/external ")" "1" \
       "$r: the session sent its registration at launch"

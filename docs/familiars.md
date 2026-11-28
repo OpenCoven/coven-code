@@ -33,6 +33,14 @@ Familiars are appended **after** workspace agents in the list. If a user-defined
 
 ---
 
+## When the daemon is slow
+
+Open `/familiar` to see locally configured familiars. The menu fetches live badges in the background. You can select a familiar or close the menu while the daemon is busy.
+
+After `/familiar handoff <name>`, you can keep typing while Coven waits for the session ID. A request times out after five seconds without a complete reply. If a handoff times out, check `/coven sessions` before trying again. The daemon may have created the session before its reply was lost.
+
+If you quit while the daemon is busy, Coven waits up to two seconds for pending ledger registration and up to two more for completion. You can close the familiar menu while its live badges are loading.
+
 ## The `/agents` overlay
 
 Open the agents panel with the `/agents` slash command inside an interactive session. The overlay splits the list into two sections:

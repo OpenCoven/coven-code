@@ -3529,7 +3529,16 @@ impl DaemonListings {
             }
         };
         if let Some(pending) = self.pending.take() {
+            let handoff = pending.command == "/familiar handoff";
             pending.clear_notices(app);
+            if handoff {
+                let (kind, text) = match answer {
+                    Ok(text) => (NotificationKind::Info, text),
+                    Err(text) => (NotificationKind::Warning, text),
+                };
+                app.push_notification(kind, text, Some(5));
+                return;
+            }
         }
         match answer {
             Ok(message) => app.push_message(claurst_core::types::Message::assistant(message)),
@@ -4272,7 +4281,11 @@ async fn run_interactive(
             spawn_memory_read,
         );
         let turn_running = app.is_streaming || current_query.is_some();
+        app.agents_menu.settle_badges();
         daemon_listings.settle(&mut app, std::time::Instant::now(), turn_running);
+        if let Some(handoff) = app.pending_handoff.take() {
+            daemon_listings.start(&mut app, "/familiar handoff", move || handoff.deliver());
+        }
 
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
@@ -5481,6 +5494,7 @@ async fn run_interactive(
                     }
                     if app.rewind_confirmed_at.is_some() {
                         base_query_config.cli_session = Default::default();
+                        daemon_listings.forget(&mut app);
                     }
                     adopt_in_app_rewind(&mut session_scope, &mut app, &mut messages, &mut session);
                 }
