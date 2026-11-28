@@ -5,7 +5,6 @@ use crate::{PermissionLevel, Tool, ToolContext, ToolResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use tracing::{debug, warn};
 
@@ -484,7 +483,7 @@ async fn fetch_page(
         }
     }
     let retrieved_at = chrono::Utc::now().to_rfc3339();
-    let body_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let body_sha256 = claurst_core::crypto_utils::sha256_hex(&bytes);
     let body = String::from_utf8_lossy(&bytes);
     let utf8_replacements = matches!(&body, std::borrow::Cow::Owned(_));
     let mime = content_type.as_deref().unwrap_or("");

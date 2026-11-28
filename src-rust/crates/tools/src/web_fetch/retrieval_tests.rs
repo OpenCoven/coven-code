@@ -136,7 +136,23 @@ async fn each_cache_use_requires_a_fresh_response_and_unchanged_body() {
         url: url.to_string(),
         prompt: None,
     };
-    for (text, cached) in [("first", false), ("second", false), ("second", true)] {
+    for (text, cached, digest) in [
+        (
+            "first",
+            false,
+            "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e",
+        ),
+        (
+            "second",
+            false,
+            "16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4",
+        ),
+        (
+            "second",
+            true,
+            "16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4",
+        ),
+    ] {
         let result = fetch_page(&params, &context(), &url, &client, directory.path()).await;
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(result.content, text);
@@ -147,10 +163,7 @@ async fn each_cache_use_requires_a_fresh_response_and_unchanged_body() {
         assert_eq!(metadata.http_status, 200);
         assert_eq!(metadata.content_type.as_deref(), Some("text/plain"));
         assert!(chrono::DateTime::parse_from_rfc3339(&metadata.retrieved_at).is_ok());
-        assert_eq!(
-            metadata.body_sha256,
-            format!("{:x}", Sha256::digest(text.as_bytes()))
-        );
+        assert_eq!(metadata.body_sha256, digest);
         assert_eq!(metadata.body_bytes, text.len());
         assert_eq!(metadata.extraction, Extraction::PlainText);
         assert_eq!(metadata.extraction_cached, cached);
@@ -354,7 +367,7 @@ async fn cached_model_extraction_is_still_labeled_as_model_rewritten() {
     cache::save(
         directory.path(),
         url.as_str(),
-        &format!("{:x}", Sha256::digest(body.as_bytes())),
+        "904218d555a95049c3307ba37d6c6784295cd04bf53d6e498c053aa1f177444c",
         "text/html",
         &extracted,
     )
@@ -418,7 +431,7 @@ async fn invalid_utf8_is_decoded_with_an_explicit_replacement_receipt() {
     assert_eq!(metadata.body_bytes, 2);
     assert_eq!(
         metadata.body_sha256,
-        format!("{:x}", Sha256::digest([b'a', 0xff]))
+        "8dd06b5ab6b594257e41b7d8dd440a4062eddc67fdab5c13b4dc300176896f6e"
     );
     assert!(metadata.utf8_replacements);
 }
