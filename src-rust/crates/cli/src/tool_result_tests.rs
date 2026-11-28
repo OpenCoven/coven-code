@@ -23,6 +23,20 @@ impl Interactive {
     /// A resumed session, set up as the loop sets it up, that has then run
     /// one turn calling a tool, through to the turn's join.
     fn after_a_tool_turn(renderer: UiRenderer) -> Self {
+        Self::after_tool_turn(
+            renderer,
+            "Bash",
+            serde_json::json!({"command": "cargo test"}),
+            ToolResultContent::Text("ok".into()),
+        )
+    }
+
+    fn after_tool_turn(
+        renderer: UiRenderer,
+        name: &str,
+        input: serde_json::Value,
+        content: ToolResultContent,
+    ) -> Self {
         let history = vec![
             Message::user("First question.".to_string()),
             Message::assistant("First answer.".to_string()),
@@ -50,13 +64,13 @@ impl Interactive {
 
         let mut call = Message::assistant_blocks(vec![ContentBlock::ToolUse {
             id: "toolu-1".to_string(),
-            name: "Bash".to_string(),
-            input: serde_json::json!({ "command": "cargo test" }),
+            name: name.to_string(),
+            input: input.clone(),
         }]);
         call.uuid = Some("msg-call".to_string());
         let result = Message::user_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: "toolu-1".to_string(),
-            content: ToolResultContent::Text("ok".to_string()),
+            content,
             is_error: None,
         }]);
         let mut answer = Message::assistant("The tests pass.".to_string());
@@ -68,12 +82,12 @@ impl Interactive {
                 message: call.clone(),
             },
             QueryEvent::ToolStart {
-                tool_name: "Bash".to_string(),
+                tool_name: name.to_string(),
                 tool_id: "toolu-1".to_string(),
-                input_json: r#"{"command":"cargo test"}"#.to_string(),
+                input_json: serde_json::to_string(&input).unwrap(),
             },
             QueryEvent::ToolEnd {
-                tool_name: "Bash".to_string(),
+                tool_name: name.to_string(),
                 tool_id: "toolu-1".to_string(),
                 result: "ok".to_string(),
                 is_error: false,
@@ -229,3 +243,6 @@ fn a_cancelled_rewind_changes_nothing() {
         assert!(holds_the_tool_result(&cli.messages), "{case}");
     }
 }
+
+#[path = "webfetch_history_tests.rs"]
+mod webfetch_history_tests;
