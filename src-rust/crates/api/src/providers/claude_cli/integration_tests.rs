@@ -68,21 +68,39 @@ async fn internal_progress_does_not_suppress_consumer_keepalives() {
     assert!(pings >= 5, "internal stdout suppressed keepalives: {pings}");
 }
 
+// Give the real subprocess time to start. Once the expected output reaches
+// the consumer, advance Tokio time independently of process scheduling.
+const QUIET: Duration = Duration::from_secs(30);
+const HEARTBEAT: Duration = Duration::from_secs(300);
+
+async fn expect_quiet_timeout(
+    mut stream: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+) {
+    tokio::time::pause();
+    let start = tokio::time::Instant::now();
+    let terminal = tokio::time::timeout(QUIET + Duration::from_secs(1), async {
+        loop {
+            match stream.next().await {
+                Some(Ok(StreamEvent::MessageStart { .. })) => continue,
+                other => break other,
+            }
+        }
+    })
+    .await
+    .expect("stream did not enforce the configured quiet deadline before the heartbeat");
+    assert!(
+        matches!(&terminal, Some(Err(ProviderError::StreamError { message, .. })) if message.contains("printed nothing")),
+        "{terminal:?}"
+    );
+    assert!(start.elapsed() >= QUIET, "quiet deadline fired early");
+}
+
 #[tokio::test]
 async fn a_short_quiet_deadline_does_not_wait_for_the_heartbeat() {
-    let f = Fixture::new(
-        &format!("{INIT}\nsleep 1\n{ANSWER}\n{RESULT}"),
-        Duration::from_secs(5),
-        Some(Duration::from_millis(200)),
-    );
-    let events = f.collect().await;
-    assert!(
-        matches!(events.last(), Some(Err(ProviderError::StreamError { message, .. })) if message.contains("printed nothing")),
-        "{events:?}"
-    );
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, Ok(StreamEvent::TextDelta { .. }))));
+    let f = Fixture::new(&format!("{INIT}\nexec sleep 90"), HEARTBEAT, Some(QUIET));
+    let request = request_with(vec![Message::user("fixture prompt")]);
+    let stream = f.provider.create_message_stream(request).await.unwrap();
+    expect_quiet_timeout(stream).await;
 }
 
 #[tokio::test]
@@ -131,14 +149,23 @@ async fn failed_cli_exit_after_a_result_is_not_success() {
 #[tokio::test]
 async fn completed_results_publish_usage_before_a_later_timeout() {
     let f = Fixture::new(
-        &format!("{INIT}\n{TASK}\n{RESULT}\nexec sleep 2"),
-        Duration::from_millis(50),
-        Some(Duration::from_millis(200)),
+        &format!("{INIT}\n{TASK}\n{RESULT}\nexec sleep 90"),
+        HEARTBEAT,
+        Some(QUIET),
     );
-    let events = f.collect().await;
+    let request = request_with(vec![Message::user("fixture prompt")]);
+    let mut stream = f.provider.create_message_stream(request).await.unwrap();
     let mut accumulator = crate::StreamAccumulator::new();
-    for event in events.iter().flatten() {
-        accumulator.on_provider_event(event);
+    loop {
+        let event = stream
+            .next()
+            .await
+            .expect("stream ended before usage")
+            .expect("stream failed before usage");
+        accumulator.on_provider_event(&event);
+        if matches!(event, StreamEvent::MessageDelta { usage: Some(_), .. }) {
+            break;
+        }
     }
     let (_, usage, _) = accumulator.finish();
     assert_eq!(
@@ -150,7 +177,7 @@ async fn completed_results_publish_usage_before_a_later_timeout() {
         ),
         (10, 5, 3, 7)
     );
-    assert!(events.last().unwrap().is_err(), "{events:?}");
+    expect_quiet_timeout(stream).await;
 }
 
 #[tokio::test]
@@ -200,31 +227,19 @@ async fn unrelated_metadata_does_not_extend_the_exit_grace() {
 #[tokio::test]
 async fn a_persisted_goal_turn_preserves_the_quiet_limit() {
     use claurst_core::goal::{GoalStore, GoalTurnPermission};
-    let f = Fixture::new(
-        &format!("{INIT}\nexec sleep 2"),
-        Duration::from_millis(50),
-        Some(Duration::from_millis(200)),
-    );
+    let f = Fixture::new(&format!("{INIT}\nexec sleep 90"), HEARTBEAT, Some(QUIET));
     let store = GoalStore::open(&f.dir.join("goals.sqlite")).unwrap();
     store
         .set_goal("fixture", "Exercise the persisted goal provider", None)
         .unwrap();
     let turn = store.capture_active_goal("fixture").unwrap().unwrap();
     let request = request_with(vec![Message::user("fixture prompt")]);
-    let mut stream = f
+    let stream = f
         .provider
         .create_message_stream_for_goal(request, Some(&turn), GoalTurnPermission::Work)
         .await
         .unwrap();
-    let mut failed = false;
-    while let Some(event) = stream.next().await {
-        if matches!(event, Err(ProviderError::StreamError { message, .. }) if message.contains("printed nothing"))
-        {
-            failed = true;
-            break;
-        }
-    }
-    assert!(failed);
+    expect_quiet_timeout(stream).await;
     assert!(turn.request_attempted());
     assert_eq!(turn.validate().unwrap(), GoalTurnPermission::Work);
 }

@@ -20,5 +20,6 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 async-stream = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 # Unique temporary fixture directories in Codex goal tests.
 uuid = { workspace = true }
