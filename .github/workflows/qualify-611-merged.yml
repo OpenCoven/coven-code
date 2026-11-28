@@ -1,0 +1,83 @@
+name: Verify merged standalone updater on main
+on:
+  push:
+    branches: [qualify/611-merged-main]
+    paths: ['.github/workflows/qualify-611-merged.yml']
+permissions:
+  contents: read
+  statuses: write
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          ref: 5b4e998b0fb5138a985b4988425a118d34378d65
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux pkg-config libasound2-dev
+      - uses: actions/cache/restore@v5
+        if: runner.os == 'Linux'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: tui-tests-registry-${{ hashFiles('candidate/src-rust/Cargo.lock') }}
+      - name: Build exact candidate
+        working-directory: candidate/src-rust
+        run: |
+          test "$(git rev-parse HEAD)" = 5b4e998b0fb5138a985b4988425a118d34378d65
+          cargo build --locked --package claurst --bin coven-code
+          mkdir -p ../../binaries/exact
+          if [[ "$RUNNER_OS" = Windows ]]; then cp target/debug/coven-code.exe ../../binaries/exact/; else cp target/debug/coven-code ../../binaries/exact/; fi
+      - name: Build disposable older version with loopback release URLs
+        working-directory: candidate
+        run: |
+          python scripts/bump-version.py v0.9.2
+          python - <<'PY'
+          from pathlib import Path
+          for f,a,b in [('commands/src/lib.rs','https://api.github.com/repos/{COVEN_CODE_REPO}/releases/latest','http://127.0.0.1:41611/repos/{COVEN_CODE_REPO}/releases/latest'),('cli/src/upgrade.rs','https://github.com/{REPO}/releases/download/v{target_version}','http://127.0.0.1:41611/{REPO}/releases/download/v{target_version}')]:
+              p=Path('src-rust/crates')/f;s=p.read_text();assert s.count(a)==1;p.write_text(s.replace(a,b))
+          PY
+          cd src-rust
+          cargo build --locked --package claurst --bin coven-code
+          mkdir -p ../../binaries/fixture
+          if [[ "$RUNNER_OS" = Windows ]]; then cp target/debug/coven-code.exe ../../binaries/fixture/; else cp target/debug/coven-code ../../binaries/fixture/; fi
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: windows-611-native-fixtures
+          path: binaries
+          retention-days: 7
+      - name: Run Classic and Next in native terminals
+        if: runner.os == 'Linux'
+        run: |
+          mkdir /tmp/u611mat /tmp/u611act /tmp/u611assets
+          cd /tmp/u611assets
+          for f in SHA256SUMS coven-code-linux-x86_64.tar.gz; do curl -fsSLO "https://github.com/OpenCoven/coven-code/releases/download/v0.9.3/$f"; done
+          grep 'coven-code-linux-x86_64.tar.gz' SHA256SUMS | sha256sum -c -
+          cd "$GITHUB_WORKSPACE"
+          python3 qualification/611/active.py /tmp/u611act binaries/exact/coven-code
+          python3 qualification/611/matrix.py /tmp/u611mat binaries/fixture/coven-code /tmp/u611assets coven-code-linux-x86_64.tar.gz
+      - name: Report qualification step result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          state=failure
+          if [[ "$RESULT" = success ]]; then state=success; fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state="$state" -f context="native-611-$RUNNER_OS" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
