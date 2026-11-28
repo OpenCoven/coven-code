@@ -74,7 +74,9 @@ if (process.env.SCENARIO === 'windows_quote') {
   require('child_process').execFileSync = (program, args) => {
     assert.equal(program, 'powershell');
     assert.deepEqual(args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
-    const match = /^Expand-Archive -Force -LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)'$/.exec(args[3]);
+    const setup = "$ErrorActionPreference = 'Stop'; Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Archive'); ";
+    assert.ok(args[3].startsWith(setup), args[3]);
+    const match = /^Expand-Archive -Force -LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)'$/.exec(args[3].slice(setup.length));
     assert.ok(match, args[3]);
     const source = match[1].replace(/''/g, "'");
     const destination = match[2].replace(/''/g, "'");
