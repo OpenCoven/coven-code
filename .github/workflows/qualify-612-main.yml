@@ -8,6 +8,7 @@ permissions:
   statuses: write
 jobs:
   native:
+    name: Native account routing with per-launch tmux sockets
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
