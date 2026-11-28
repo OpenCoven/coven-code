@@ -1657,7 +1657,7 @@ mod tests {
         let path = dir.path().join("goals.sqlite");
         let first = GoalStore::open(&path).unwrap();
         first.set_goal("sess1", "serialize writers", None).unwrap();
-        let second = GoalStore::open(&path).unwrap();
+        let mut second = GoalStore::open(&path).unwrap();
         let transaction = rusqlite::Transaction::new_unchecked(
             &first.conn,
             rusqlite::TransactionBehavior::Immediate,
@@ -1908,7 +1908,11 @@ mod tests {
             RACE_STATE.get_or_init(|| (Mutex::new(RacePhase::Waiting), Condvar::new()))
         }
 
-        fn pause_race_profile(sql: &str, _: Duration) {
+        fn pause_race_profile(event: rusqlite::trace::TraceEvent<'_>) {
+            let rusqlite::trace::TraceEvent::Profile(statement, _) = event else {
+                return;
+            };
+            let sql = statement.sql();
             let (lock, condvar) = race_state();
             let mut phase = lock.lock().unwrap();
             if sql.starts_with("UPDATE goals SET status = 'paused'") {
@@ -1934,7 +1938,13 @@ mod tests {
         let second = GoalStore::open(&path).unwrap();
         let (lock, _) = race_state();
         *lock.lock().unwrap() = RacePhase::Waiting;
-        first.conn.profile(Some(pause_race_profile));
+        first
+            .conn
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
+                Some(pause_race_profile),
+            )
+            .unwrap();
 
         let resumer = thread::spawn(move || {
             let (lock, condvar) = race_state();
@@ -1961,7 +1971,13 @@ mod tests {
         });
 
         let outcome = first.pause_active_goal("session");
-        first.conn.profile(None);
+        first
+            .conn
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::empty(),
+                None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+            )
+            .unwrap();
         resumer.join().unwrap();
 
         assert_eq!(outcome, Ok(()));
