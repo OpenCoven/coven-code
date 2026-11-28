@@ -34,9 +34,83 @@ pub fn build_default_http_client(provider: &ProviderId) -> Result<reqwest::Clien
         })
 }
 
+/// An error followed by each cause under it, joined with ": ".
+///
+/// `reqwest::Error`'s `Display` stops at "error sending request for url
+/// (...)" and keeps the reason in `source()`. Without the chain, a failed
+/// send never says whether DNS, a refused or reset connection, TLS or the
+/// timeout was at fault. A cause whose text is already present is skipped,
+/// since some errors repeat their source in their own `Display`.
+pub fn error_with_causes(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|layer| layer as _)
+        }
+    }
+
+    #[test]
+    fn error_with_causes_names_each_cause_once() {
+        let chain = Layer(
+            "error sending request for url (https://example.invalid/)",
+            Some(Box::new(Layer(
+                "client error (Connect)",
+                Some(Box::new(Layer(
+                    "client error (Connect)",
+                    Some(Box::new(Layer("Connection refused (os error 61)", None))),
+                ))),
+            ))),
+        );
+        assert_eq!(
+            error_with_causes(&chain),
+            "error sending request for url (https://example.invalid/): client error (Connect): Connection refused (os error 61)"
+        );
+        assert_eq!(error_with_causes(&Layer("alone", None)), "alone");
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_says_why() {
+        // Bind and release a loopback port, so nothing listens on it and the
+        // connection is refused without leaving the machine.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("loopback port");
+        let client = build_default_http_client(&ProviderId::new("test")).expect("client");
+        let error = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("nothing listens on the port");
+        let top = error.to_string();
+        let text = error_with_causes(&error);
+        assert!(text.starts_with(&top), "{text}");
+        assert!(text.len() > top.len(), "the cause is missing: {text}");
+    }
 
     #[test]
     fn build_default_http_client_succeeds_for_well_known_provider() {
