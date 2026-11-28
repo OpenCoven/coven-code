@@ -146,6 +146,9 @@ async function main() {
     if (archive === '.zip') {
       execFileSync('powershell', [
         '-NoProfile', '-NonInteractive', '-Command',
+        // Windows PowerShell may inherit a PowerShell 7 module path from npm's parent.
+        "$ErrorActionPreference = 'Stop'; " +
+        "Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Archive'); " +
         `Expand-Archive -Force -LiteralPath ${powershellLiteral(tmpPath)} -DestinationPath ${powershellLiteral(stageDir)}`
       ]);
     } else {
