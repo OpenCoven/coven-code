@@ -74,6 +74,7 @@ pub async fn handle(
         user_question_tx: None,
     };
     let mut query_config = runtime.query_config.clone();
+    query_config.cli_session = session.cli_session.clone();
     query_config.working_directory = session.cwd.to_str().map(str::to_owned);
 
     // Event channel + forwarder.
@@ -124,8 +125,8 @@ pub async fn handle(
         if *token == cancel {
             *token = tokio_util::sync::CancellationToken::new();
         }
-        return Err(acp::Error::new(
-            -32000,
+        return Err(crate::admission::capacity_error(
+            "output_capacity",
             "ACP output capacity exceeded; streamed output is incomplete",
         ));
     }

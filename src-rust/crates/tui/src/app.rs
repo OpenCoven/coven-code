@@ -827,6 +827,11 @@ pub struct App {
     // ---- Visual mode indicators -------------------------------------------
     /// Plan mode — input border turns blue, [PLAN] shown in status bar.
     pub plan_mode: bool,
+    /// Whether the launch, not the saved settings, chose the session's
+    /// permission mode (`--permission-mode`, `--dangerously-skip-permissions`,
+    /// a GitHub context or a scoped workspace). A reload of the saved settings
+    /// (`/config import`) then keeps the session's mode, as a start does.
+    pub permission_mode_from_launch: bool,
     /// "While you were away" summary text shown on the welcome screen.
     pub away_summary: Option<String>,
     /// When streaming stalled (used to turn the spinner red after 3 s).
@@ -1408,6 +1413,7 @@ impl App {
             file_history: None,
             current_turn: None,
             plan_mode: false,
+            permission_mode_from_launch: false,
             away_summary: None,
             stall_start: None,
             settings_screen: SettingsScreen::new(),
@@ -1739,7 +1745,9 @@ impl App {
                 let new_config = new_settings.effective_config();
                 let result_message = claurst_core::summarize_import_result(&result, &paths);
                 let imported_mcp = result.imported_fields.iter().any(|f| f == "mcpServers");
-                self.config = new_config.clone();
+                let session_mode = self.config.permission_mode.clone();
+                self.config = new_config;
+                self.config.permission_mode = self.permission_mode_after_reload(session_mode);
                 self.model_name = self.config.effective_model().to_string();
                 self.cost_tracker.set_model(&self.model_name);
                 self.refresh_context_window_size();
@@ -1767,6 +1775,39 @@ impl App {
                 self.import_config_dialog.close();
             }
         }
+    }
+
+    /// The session's permission mode once the saved settings, now in
+    /// `self.config`, have been reloaded, under the rule a start follows. A
+    /// mode chosen at launch stays. Otherwise a saved `acceptEdits` or `plan`
+    /// applies. A saved bypass mode is never restored and a saved `default`
+    /// cannot be told apart from nothing saved, so both leave the session's
+    /// mode as it is: a reload never loosens it to `default` or to bypass.
+    /// Each reload that changes the mode or refuses a saved bypass says so.
+    fn permission_mode_after_reload(
+        &mut self,
+        session_mode: claurst_core::config::PermissionMode,
+    ) -> claurst_core::config::PermissionMode {
+        use claurst_core::config::PermissionMode;
+        if self.permission_mode_from_launch {
+            return session_mode;
+        }
+        let saved = self.config.permission_mode.clone();
+        let restored = saved.restored_from_settings();
+        let refused = restored.mode != saved;
+        let mode = if refused || saved == PermissionMode::Default {
+            session_mode.clone()
+        } else {
+            restored.mode
+        };
+        // A session already in bypass, chosen in the session, was not refused.
+        if mode != session_mode || (refused && session_mode != saved) {
+            if let Some(notice) = restored.notice {
+                self.notifications
+                    .push(NotificationKind::Warning, notice.to_string(), Some(30));
+            }
+        }
+        mode
     }
 
     pub(crate) fn current_user_turn_index(&self) -> Option<usize> {
@@ -4438,11 +4479,14 @@ impl App {
             && self.next_shell.inspector.is_some()
             && context == KeyContext::Chat
             && self.prompt_input.suggestions.is_empty();
-        let contexts = if inspector_layer {
-            vec![KeyContext::Inspector, context]
-        } else {
-            vec![context]
-        };
+        let mut contexts = Vec::with_capacity(3);
+        if inspector_layer {
+            contexts.push(KeyContext::Inspector);
+        }
+        if context == KeyContext::Chat && self.vim_line_open() {
+            contexts.push(KeyContext::VimLine);
+        }
+        contexts.push(context);
         let result = match key_event_to_keystroke(&key) {
             Some(stroke) => self.keybindings.process_layered(stroke, &contexts),
             None => {
@@ -5557,6 +5601,7 @@ impl App {
         // empty and no typeahead item is selected. This must run before the
         // user keybinding resolver, which normally claims Enter as submit.
         if key.code == KeyCode::Enter
+            && !self.vim_line_open()
             && !self.is_streaming
             && self.prompt_input.text.is_empty()
             && self.prompt_input.suggestion_index.is_none()
@@ -5580,6 +5625,7 @@ impl App {
             KeybindingResult::Action(action) => return self.handle_keybinding_action(&action),
             KeybindingResult::Pending => return false,
             KeybindingResult::NoMatch if had_pending_chord => return false,
+            KeybindingResult::Unbound if self.vim_line_open() => return false,
             KeybindingResult::Unbound | KeybindingResult::NoMatch => {}
         }
 
@@ -5663,12 +5709,7 @@ impl App {
         if key.code == KeyCode::Char('v')
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::SUPER))
-            && !matches!(
-                self.prompt_input.vim_mode,
-                crate::prompt_input::VimMode::Normal
-                    | crate::prompt_input::VimMode::Visual
-                    | crate::prompt_input::VimMode::VisualBlock
-            )
+            && !self.vim_blocks_clipboard_paste()
         {
             use crate::image_paste::{
                 read_clipboard_image, read_clipboard_text, read_primary_text,
@@ -5737,6 +5778,15 @@ impl App {
                 self.status_message = Some("Cancelled.".to_string());
                 self.request_turn_cancellation();
                 self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
+            }
+
+            // ---- ESC: vim leaves Insert, Visual, a pending command or the
+            // `:` and `/` lines (#569). Everything above takes Escape first:
+            // modals and overlays, notices, key bindings, transcript focus
+            // and a running turn's cancel.
+            KeyCode::Esc if self.prompt_input.vim_enabled => {
+                self.prompt_input.vim_command("Escape");
+                self.refresh_prompt_input();
             }
 
             // ---- Quit / cancel ----------------------------------------
@@ -6116,6 +6166,16 @@ impl App {
         }
 
         false
+    }
+
+    /// An open Vim command or search line owns the user's Enter before the CLI
+    /// takes the draft for immediate or queued submission.
+    pub fn vim_line_open(&self) -> bool {
+        self.prompt_input.vim_enabled
+            && matches!(
+                self.prompt_input.vim_mode,
+                VimMode::Command | VimMode::Search
+            )
     }
 
     fn current_key_context(&self) -> KeyContext {
@@ -6649,6 +6709,18 @@ impl App {
             "openSearch" => {
                 self.global_search.open();
                 self.refresh_global_search();
+                false
+            }
+            "vimLineAccept" | "vimLineBackspace" if self.vim_line_open() => {
+                self.prompt_input.vim_command(if action == "vimLineAccept" {
+                    "Enter"
+                } else {
+                    "Backspace"
+                });
+                if std::mem::take(&mut self.prompt_input.vim_quit_requested) {
+                    self.should_exit = true;
+                }
+                self.refresh_prompt_input();
                 false
             }
             "submit" if !self.is_streaming => {
@@ -7303,16 +7375,19 @@ impl App {
         }
     }
 
+    fn vim_blocks_clipboard_paste(&self) -> bool {
+        self.prompt_input.vim_enabled
+            && matches!(
+                self.prompt_input.vim_mode,
+                VimMode::Normal | VimMode::Visual | VimMode::VisualBlock
+            )
+    }
+
     fn prompt_can_accept_selection_paste(&self) -> bool {
         !self.is_streaming
             && self.permission_request.is_none()
             && !self.history_search_overlay.visible
-            && !matches!(
-                self.prompt_input.vim_mode,
-                crate::prompt_input::VimMode::Normal
-                    | crate::prompt_input::VimMode::Visual
-                    | crate::prompt_input::VimMode::VisualBlock
-            )
+            && !self.vim_blocks_clipboard_paste()
     }
 
     fn paste_primary_into_prompt(&mut self) -> bool {
@@ -7397,7 +7472,7 @@ impl App {
         // paste-burst capture while it is open.
         !self.is_streaming
             && !self.any_blocking_modal_open()
-            && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
+            && (!self.prompt_input.vim_enabled || self.prompt_input.vim_mode == VimMode::Insert)
     }
 
     /// Take the next key event saved by `try_detect_paste_burst` when
@@ -8495,11 +8570,6 @@ impl App {
                         // -------------------------------------------------------------------
 
                         let should_submit = self.handle_key_event(key);
-                        // Honour `:q`/`:wq` from vim command-line mode
-                        if self.prompt_input.vim_quit_requested {
-                            self.prompt_input.vim_quit_requested = false;
-                            self.should_exit = true;
-                        }
                         if self.should_exit {
                             return Ok(None);
                         }
@@ -8620,19 +8690,17 @@ fn open_file_externally(
     #[cfg(target_os = "windows")]
     {
         let system_root = windows_system_root();
-        let mut command = tokio::process::Command::new(
+        let mut shell = std::process::Command::new(
             std::path::Path::new(&system_root)
                 .join("System32")
                 .join("cmd.exe"),
         );
-        let quoted_path = quote_windows_cmd_path(path);
-        command
-            .args(["/C", "start", ""])
-            .arg(quoted_path)
+        shell
             .env_clear()
             .env("SystemRoot", &system_root)
             .env("WINDIR", &system_root);
-        ExternalOpener::spawn(command)
+        let command = claurst_core::shell::start(shell, path)?;
+        ExternalOpener::spawn(tokio::process::Command::from(command))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -8651,14 +8719,6 @@ fn open_file_externally(
             "No suitable editor found",
         ))
     }
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn quote_windows_cmd_path(path: &std::path::Path) -> std::ffi::OsString {
-    let mut quoted = std::ffi::OsString::from("\"");
-    quoted.push(path.as_os_str());
-    quoted.push("\"");
-    quoted
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -9620,16 +9680,6 @@ role = "Research"
     }
 
     #[test]
-    fn windows_cmd_path_is_passed_as_quoted_argument() {
-        let path = std::path::Path::new(r"C:\temp\safe & literal.txt");
-
-        assert_eq!(
-            quote_windows_cmd_path(path).to_string_lossy(),
-            r#""C:\temp\safe & literal.txt""#
-        );
-    }
-
-    #[test]
     fn windows_system_root_prefers_absolute_system_root() {
         let system_root = std::env::temp_dir().join("windows-root").into_os_string();
         let windir = std::env::temp_dir().join("windir").into_os_string();
@@ -9988,6 +10038,145 @@ role = "Research"
         assert!(app.intercept_slash_command("vim"));
         assert!(app.prompt_input.vim_enabled);
         assert!(app.intercept_slash_command("vim"));
+        assert!(!app.prompt_input.vim_enabled);
+    }
+
+    #[test]
+    fn vim_command_and_search_own_enter_and_backspace() {
+        let mut app = make_app();
+        assert!(app.intercept_slash_command("vim"));
+        app.set_prompt_text("alpha beta".to_owned());
+        let key = |app: &mut App, code| app.handle_key_event(press_key(code, KeyModifiers::NONE));
+        assert!(key(&mut app, KeyCode::Enter), "Insert submits the draft");
+        key(&mut app, KeyCode::Esc);
+        for c in "/betx".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Char('a'));
+        assert!(!key(&mut app, KeyCode::Enter));
+        assert_eq!(app.prompt_input.cursor, 6);
+        assert_eq!(app.prompt_input.text, "alpha beta");
+        for c in ":qx".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Backspace);
+        assert!(!key(&mut app, KeyCode::Enter));
+        assert!(app.should_exit);
+        assert_eq!(app.prompt_input.text, "alpha beta");
+    }
+
+    #[test]
+    fn disabling_vim_from_normal_restores_paste() {
+        let mut app = make_app();
+        assert!(app.intercept_slash_command("vim"));
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Normal);
+        assert!(!app.prompt_is_accepting_text());
+        assert!(!app.prompt_can_accept_selection_paste());
+        assert!(app.intercept_slash_command("vim"));
+        assert!(app.prompt_is_accepting_text());
+        assert!(app.prompt_can_accept_selection_paste());
+    }
+
+    /// Escape reaches vim from the composer in both renderers (#569). It
+    /// leaves Insert, so `0` and `i` are vim commands, and leaving an insert
+    /// made before the end of the text does not panic.
+    #[test]
+    fn escape_takes_vim_out_of_insert_in_both_renderers() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        for renderer in [
+            crate::application::UiRenderer::Classic,
+            crate::application::UiRenderer::Next,
+        ] {
+            let mut app = make_app();
+            app.renderer = renderer;
+            assert!(app.intercept_slash_command("vim"));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+            for c in "ab".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            for c in "0ix".chars() {
+                app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Insert, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+            assert_eq!(app.prompt_input.text, "xab", "{renderer:?}");
+            // Visual mode is left the same way.
+            app.handle_key_event(press_key(KeyCode::Char('v'), KeyModifiers::NONE));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Visual, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
+        }
+    }
+
+    /// With vim on, a running turn still takes Escape first; the next
+    /// Escape goes to vim.
+    #[test]
+    fn escape_cancels_a_running_turn_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.is_streaming = true;
+        app.handle_key_event(esc);
+        assert!(!app.is_streaming);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+        app.handle_key_event(esc);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Normal);
+    }
+
+    /// With vim on, transcript focus still takes Escape first.
+    #[test]
+    fn escape_returns_focus_from_the_transcript_before_vim_takes_it() {
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.focus = FocusTarget::Transcript;
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.focus, FocusTarget::Input);
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, Next's inspector still takes Escape first, through its
+    /// key binding.
+    #[test]
+    fn escape_closes_the_next_inspector_before_vim_takes_it() {
+        let mut app = make_app();
+        app.renderer = crate::application::UiRenderer::Next;
+        app.prompt_input.vim_enabled = true;
+        app.next_shell.inspector = Some(crate::next::InspectorPage::Views);
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.next_shell.inspector.is_none());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim on, a notice still takes Escape first.
+    #[test]
+    fn escape_dismisses_a_notice_before_vim_takes_it() {
+        let esc = press_key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut app = make_app();
+        app.prompt_input.vim_enabled = true;
+        app.notifications.push(
+            crate::notifications::NotificationKind::Info,
+            "a notice".to_string(),
+            None,
+        );
+        app.handle_key_event(esc);
+        assert!(app.notifications.is_empty());
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
+    }
+
+    /// With vim off, Escape on an idle composer still changes nothing, as
+    /// before vim took Escape.
+    #[test]
+    fn escape_without_vim_leaves_the_idle_composer_alone() {
+        let mut app = make_app();
+        app.set_prompt_text("draft".to_string());
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.prompt_input.text, "draft");
+        assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
         assert!(!app.prompt_input.vim_enabled);
     }
 
@@ -11074,5 +11263,138 @@ role = "Research"
                 .status,
             ToolStatus::Running
         );
+    }
+}
+
+/// #517 on Windows: the keybindings file opens through `cmd.exe /C start`,
+/// which must get the file's path whole. Before, `Command::arg` wrote the
+/// quotes around the path as `\"`, which `cmd.exe` does not unescape.
+///
+/// `cmd.exe` also replaces `%NAME%` with the variable's value.
+///
+/// A file type registered for the current user stands in for the user's
+/// editor: Windows runs this test binary with the path it was asked to open.
+/// Whether a real editor then shows the file can only be seen on a desktop.
+#[cfg(all(test, windows))]
+mod windows_open_tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    const HANDLER: &str = "app::windows_open_tests::file_open_handler";
+    const CAPTURE: &str = "capture";
+
+    // The registry helpers are repeated in claurst-mcp's
+    // `tests/windows_cmd_quotes.rs`: test crates cannot share a module.
+
+    /// Registry keys under `HKCU\Software\Classes`, removed on drop.
+    struct Registered(Vec<String>);
+
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            for key in &self.0 {
+                let _ = Command::new("reg")
+                    .args(["delete", key.as_str(), "/f"])
+                    .output();
+            }
+        }
+    }
+
+    fn reg_add(key: &str, value: &[&str], data: &str) {
+        let output = Command::new("reg")
+            .arg("add")
+            .arg(key)
+            .args(value)
+            .args(["/d", data, "/f"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "reg add {key}: {output:?}");
+    }
+
+    /// Make files ending in `extension` open with this test binary, which
+    /// writes the path it was given to `capture`.
+    fn register_file_type(extension: &str, capture: &Path) -> Registered {
+        let class = format!("CovenTest517File{}", std::process::id());
+        let classes = r"HKCU\Software\Classes";
+        let registered = Registered(vec![
+            format!(r"{classes}\{extension}"),
+            format!(r"{classes}\{class}"),
+        ]);
+        reg_add(&registered.0[0], &["/ve"], &class);
+        let handler = format!(
+            r#""{}" --exact {HANDLER} --ignored --nocapture "{}" "%1""#,
+            std::env::current_exe().unwrap().display(),
+            capture.display(),
+        );
+        reg_add(
+            &format!(r"{classes}\{class}\shell\open\command"),
+            &["/ve"],
+            &handler,
+        );
+        registered
+    }
+
+    async fn wait_for(capture: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(capture) {
+                return text;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nothing was opened within 60 s: {} was not written",
+                capture.display()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn file_opener_passes_the_whole_path() {
+        let directory = tempfile::tempdir().unwrap();
+        // The opener's `cmd.exe` has `SystemRoot` set, and would replace
+        // `%SystemRoot%` with its value; with delayed expansion on, it would
+        // also replace `!SystemRoot!` and drop the `^`.
+        let folder = directory
+            .path()
+            .join("with space & %SystemRoot% !SystemRoot! ^x");
+        std::fs::create_dir(&folder).unwrap();
+        let extension = format!(".coventest517x{}", std::process::id());
+        let file = folder.join(format!("keybindings{extension}"));
+        std::fs::write(&file, "{}").unwrap();
+        let capture = directory.path().join(format!("opened.{CAPTURE}"));
+        let _registered = register_file_type(&extension, &capture);
+
+        let _opener = super::open_file_externally(&file).unwrap();
+
+        let opened = PathBuf::from(wait_for(&capture).await);
+        assert_eq!(
+            std::fs::canonicalize(&opened).ok(),
+            Some(std::fs::canonicalize(&file).unwrap()),
+            "Windows was asked to open {}",
+            opened.display()
+        );
+    }
+
+    /// Run by Windows as the test file type's handler, with the capture file
+    /// and the opened path as its last two arguments. It does nothing unless
+    /// the first of those is a capture file.
+    #[test]
+    #[ignore = "run by Windows as the handler of the test file type"]
+    fn file_open_handler() {
+        let mut arguments = std::env::args_os().rev();
+        let (Some(opened), Some(capture)) = (arguments.next(), arguments.next()) else {
+            return;
+        };
+        let capture = PathBuf::from(capture);
+        if capture
+            .extension()
+            .is_none_or(|extension| extension != CAPTURE)
+        {
+            return;
+        }
+        let partial = capture.with_extension("partial");
+        std::fs::write(&partial, opened.to_string_lossy().as_bytes()).unwrap();
+        std::fs::rename(partial, capture).unwrap();
     }
 }

@@ -81,6 +81,7 @@ fn run_with_input(
         "COVEN_CODE_API_BASE",
         "COVEN_CODE_CLAUDE_BIN",
         "COVEN_PARENT",
+        "COVEN_CODE_ACP_LOG",
     ] {
         command.env_remove(key);
     }
@@ -149,6 +150,34 @@ fn initialize_returns_spec_compliant_response() {
 }
 
 #[test]
+fn initialization_is_ordered_and_connection_local() {
+    let cwd = std::env::current_dir().unwrap();
+    let new_session = |id| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/new","params":{"cwd":cwd,"mcpServers":[]}});
+    let first = [
+        new_session(1),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}),
+        new_session(3),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":1}}),
+        new_session(5),
+    ].iter().map(|row| format!("{row}\n")).collect::<String>();
+    let (status, stdout, stderr) = run_with_input(&first, Duration::from_secs(20), None);
+    assert!(status.success(), "{stderr}");
+    for id in [1, 3] {
+        assert_eq!(find_response(&stdout, id)["error"]["code"], -32600);
+    }
+    assert_eq!(find_response(&stdout, 2)["error"]["code"], -32602);
+    assert_eq!(find_response(&stdout, 4)["result"]["protocolVersion"], 1);
+    assert!(find_response(&stdout, 5)["result"]["sessionId"].is_string());
+    let (status, stdout, stderr) = run_with_input(
+        &format!("{}\n", new_session(6)),
+        Duration::from_secs(20),
+        None,
+    );
+    assert!(status.success(), "{stderr}");
+    assert_eq!(find_response(&stdout, 6)["error"]["code"], -32600);
+}
+
+#[test]
 fn session_new_returns_session_id() {
     // Use a path that's absolute on both Unix and Windows.
     let cwd = std::env::current_dir().expect("cwd");
@@ -210,6 +239,34 @@ fn invalid_settings_fail_acp_startup() {
     assert!(stdout.is_empty(), "ACP wrote a response: {stdout}");
 }
 
+/// A saved bypass mode is refused on stderr; the protocol stream carries the
+/// same responses as a start with nothing saved.
+#[test]
+fn saved_bypass_mode_is_refused_on_stderr_without_changing_the_wire() {
+    let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"nonexistent"}}
+"#;
+    let (_status, plain_stdout, plain_stderr) =
+        run_with_input(request, Duration::from_secs(20), None);
+    let (_status, stdout, stderr) = run_with_input(
+        request,
+        Duration::from_secs(20),
+        Some(r#"{"config":{"permission_mode":"bypassPermissions"}}"#),
+    );
+    assert!(
+        stderr.contains("Saved bypass mode not restored"),
+        "the refusal is logged:\n{stderr}"
+    );
+    assert!(
+        !plain_stderr.contains("not restored"),
+        "nothing saved, nothing said:\n{plain_stderr}"
+    );
+    assert_eq!(
+        stdout, plain_stdout,
+        "the saved mode must not change the protocol stream"
+    );
+}
+
 #[test]
 fn large_response_stream_does_not_block_child_exit() {
     // Keep ordinary traffic below admission capacity while producing more
@@ -243,7 +300,7 @@ fn large_response_stream_does_not_block_child_exit() {
     let mut actual: Vec<&str> = responses
         .iter()
         .map(|response| {
-            assert_eq!(response["error"]["code"], -32601);
+            assert_eq!(response["error"]["code"], -32600);
             response["id"].as_str().expect("original string request ID")
         })
         .collect();

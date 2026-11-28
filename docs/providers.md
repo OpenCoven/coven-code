@@ -36,6 +36,10 @@ to the Anthropic Messages API. Without an API key, turns run through the local
 `claude` binary. That CLI owns its authentication; Coven Code does not import or
 replay Claude CLI OAuth tokens.
 
+Each keyless Claude child starts in the working directory of its conversation. For ACP, that is the directory passed to `session/new`. Follow-up turns in the same conversation reuse its Claude CLI session through `--resume`. Two ACP sessions keep separate histories even when they share a directory. A subagent also has its own continuation, so the parent resumes its own session when the subagent returns.
+
+If a resumed CLI exits before producing output, the engine discards that conversation’s stale ID and starts a fresh CLI session with the current prompt and the text of earlier turns. Later turns use the replacement ID. Other conversations keep their own IDs.
+
 The CLI also runs its own tools under its own permission settings. Each turn's
 permission mode reaches it as `--permission-mode`. Started on its own, the
 engine otherwise leaves the CLI to whatever the user's and the workspace's
@@ -176,7 +180,7 @@ On startup the registry refreshes itself from [models.dev](https://models.dev) i
 
 | Variable | Effect |
 |---|---|
-| `COVEN_CODE_DISABLE_MODELS_FETCH=1` | Skip the network refresh; use only the bundled snapshot + disk cache |
+| `COVEN_CODE_DISABLE_MODELS_FETCH=1` | Skip the network refresh; use only the bundled snapshot + disk cache. `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` does the same, and also turns off the startup release check ([configuration.md](configuration.md#environment-variables)) |
 | `COVEN_CODE_MODELS_URL` / `MODELS_DEV_URL` | Override the models.dev catalog URL |
 | `COVEN_CODE_ENABLE_EXPERIMENTAL_MODELS=1` | Include experimental/preview models in the picker |
 

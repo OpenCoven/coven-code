@@ -43,9 +43,9 @@ There is no native Windows ARM64 release artifact.
 A Linux release binary uses two system libraries and cannot start without them.
 
 - **glibc.** The binary needs at least the glibc of the image it was built on.
-  The v0.9.2 archives need glibc 2.39. Ubuntu 24.04 has it. Debian 12 (2.36),
-  Ubuntu 22.04 (2.35), RHEL 9 and its rebuilds (2.34) and Amazon Linux 2023
-  (2.34) do not. A later release can need a newer one.
+  The v0.9.2 and v0.9.3 archives need glibc 2.39. Ubuntu 24.04 has it.
+  Debian 12 (2.36), Ubuntu 22.04 (2.35), RHEL 9 and its rebuilds (2.34) and
+  Amazon Linux 2023 (2.34) do not. A later release can need a newer one.
   `getconf GNU_LIBC_VERSION` prints the system's version.
 - **ALSA.** `libasound.so.2` must be installed, even on a server that never uses
   voice. On Debian and Ubuntu the package is `libasound2t64` or `libasound2`; on
@@ -80,7 +80,30 @@ The shell installer does not remove macOS quarantine attributes automatically.
 | `--binary <path>` | `-Binary <path>` | Install an already verified local binary |
 | `--install-dir <path>` | `-InstallDir <path>` | Override the install directory |
 | Not supported | `-NoModifyPath` | Leave the Windows user PATH unchanged |
+| `--force` | `-Force` | Replace an existing engine that differs from this one without asking |
 | `--help` | `-Help` | Print usage |
+
+An installer replaces an existing `coven-code` in the install directory only
+with consent. It installs without asking when the existing file has the same
+bytes as the new one, or when a download is for the version the existing engine
+reports as `coven-code <version>`. Otherwise it asks `Replace it? [y/N]` if its
+input is a terminal, and replaces the engine only on `y` or `yes`;
+`irm ... | iex` in a console asks, `curl ... | bash` never does. With no
+terminal, as under `curl ... | bash` or in CI, it leaves the existing engine and
+alias untouched and fails: the shell installer exits non-zero, and the
+PowerShell installer throws. Upgrading an older standalone install with a piped
+one-liner therefore needs consent without a prompt: `--force` (`-Force`), or
+`COVEN_CODE_INSTALL_FORCE=1` (exactly `1`) in the environment:
+
+```bash
+curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash -s -- --force
+```
+
+```powershell
+$env:COVEN_CODE_INSTALL_FORCE = '1'; try { irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex } finally { Remove-Item Env:COVEN_CODE_INSTALL_FORCE }
+```
+
+The check covers `coven-code`, not the `coven-cave` alias beside it.
 
 The local-binary path does not authenticate the file for you. Verify its origin
 and digest before installing it. The shell installer may still resolve the
@@ -187,7 +210,7 @@ coven-code --version
 Example engine output:
 
 ```
-coven-code 0.9.2
+coven-code 0.9.3
 ```
 
 Use `command -v coven-code` on Unix or `Get-Command coven-code` in PowerShell to

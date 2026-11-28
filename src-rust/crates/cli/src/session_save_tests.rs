@@ -1,14 +1,15 @@
 use super::*;
 use claurst_tui::notifications::{NotificationKind, NotificationQueue};
 
-#[test]
-fn session_save_failures_and_recovery_are_visible() {
+/// Runs one ignored worker test of this module in a child process whose
+/// config home is a fresh temporary directory, and checks that it finished.
+fn run_isolated_worker(worker: &str) {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("stderr");
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "session_save_tests::session_save_worker",
+            &format!("session_save_tests::{worker}"),
             "--ignored",
             "--nocapture",
         ])
@@ -43,6 +44,16 @@ fn session_save_failures_and_recovery_are_visible() {
         std::fs::read_to_string(log).unwrap()
     );
     assert_eq!(std::fs::read(temp.path().join("done")).unwrap(), b"checked");
+}
+
+#[test]
+fn session_save_failures_and_recovery_are_visible() {
+    run_isolated_worker("session_save_worker");
+}
+
+#[test]
+fn session_index_keeps_every_user_message_once() {
+    run_isolated_worker("session_index_worker");
 }
 
 #[test]
@@ -135,5 +146,91 @@ fn session_save_worker() {
             assert_eq!(std::fs::read_to_string(&diagnostic).unwrap(), logs);
         }
     });
+    std::fs::write(home.join("done"), b"checked").unwrap();
+}
+
+#[test]
+#[ignore = "isolated session save environment"]
+fn session_index_worker() {
+    use claurst_core::types::Message;
+
+    let home = PathBuf::from(std::env::var_os("COVEN_CODE_HOME").unwrap());
+    assert_eq!(Settings::config_dir(), home);
+    let index_path = home.join("sessions.db");
+    // An index written by an earlier build: its first user message ever was
+    // stored under the id "unknown". That row is kept.
+    {
+        let index = claurst_core::SqliteSessionStore::open(&index_path).unwrap();
+        index.save_session("legacy", None, "fixture-model").unwrap();
+        index
+            .save_message("legacy", "unknown", "user", "legacy-first-prompt", None)
+            .unwrap();
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut notifications = NotificationQueue::new();
+        let mut legacy = claurst_core::history::ConversationSession::new("fixture-model".into());
+        legacy.id = "legacy".into();
+        legacy.messages = vec![
+            Message::user("legacy-first-prompt"),
+            Message::user("legacy-second-prompt"),
+        ];
+        let mut answer = Message::assistant("first-answer");
+        answer.uuid = Some("answer-1".into());
+        let mut first = claurst_core::history::ConversationSession::new("fixture-model".into());
+        first.id = "first".into();
+        first.messages = vec![
+            Message::user("first-prompt-one"),
+            answer,
+            Message::user("first-prompt-two"),
+            // The same text typed twice is two messages.
+            Message::user("first-prompt-one"),
+        ];
+        let mut second = claurst_core::history::ConversationSession::new("fixture-model".into());
+        second.id = "second".into();
+        second.messages = vec![Message::user("other-session-prompt")];
+        // Every turn saves the whole session again.
+        for session in [&legacy, &first, &first, &second, &second, &legacy] {
+            assert!(persist_interactive_session(session, None, &mut notifications).await);
+        }
+    });
+
+    let index = claurst_core::SqliteSessionStore::open(&index_path).unwrap();
+    for (text, session_id) in [
+        ("legacy-first-prompt", "legacy"),
+        ("legacy-second-prompt", "legacy"),
+        ("first-prompt-one", "first"),
+        ("first-prompt-two", "first"),
+        ("first-answer", "first"),
+        ("other-session-prompt", "second"),
+    ] {
+        let found: Vec<_> = index
+            .search_sessions(text)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        assert_eq!(found, [session_id], "search for {text}");
+    }
+    // `message_count` grows only when a row is inserted, so it counts rows.
+    let mut counts: Vec<_> = index
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .map(|summary| (summary.id, summary.message_count))
+        .collect();
+    counts.sort();
+    assert_eq!(
+        counts,
+        [
+            ("first".to_owned(), 4),
+            // The kept "unknown" row and one row per message.
+            ("legacy".to_owned(), 3),
+            ("second".to_owned(), 1)
+        ]
+    );
     std::fs::write(home.join("done"), b"checked").unwrap();
 }

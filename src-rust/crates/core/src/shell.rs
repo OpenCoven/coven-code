@@ -38,6 +38,55 @@ pub fn command(line: &str) -> Command {
     }
 }
 
+/// The variable through which [`start`] hands `cmd.exe` its target.
+#[cfg(windows)]
+pub const START_TARGET_VARIABLE: &str = "COVEN_CODE_START_TARGET";
+
+/// Opens `target`, a file or a URL, with the program Windows associates
+/// with it: `shell`, a `cmd.exe` with its environment already set, runs
+/// `start "" "<target>"` (#517).
+///
+/// The target is not written into the command line. `cmd.exe` replaces
+/// `%NAME%` there with a variable's value before it reads quotes, and a
+/// value can hold a `"`, which would end the quoting and let what follows
+/// run as commands. Instead the line is `start "" "!VARIABLE!"`, appended
+/// as written like [`command`]'s, with delayed expansion on (`/V:ON`) and
+/// the target in [`START_TARGET_VARIABLE`]. `cmd.exe` puts that value in
+/// after it has split the line into commands and expanded `%NAME%`, and
+/// scans it for neither. `start` takes the first quoted argument as a
+/// window title, hence the empty one. `/D` skips the user's `AutoRun`
+/// commands. The opened program inherits the variable, so a browser started
+/// for an OAuth login keeps the authorization URL in its environment.
+///
+/// A target with a `"` in it is refused with `InvalidInput`, because
+/// `start` would split it there. Windows paths cannot contain one, and
+/// `url::Url` writes it percent-encoded. An empty target is refused too:
+/// `start ""` would open a console window.
+///
+/// Add no arguments to the returned command, and do not clear its
+/// environment.
+#[cfg(windows)]
+pub fn start(mut shell: Command, target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<Command> {
+    use std::os::windows::{ffi::OsStrExt, process::CommandExt};
+    let target = target.as_ref();
+    if target.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no target to open",
+        ));
+    }
+    if target.encode_wide().any(|unit| unit == u16::from(b'"')) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a target to open contains a double quote",
+        ));
+    }
+    shell.env(START_TARGET_VARIABLE, target).raw_arg(format!(
+        "/D /V:ON /C \"start \"\" \"!{START_TARGET_VARIABLE}!\"\""
+    ));
+    Ok(shell)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     #[test]

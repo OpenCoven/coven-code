@@ -16,28 +16,26 @@ Checks, per run:
   keyboard flags. Without this the restore checks prove nothing.
 - A panic on the main thread restores every termios field. Before the
   panic message it turns output processing back on (the message's first
-  line break arrives translated to CRLF, which raw mode does not do), leaves
-  the alternate screen, turns mouse capture and bracketed paste off, pops
-  the keyboard flags and shows the cursor. The pop is sent before leaving
-  the alternate screen: each screen has its own keyboard stack and the flags
-  were pushed on the alternate one, so a later pop would leave them there
-  for the next full-screen program (#410). The message is printed and the
-  process exits 101.
+  line break arrives translated to CRLF, which raw mode does not do), clears
+  the title set at startup, leaves the alternate screen, turns mouse capture
+  and bracketed paste off, pops the keyboard flags and shows the cursor. The
+  pop is sent before leaving the alternate screen: each screen has its own
+  keyboard stack and the flags were pushed on the alternate one, so a later
+  pop would leave them there for the next full-screen program (#410). With
+  no flags pushed, no pop is sent. The terminal is restored once, so no pop
+  is sent on the main screen. The message is printed and the process exits
+  101.
 - A panic on a spawned thread does not restore anything (the hook only
   restores on the thread that set the terminal up). The probe keeps running,
   and its later main-thread panic still restores.
-- After a suspend and resume through the real `suspend_terminal`, a
-  main-thread panic still restores.
+- After a suspend and resume through the real `suspend_terminal`, which
+  sets the terminal up a second time, a main-thread panic still restores,
+  and restores once (#417): the panic hook is installed once per process.
 
-Some details are pinned as current behaviour, not endorsed, so a change to
-them is deliberate; their check lines contain "current behaviour". They
-describe the Unix restore path (Windows has its own branch, which is not
-exercised):
-- a keyboard pop is sent even when nothing was pushed;
-- the title set at startup is not cleared;
-- every `setup_terminal` call chains another hook, so after a resume the
-  restore is written twice, and its second pop is sent on the main screen;
-- a worker-thread panic prints its message onto the live screen.
+One detail is pinned as current behaviour, not endorsed, so a change to it
+is deliberate; its check line contains "current behaviour": a worker-thread
+panic prints its message onto the live screen. These checks describe the
+Unix restore path (Windows has its own branch, which is not exercised).
 
 Prints one line per check, `ok <message>` or `FAIL <message> :: <evidence>`,
 for cases/30_panic_restore.sh to report. Exits 0 when every check passed.
@@ -72,8 +70,9 @@ LEAVE_ALT = b"\x1b[?1049l"
 KEYBOARD_PUSH = re.compile(rb"\x1b\[>\d*u")
 KEYBOARD_POP = re.compile(rb"\x1b\[<\d*u")
 TITLE = re.compile(rb"\x1b\][02];")
+TITLE_CLEARED = re.compile(rb"\x1b\][02];(?:\x07|\x1b\\)")
 # Any of these after a worker panic means the hook restored on the wrong thread.
-RESTORE_BYTES = (LEAVE_ALT, b"\x1b[?1000l", b"\x1b[?2004l", b"\x1b[?25h", b"\x1b[<")
+RESTORE_BYTES = (LEAVE_ALT, b"\x1b[?1000l", b"\x1b[?2004l", b"\x1b[?25h", b"\x1b[<", b"\x1b]0;\x07")
 MOUSE_MODES = (1000, 1002, 1003, 1006, 1015)
 COOKED = termios.ICANON | termios.ECHO | termios.ISIG
 
@@ -238,24 +237,25 @@ def check_main_panic(report, label, probe, keyboard, setups):
                      f"{label}: the keyboard pop is sent before leaving the alternate screen",
                      f"pops at {pops}, leave at {hook.find(LEAVE_ALT)}: {text(after[:300])}")
     else:
-        report.check(bool(pops),
-                     f"{label}: current behaviour: a keyboard pop is sent though none was pushed",
+        report.check(bool(match) and not pops, f"{label}: no keyboard pop is sent when none was pushed",
                      text(after[:300]))
-    report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None and TITLE.search(after) is None,
-                 f"{label}: current behaviour: the hook leaves the title set at startup", text(after[:300]))
-    if setups == 1:
-        # The main screen's stack is the shell's, whether or not flags were
-        # pushed here.
-        leave = hook.find(LEAVE_ALT)
-        report.check(leave >= 0 and KEYBOARD_POP.search(hook, leave) is None,
-                     f"{label}: no keyboard pop is sent on the main screen",
-                     f"pops at {pops}, leave at {leave}: {text(after[:300])}")
-    else:
-        # Each restore is one pop and one leave, so every pop after the
-        # first leave is sent on the main screen.
-        report.check(hook.count(LEAVE_ALT) == setups and len(pops) == setups,
-                     f"{label}: current behaviour: the hook restores once per setup_terminal call ({setups})",
-                     f"{hook.count(LEAVE_ALT)} restores, {len(pops)} pops: {text(after[:300])}")
+    # The last title the hook writes must be the empty one.
+    titles = list(TITLE.finditer(hook))
+    report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None
+                 and bool(titles) and TITLE_CLEARED.match(hook, titles[-1].start()) is not None,
+                 f"{label}: clears the title set at startup before the panic message", text(after[:300]))
+    # The main screen's stack is the shell's, whether or not flags were
+    # pushed here.
+    leave = hook.find(LEAVE_ALT)
+    report.check(leave >= 0 and KEYBOARD_POP.search(hook, leave) is None,
+                 f"{label}: no keyboard pop is sent on the main screen",
+                 f"pops at {pops}, leave at {leave}: {text(after[:300])}")
+    # One hook per process (#417): setting the terminal up again, as a resume
+    # does, must not make a panic restore once per setup.
+    report.check(hook.count(LEAVE_ALT) == 1,
+                 f"{label}: the hook restores once ({setups} setup_terminal "
+                 + ("call)" if setups == 1 else "calls)"),
+                 f"{hook.count(LEAVE_ALT)} restores, {len(pops)} pops: {text(after[:300])}")
 
 
 def run(path, report, renderer, mode, keyboard=True):
