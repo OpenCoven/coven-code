@@ -8,6 +8,7 @@
 //    - Headless (--print / -p) mode: single query, output to stdout
 //    - Interactive REPL mode: full TUI with ratatui
 
+mod claude_subscription;
 mod codex_oauth_flow;
 mod diagnostics;
 mod headless;
@@ -4219,6 +4220,7 @@ async fn run_interactive(
         })
     };
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
+    let mut selected_account = None;
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
     let mut daemon_listings = DaemonListings::default();
@@ -4951,11 +4953,26 @@ async fn run_interactive(
                                     }
                                     terminal = claurst_tui::setup_terminal(renderer)?;
                                 }
+                                Some(CommandResult::SwitchAccount { provider, id }) => {
+                                    if app.is_streaming || current_query.is_some() {
+                                        app.show_command_error(
+                                            "Wait for the current response to finish before switching accounts."
+                                                .to_string(),
+                                        );
+                                    } else {
+                                        selected_account = Some((provider, id));
+                                        break 'main;
+                                    }
+                                }
                                 Some(CommandResult::StartLoginForProvider {
                                     provider,
                                     login_with_claude_ai,
                                     label,
                                 }) => {
+                                    if app.is_streaming || current_query.is_some() {
+                                        app.show_command_error("Wait for the current response to finish before signing in.".into());
+                                        continue;
+                                    }
                                     claurst_tui::restore_terminal(&mut terminal).ok();
                                     if provider == claurst_core::accounts::PROVIDER_CODEX {
                                         let (tx, mut rx) =
@@ -4990,8 +5007,13 @@ async fn run_interactive(
                                                 break 'main;
                                             }
                                             Err(e) => {
-                                                eprintln!("\nCodex login failed: {}", e);
+                                                app.show_command_error(format!("Codex login failed: {e}"));
                                             }
+                                        }
+                                    } else if login_with_claude_ai {
+                                        match claude_subscription::login(label.as_deref()).await {
+                                            Ok(id) => app.status_message = Some(format!("Claude CLI signed in. Select anthropic/{id} for a familiar.")),
+                                            Err(error) => app.show_command_error(error.to_string()),
                                         }
                                     } else {
                                         match oauth_flow::run_oauth_login_flow_with_label(
@@ -6747,6 +6769,14 @@ async fn run_interactive(
         }
     }
 
+    let terminal_result = terminal_result.map_err(anyhow::Error::from).and_then(|()| {
+        if let Some((provider, id)) = selected_account {
+            claurst_core::accounts::AccountRegistry::load().switch_to(&provider, &id)?;
+            println!("Account selected. Relaunch Coven Code to use it.");
+        }
+        Ok(())
+    });
+
     // Mark every session this process sent a registration for complete in the
     // Coven daemon ledger (best-effort, opt-in). The ids were captured at
     // registration time: session.id may have been rebound by a mid-run
@@ -6771,17 +6801,30 @@ async fn run_interactive(
 // Called before Cli::parse() so it doesn't conflict with positional `prompt`.
 //
 // Usage:
-//   claude auth login [--console]   — Anthropic OAuth with a configured Coven Code client
+//   coven-code auth login [--label NAME] — Named Claude CLI subscription profile
 //   claude auth logout              — Clear stored credentials
 //   claude auth status [--json]     — Show authentication status
 
 async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(|s| s.as_str()) {
+        Some("login")
+            if args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-h" | "--help")) =>
+        {
+            println!("Usage: coven-code auth login [--label NAME] [--console]");
+            println!("Sign in with Claude Code. Use --console for an Anthropic Console API key.");
+        }
         Some("login") => {
             // --console flag selects the Console OAuth flow (creates an API key)
-            // Default (no flag) uses the Claude.ai flow (Bearer token)
+            // Subscription sign-in belongs to the installed Claude CLI.
             let login_with_claude_ai = !args.iter().any(|a| a == "--console");
             let label = extract_label_flag(args);
+            if login_with_claude_ai {
+                let id = claude_subscription::login(label.as_deref()).await?;
+                println!("Claude CLI signed in. Select anthropic/{id} for a familiar.");
+                return Ok(());
+            }
             println!("Starting authentication...");
             match oauth_flow::run_oauth_login_flow_with_label(
                 login_with_claude_ai,
@@ -6869,7 +6912,7 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 fn print_auth_usage() {
     eprintln!("Usage: coven-code auth <subcommand>");
     eprintln!(
-        "  login [--console] [--label <name>]   Authenticate with a configured Coven OAuth client"
+        "  login [--console] [--label <name>]   Sign in with Claude CLI (use --console for an API key)"
     );
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");

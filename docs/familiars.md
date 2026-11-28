@@ -33,6 +33,14 @@ Familiars are appended **after** workspace agents in the list. If a user-defined
 
 ---
 
+## Choose an account for a familiar
+
+Run `/account login anthropic --label work` to open Claude Code’s subscription sign-in for a separate profile. For Codex, use `/account login codex --label work`. Run `/account list --viable` and copy the provider-qualified ID. Two profiles can share a label.
+
+For a roster familiar named `dev`, run `/familiar account dev anthropic/work`, substituting the ID from your list. Choose a model from the same provider. Inspect the binding with `/familiar account dev`. It survives relaunch. To change the default Codex account, run `/account switch` with a Codex profile ID and relaunch. To make dev follow the session account for its model, run `/familiar account dev default`.
+
+The viable list checks local credential eligibility. A signed-in CLI profile can appear before it has served a turn. After a successful bound request, the list shows that profile’s last successful familiar request time. If a binding becomes unavailable, sign in again or bind the familiar to another viable ID before retrying.
+
 ## When the daemon is slow
 
 Open `/familiar` to see locally configured familiars. The menu fetches live badges in the background. You can select a familiar or close the menu while the daemon is busy.

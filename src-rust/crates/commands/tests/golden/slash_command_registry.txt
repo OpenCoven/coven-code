@@ -2,12 +2,12 @@
 account	Account & Models	active	-	/account <login|logout|list|dedupe|providers|connect|switch|refresh>	Manage accounts and provider connections
 account connect	Account & Models	active	-	/account connect	Connect a provider account
 account dedupe	Account & Models	active	-	/account dedupe	Remove duplicate credentials
-account list	Account & Models	active	-	/account list	List configured accounts
-account login	Account & Models	active	-	/account login [--console] [--codex] [--label <name>]	Sign in to a provider
+account list	Account & Models	active	-	/account list [--viable]	List configured accounts
+account login	Account & Models	active	-	/account login [anthropic|codex|--codex] [--console] [--label <name>]	Sign in to a provider
 account logout	Account & Models	active	-	/account logout	Sign out of a provider
 account providers	Account & Models	active	-	/account providers	List available providers
 account refresh	Account & Models	active	-	/account refresh	Refresh provider authentication
-account switch	Account & Models	active	-	/account switch [name]	Switch the active account
+account switch	Account & Models	active	-	/account switch [<provider>/<profile-id>]	Switch the active account
 accounts	Account & Models	removed:/account list	-	/accounts	List configured accounts
 accounts dedupe	Account & Models	removed:/account dedupe	-	/accounts dedupe	Remove duplicate account profiles
 add-dir	Start & Navigate	removed:/session add-dir	-	Use /session add-dir	Removed compatibility command
@@ -41,7 +41,8 @@ exit	Start & Navigate	active	quit,q	/exit	Exit Coven
 export	Conversation	active	-	/export [copy [n]|share] [--format markdown|json] [--output <file>]	Export conversation to markdown or JSON
 export copy	Conversation	active	-	/export copy	Copy the session export to the clipboard
 export share	Conversation	active	-	/export share	Create a shareable session export
-familiar	Coven & Advanced	active	familiars,agent	/familiar <incant|whisper|handoff|list|managed>	Your familiar & agents — switch persona, inspect, and manage
+familiar	Coven & Advanced	active	familiars,agent	/familiar <account|incant|whisper|handoff|list|managed>	Your familiar & agents — switch persona, inspect, and manage
+familiar account	Coven & Advanced	active	-	/familiar account <name> [<provider>/<profile-id>|default]	Inspect or change a familiar’s provider account
 familiar handoff	Coven & Advanced	active	-	/familiar handoff <name>	Hand work to a familiar
 familiar incant	Coven & Advanced	active	-	/familiar incant [arguments]	Run a familiar incantation
 familiar list	Coven & Advanced	active	-	/familiar list	List available familiars

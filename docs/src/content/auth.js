@@ -13,13 +13,9 @@ coven-code --provider anthropic</code></pre>
     <h2>Local Claude CLI</h2>
     <p>Without an API key, ordinary Claude turns run through the local <code>claude</code> executable. Authenticate inside that CLI and make it available on PATH. Its login stays there; <code>coven-code auth import</code> has been removed. Engine auth status does not prove whether that CLI has a usable login.</p>
 
-    <h2>Engine-Owned Anthropic OAuth</h2>
-    <p>The separate direct OAuth flow requires a client identity registered for Coven Code. Do not reuse another CLI's client ID.</p>
-    <pre><code data-lang="bash">export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID="&lt;registered-client-id&gt;"
-coven-code auth login --label work
-# Console variant creates an API key:
-coven-code auth login --console --label work</code></pre>
-    <p>Follow the browser URL and fallback instructions printed by the flow. Stored bearer tokens must match the configured engine-owned client identity.</p>
+    <h2>Named Claude CLI accounts</h2>
+    <p>Run <code>/account login anthropic --label work</code> in Classic or Next. The installed Claude CLI signs in with its own configuration directory for this profile. Run <code>/account list --viable</code> and bind the returned ID with <code>/familiar account &lt;familiar&gt; anthropic/&lt;id&gt;</code>. The selected CLI login takes precedence for that familiar even when an Anthropic API key is configured.</p>
+    <p>Existing API keys continue to use direct API requests. The separate <code>--console</code> login flow requires a configured Coven Console OAuth client.</p>
 
     <h2>Codex Browser Login</h2>
     <pre><code data-lang="bash">coven-code codex login --label personal

@@ -405,6 +405,7 @@ pub fn save_codex_tokens_and_register(
     save_codex_tokens_for_profile(tokens, &id)?;
 
     let profile = AccountProfile {
+        claude_cli: false,
         id: id.clone(),
         label: label.map(slugify_profile_id),
         email: identity.email,

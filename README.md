@@ -41,7 +41,7 @@ Recent highlights:
 | Requirement        | Notes                                           |
 | ------------------ | ----------------------------------------------- |
 | **Node.js 18+**    | Required for the npm package                    |
-| **Credentials**    | An Anthropic API key (or OAuth login), or a Codex login |
+| **Credentials**    | A Claude CLI subscription login, an Anthropic API key, or a Codex login |
 
 ---
 
@@ -122,7 +122,7 @@ cargo build --release --locked --package claurst   # binary: coven-code
 
 ## Configuration
 
-Coven Code is a **local CLI tool** — it runs entirely on your machine. You bring your own Anthropic API key or Codex login. Nothing is sent to OpenCoven servers; all requests go directly from your terminal to the provider.
+Coven Code is a **local CLI tool** — it runs entirely on your machine. You bring your own Claude CLI login, Anthropic API key, or Codex login. Nothing is sent to OpenCoven servers; all requests go directly from your terminal to the provider.
 
 Standalone settings normally live in `~/.coven-code/settings.json`; under Coven they live in `~/.coven/code/settings.json`. `COVEN_CODE_HOME` overrides the engine home. Set an Anthropic key in the environment:
 
@@ -131,12 +131,13 @@ export ANTHROPIC_API_KEY=<your-key>
 coven-code
 ```
 
-Or log in via OAuth after configuring a Coven Code OAuth client:
+To connect a named Claude subscription profile, install Claude Code and run its sign-in through Coven Code.
 
 ```bash
-export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID=<registered-client-id>
-coven-code auth login
+coven-code auth login --label work
 ```
+
+In the TUI, run `/account list --viable` to see the profile and `/familiar account <name> anthropic/work` to select it.
 
 Or sign in to Codex with your ChatGPT/Codex subscription:
 

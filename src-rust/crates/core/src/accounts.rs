@@ -27,6 +27,8 @@
 //! pointer per provider). The per-account credential files keep their existing
 //! schemas so the rest of the codebase doesn't change shape.
 
+pub mod claude_cli;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,9 +37,106 @@ use std::path::PathBuf;
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_CODEX: &str = "codex";
 
+/// A local provider credential selected for a familiar.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FamiliarAccount {
+    pub provider: String,
+    pub id: String,
+}
+
+impl FamiliarAccount {
+    fn path(familiar: &str) -> PathBuf {
+        // Encode the entire identity, including separators in external agent names.
+        use base64::Engine;
+        let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(familiar.to_lowercase());
+        claurst_dir()
+            .join("familiar-accounts")
+            .join(format!("{name}.json"))
+    }
+
+    pub fn load(familiar: &str) -> anyhow::Result<Option<Self>> {
+        match std::fs::read(Self::path(familiar)) {
+            Ok(data) => Ok(Some(serde_json::from_slice(&data)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save(&self, familiar: &str) -> anyhow::Result<()> {
+        crate::secret_file::write_secret_file_sync_in_private_dir(
+            &Self::path(familiar),
+            serde_json::to_vec(self)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn clear(familiar: &str) -> anyhow::Result<()> {
+        match std::fs::remove_file(Self::path(familiar)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Written only after the provider finishes a model response using this binding.
+    pub fn record_success(&self) -> std::io::Result<()> {
+        let path = account_dir(&self.provider, &self.id).join("last-request-success");
+        crate::secret_file::write_secret_file_sync(&path, now_iso())
+    }
+
+    pub fn last_success(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let text = std::fs::read_to_string(
+            account_dir(&self.provider, &self.id).join("last-request-success"),
+        )
+        .ok()?;
+        text.trim().parse().ok()
+    }
+
+    pub async fn eligible(&self) -> bool {
+        if slugify_profile_id(&self.id) != self.id {
+            return false;
+        }
+        let registry = AccountRegistry::load();
+        let Some(profile) = registry.get(&self.provider, &self.id) else {
+            return false;
+        };
+        if self.provider == PROVIDER_ANTHROPIC && profile.claude_cli {
+            return claude_cli::signed_in(&claude_cli::config_dir(&self.id)).await;
+        }
+        match self.provider.as_str() {
+            PROVIDER_CODEX => crate::oauth_config::load_codex_tokens_for_profile(&self.id)
+                .is_some_and(|t| {
+                    !t.access_token.trim().is_empty()
+                        && (t
+                            .expires_at
+                            .is_none_or(|expiry| expiry > chrono::Utc::now().timestamp() as u64)
+                            || t.refresh_token
+                                .as_deref()
+                                .is_some_and(|token| !token.trim().is_empty()))
+                }),
+            PROVIDER_ANTHROPIC => crate::oauth::OAuthTokens::load_for_profile(&self.id)
+                .await
+                .is_some_and(|t| {
+                    t.bearer_auth_is_usable()
+                        && t.effective_credential()
+                            .is_some_and(|key| !key.trim().is_empty())
+                        && (!t.uses_bearer_auth()
+                            || !t.is_expired()
+                            || t.refresh_token
+                                .as_deref()
+                                .is_some_and(|r| !r.trim().is_empty()))
+                }),
+            _ => false,
+        }
+    }
+}
+
 /// Metadata recorded for a single stored profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AccountProfile {
+    /// Subscription authenticated and managed by the local Claude CLI.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_cli: bool,
     /// Slug used as the directory name and CLI identifier.
     pub id: String,
     /// Optional human-friendly label (e.g. "work", "personal").
@@ -119,13 +218,10 @@ impl AccountRegistry {
 
     /// Persist the registry to disk. Best-effort but propagates I/O errors.
     pub fn save(&self) -> anyhow::Result<()> {
-        let path = Self::path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)?;
-        set_user_only_perms(&path);
+        crate::secret_file::write_secret_file_sync(
+            &Self::path(),
+            serde_json::to_vec_pretty(self)?,
+        )?;
         Ok(())
     }
 
@@ -187,6 +283,13 @@ impl AccountRegistry {
         if !section.profiles.contains_key(id) {
             anyhow::bail!("Account '{}' not found for {}", id, provider);
         }
+        if section
+            .profiles
+            .get(id)
+            .is_some_and(|profile| profile.claude_cli)
+        {
+            anyhow::bail!("Use /familiar account <familiar> anthropic/{id} to select this Claude CLI profile.");
+        }
         section.active = Some(id.to_string());
         if let Some(p) = section.profiles.get_mut(id) {
             p.last_selected_at = Some(now_iso());
@@ -197,6 +300,7 @@ impl AccountRegistry {
     /// Remove a profile (and its credential directory). If it was active,
     /// clears the active pointer.
     pub fn remove(&mut self, provider: &str, id: &str) -> anyhow::Result<()> {
+        let cli_owned = self.get(provider, id).is_some_and(|p| p.claude_cli);
         if let Some(section) = self.providers.get_mut(provider) {
             section.profiles.remove(id);
             if section.active.as_deref() == Some(id) {
@@ -205,7 +309,7 @@ impl AccountRegistry {
         }
         // Remove the per-account credential dir.
         let dir = account_dir(provider, id);
-        if dir.exists() {
+        if !cli_owned && dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
         }
         self.save()
@@ -283,25 +387,6 @@ pub fn backup_dir(provider: &str) -> PathBuf {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-/// Tighten permissions on credential files to `0600` (owner read/write only).
-///
-/// Best-effort and Unix-only: on Windows this is a no-op and access control is
-/// left to the filesystem ACLs of the user's home directory. Every file that
-/// stores a secret (API keys, OAuth access/refresh tokens) routes through this
-/// before it can be read by another local user under a permissive umask.
-#[allow(unused_variables)]
-pub(crate) fn set_user_only_perms(path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +611,88 @@ mod tests {
         assert_eq!(slugify_profile_id("  --weird-- "), "weird");
         assert_eq!(slugify_profile_id(""), "account");
         assert_eq!(slugify_profile_id("kuber@example.com"), "kuber-example-com");
+    }
+
+    #[test]
+    fn switching_profiles_publishes_a_complete_registry_to_new_readers() {
+        let home = tempfile::tempdir().unwrap();
+        let request = crate::config::resolve_config_home(Some(home.path()), None, None, None, None);
+        crate::config::with_requested_home_for_test(request, || {
+            let mut registry = AccountRegistry::default();
+            for id in ["first", "second"] {
+                registry
+                    .upsert(
+                        PROVIDER_CODEX,
+                        AccountProfile {
+                            id: id.into(),
+                            ..Default::default()
+                        },
+                        true,
+                    )
+                    .unwrap();
+            }
+            let previous = std::fs::File::open(AccountRegistry::path()).unwrap();
+            registry.switch_to(PROVIDER_CODEX, "first").unwrap();
+            let old: AccountRegistry = serde_json::from_reader(previous).unwrap();
+            assert_eq!(old.active(PROVIDER_CODEX), Some("second"));
+            assert_eq!(
+                AccountRegistry::load().active(PROVIDER_CODEX),
+                Some("first")
+            );
+        });
+    }
+
+    #[test]
+    fn familiar_selection_survives_profile_switch_and_missing_credentials() {
+        use crate::oauth_config::{save_codex_tokens_for_profile, CodexTokens};
+        let home = tempfile::tempdir().unwrap();
+        let request = crate::config::resolve_config_home(Some(home.path()), None, None, None, None);
+        crate::config::with_requested_home_for_test(request, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut registry = AccountRegistry::default();
+            for id in ["personal", "work"] {
+                registry
+                    .upsert(
+                        PROVIDER_CODEX,
+                        AccountProfile {
+                            id: id.into(),
+                            ..Default::default()
+                        },
+                        true,
+                    )
+                    .unwrap();
+            }
+            let binding = FamiliarAccount {
+                provider: PROVIDER_CODEX.into(),
+                id: "personal".into(),
+            };
+            let mut tokens = CodexTokens {
+                access_token: "synthetic".into(),
+                refresh_token: None,
+                account_id: None,
+                expires_at: Some(1),
+            };
+            save_codex_tokens_for_profile(&tokens, "personal").unwrap();
+            assert!(!runtime.block_on(binding.eligible()));
+            tokens.refresh_token = Some("synthetic refresh".into());
+            save_codex_tokens_for_profile(&tokens, "personal").unwrap();
+            assert!(runtime.block_on(binding.eligible()));
+            binding.save("atlas").unwrap();
+            assert_eq!(
+                FamiliarAccount::load("ATLAS").unwrap().as_ref(),
+                Some(&binding)
+            );
+            assert_eq!(FamiliarAccount::load("ember").unwrap(), None);
+            assert_eq!(AccountRegistry::load().active(PROVIDER_CODEX), Some("work"));
+            registry.remove(PROVIDER_CODEX, "personal").unwrap();
+            assert!(!runtime.block_on(binding.eligible()));
+            assert_eq!(FamiliarAccount::load("atlas").unwrap(), Some(binding));
+            FamiliarAccount::clear("atlas").unwrap();
+            assert_eq!(FamiliarAccount::load("atlas").unwrap(), None);
+        });
     }
 
     #[test]

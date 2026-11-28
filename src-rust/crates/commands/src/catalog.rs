@@ -337,8 +337,9 @@ fn child(
     keywords: &[&str],
 ) -> CommandSpec {
     let arguments = match (parent, name) {
-        ("account", "login") => " [--console] [--codex] [--label <name>]",
-        ("account", "switch") => " [name]",
+        ("account", "login") => " [anthropic|codex|--codex] [--console] [--label <name>]",
+        ("account", "switch") => " [<provider>/<profile-id>]",
+        ("account", "list") => " [--viable]",
         ("config", "theme") => " [name]",
         ("config", "splash") => " [show|hide|toggle]",
         ("config", "output-style") => " [style]",
@@ -349,6 +350,7 @@ fn child(
         ("session", "fork") => " [message_index]",
         ("session", "add-dir") => " <path>",
         ("session", "branch" | "tag") => " [arguments]",
+        ("familiar", "account") => " <name> [<provider>/<profile-id>|default]",
         ("familiar", "handoff") => " <name>",
         ("familiar", "whisper") | ("thinking", "steer") => " <message>",
         ("familiar", "incant" | "managed") => " [arguments]",
@@ -655,13 +657,20 @@ pub(crate) fn builtin_catalog_template() -> Vec<CommandSpec> {
         CommandSpec::active(
             "familiar",
             "Work with Coven familiars",
-            "/familiar <incant|whisper|handoff|list|managed>",
+            "/familiar <account|incant|whisper|handoff|list|managed>",
             CovenAdvanced,
             &["familiar", "agent", "subagent"],
         )
         .with_aliases(&["familiars", "agent"])
         .with_suggestions(&[EmptySession, FamiliarAvailable])
         .with_children(vec![
+            child(
+                "familiar",
+                "account",
+                "Inspect or change a familiar’s provider account",
+                CovenAdvanced,
+                &["account", "profile"],
+            ),
             child(
                 "familiar",
                 "incant",
