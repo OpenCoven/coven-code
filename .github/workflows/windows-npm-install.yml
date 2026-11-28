@@ -48,3 +48,6 @@ jobs:
       - name: Install the prepared npm tarball and run its launcher
         shell: pwsh
         run: ./scripts/windows-npm-install.ps1 -ReleaseDir (Join-Path $env:RUNNER_TEMP 'verified-release')
+      - name: Verify failure cleanup, retry, and offline reuse
+        shell: pwsh
+        run: ./scripts/windows-npm-install-recovery.ps1 -ReleaseDir (Join-Path $env:RUNNER_TEMP 'verified-release')
