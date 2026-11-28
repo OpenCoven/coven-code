@@ -1,0 +1,52 @@
+name: Verify standalone Windows updater and active-response guard
+on:
+  push:
+    branches: [qualify/611-native-update]
+    paths: ['.github/workflows/qualify-611-windows.yml']
+permissions:
+  actions: read
+  contents: read
+  statuses: write
+jobs:
+  conpty:
+    runs-on: windows-2022
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Retrieve exact and disposable candidate binaries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 90); do
+            if gh run download 46123165208 --repo "$GITHUB_REPOSITORY" -n windows-611-native-fixtures -D binaries; then break; fi
+            sleep 30
+          done
+          test -f binaries/exact/coven-code.exe && test -f binaries/fixture/coven-code.exe
+      - name: Compile offline provider fixture
+        shell: powershell
+        run: |
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /out:binaries\claude-stub.exe qualification\611\stub.cs
+          if ($LASTEXITCODE -ne 0) {exit $LASTEXITCODE}
+      - name: Verify Classic and Next
+        shell: bash
+        run: |
+          python -m pip install pywinpty
+          mkdir native-assets
+          cd native-assets
+          for f in SHA256SUMS coven-code-windows-x86_64.zip; do curl -fsSLO "https://github.com/OpenCoven/coven-code/releases/download/v0.9.3/$f"; done
+          grep 'coven-code-windows-x86_64.zip' SHA256SUMS | sha256sum -c -
+          cd ..
+          python qualification/611/windows-all.py native-results binaries native-assets
+      - name: Record result on verification branch
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          state=failure
+          if [[ "$RESULT" = success ]]; then state=success; fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state="$state" -f context=windows-611-conpty -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
