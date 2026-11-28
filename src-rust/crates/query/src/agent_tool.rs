@@ -470,7 +470,12 @@ impl AgentTool {
                 (ctx.working_dir.display().to_string(), None, None)
             };
 
+        if let Some(path) = &worktree_path {
+            child_ctx.working_dir.clone_from(path);
+        }
+        let ctx = &child_ctx;
         let query_config = QueryConfig {
+            cli_session: Default::default(),
             model,
             max_tokens: claurst_core::constants::DEFAULT_MAX_TOKENS,
             max_turns: resolved_max_turns,

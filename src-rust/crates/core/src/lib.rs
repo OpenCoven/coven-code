@@ -2606,7 +2606,29 @@ pub mod config {
             write_appearance_edits(&path, &edits).unwrap();
             let written: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(written, serde_json::json!({"someFutureKey": 1}));
+            assert_eq!(
+                written,
+                serde_json::json!({"someFutureKey": 1, "reduceMotion": true})
+            );
+        }
+
+        #[test]
+        fn either_settings_layer_can_enable_reduced_motion() {
+            for (user, project, effective) in [
+                (false, false, false),
+                (true, false, true),
+                (false, true, true),
+                (true, true, true),
+            ] {
+                let layer = |reduce_motion| Settings {
+                    reduce_motion,
+                    ..Settings::default()
+                };
+                assert_eq!(
+                    Settings::merge(layer(user), layer(project)).reduce_motion,
+                    effective
+                );
+            }
         }
 
         #[test]

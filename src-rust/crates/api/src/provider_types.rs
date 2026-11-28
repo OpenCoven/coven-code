@@ -40,6 +40,13 @@ pub enum StopReason {
 // ProviderRequest
 // ---------------------------------------------------------------------------
 
+/// In-memory continuation owned by a single conversation. Cloning it shares
+/// that conversation's CLI state with subsequent turns.
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeCliSession {
+    pub(crate) resume_id: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+}
+
 /// A normalised request that any provider adapter can consume.
 ///
 /// Provider-specific parameters that cannot be expressed through the common
@@ -87,6 +94,12 @@ pub struct ProviderRequest {
     /// Defaults to an empty JSON object `{}`.
     #[serde(default)]
     pub provider_options: Value,
+
+    /// Local subprocess context. Neither field travels over a provider wire.
+    #[serde(skip)]
+    pub working_dir: Option<std::path::PathBuf>,
+    #[serde(skip)]
+    pub cli_session: ClaudeCliSession,
 
     /// The turn's permission mode, for providers that run their own tools
     /// (the keyless `claude` transport). `None` means the caller did not say,

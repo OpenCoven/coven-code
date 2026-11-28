@@ -120,7 +120,7 @@ Type `/` for contextual suggestions, or open the command palette with Ctrl+K. En
 | `/status` | `/status [doctor\|logs]` | Show comprehensive system and session status |
 | `/status doctor` | `/status doctor` | Run diagnostic checks |
 | `/status logs` | `/status logs` | Read recent diagnostics in the interactive terminal |
-| `/update` | `/update <version\|notes>` | Check for updates and download the latest release |
+| `/update` | `/update [version\|notes]` | Check for updates and download the latest release |
 | `/update version` | `/update version` | Show the installed Coven version |
 | `/update notes` | `/update notes` | Show recent Coven release notes |
 

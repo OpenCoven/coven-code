@@ -11,6 +11,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::LOCATION;
 use reqwest::redirect::Policy;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -52,6 +53,14 @@ pub async fn run_upgrade(args: &[String]) -> Result<()> {
     } else {
         fetch_latest_version().await?
     };
+    if target_version.is_empty()
+        || !target_version.as_bytes()[0].is_ascii_digit()
+        || !target_version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+    {
+        bail!("Invalid release version: {target_version}");
+    }
     println!("Target version:  {}", target_version);
 
     if target_version == current_version && !force {
@@ -68,19 +77,21 @@ pub async fn run_upgrade(args: &[String]) -> Result<()> {
 
     // -------- download --------
     let (archive_name, is_zip) = archive_name_for_target(&target);
-    let url = format!(
-        "https://github.com/{}/releases/download/v{}/{}",
-        REPO, target_version, archive_name
-    );
+    let release = format!("https://github.com/{REPO}/releases/download/v{target_version}");
+    let tmp_dir = tempfile::Builder::new()
+        .prefix("coven-code-upgrade-")
+        .tempdir()?;
+    let archive_path = tmp_dir.path().join(&archive_name);
+    let manifest_path = tmp_dir.path().join("SHA256SUMS");
 
-    let tmp_dir = tempdir_for_upgrade()?;
-    let archive_path = tmp_dir.join(&archive_name);
-
-    println!("\nDownloading {}", url);
-    download_to_file(&url, &archive_path).await?;
+    println!("Downloading {release}/{archive_name}");
+    download_to_file(&format!("{release}/{archive_name}"), &archive_path).await?;
+    download_to_file(&format!("{release}/SHA256SUMS"), &manifest_path).await?;
+    let manifest = std::fs::read_to_string(manifest_path)?;
+    verify_archive_checksum(&archive_path, &archive_name, &manifest)?;
 
     // -------- extract --------
-    let extract_dir = tmp_dir.join("extracted");
+    let extract_dir = tmp_dir.path().join("extracted");
     std::fs::create_dir_all(&extract_dir)?;
     println!("Extracting…");
     extract_archive(&archive_path, &extract_dir, is_zip)?;
@@ -122,9 +133,6 @@ pub async fn run_upgrade(args: &[String]) -> Result<()> {
             .arg(&exe_path)
             .status();
     }
-
-    // -------- cleanup --------
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 
     println!("\nUpgraded to v{}.", target_version);
     println!("Run `coven-code --version` in a new shell to verify.");
@@ -290,12 +298,10 @@ fn extract_archive(archive: &Path, dest: &Path, is_zip: bool) -> Result<()> {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                &format!(
-                    "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                    archive.display(),
-                    dest.display()
-                ),
+                "Expand-Archive -LiteralPath $env:COVEN_UPGRADE_ARCHIVE -DestinationPath $env:COVEN_UPGRADE_DEST -Force",
             ])
+            .env("COVEN_UPGRADE_ARCHIVE", archive)
+            .env("COVEN_UPGRADE_DEST", dest)
             .status();
         if let Ok(s) = ps_status {
             if s.success() {
@@ -394,39 +400,63 @@ fn swap_binary(current: &Path, new: &Path) -> Result<()> {
         // stage the new binary next to the target (same filesystem, so
         // rename is atomic) and rename it over the directory entry, which
         // installs a fresh inode and works while the old binary is running.
-        let staged = current.with_extension("upgrade-new");
-        std::fs::copy(new, &staged)
-            .with_context(|| format!("failed to stage new binary at {}", staged.display()))?;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("failed to chmod {}", staged.display()))?;
-        if let Err(e) = std::fs::rename(&staged, current) {
-            let _ = std::fs::remove_file(&staged);
-            return Err(e)
-                .with_context(|| format!("failed to move new binary into {}", current.display()));
-        }
+        let dir = current
+            .parent()
+            .context("installed binary has no parent directory")?;
+        let mut staged = tempfile::NamedTempFile::new_in(dir)
+            .with_context(|| format!("failed to stage update in {}", dir.display()))?;
+        std::io::copy(&mut std::fs::File::open(new)?, staged.as_file_mut())?;
+        staged
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        staged.as_file().sync_all()?;
+        staged
+            .persist(current)
+            .with_context(|| format!("failed to install new binary at {}", current.display()))?;
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tempdir
-// ---------------------------------------------------------------------------
-
-fn tempdir_for_upgrade() -> Result<PathBuf> {
-    let base = std::env::temp_dir();
-    let pid = std::process::id();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let dir = base.join(format!("coven-code-upgrade-{}-{}", pid, now));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+fn verify_archive_checksum(path: &Path, name: &str, manifest: &str) -> Result<()> {
+    let mut entries = manifest.lines().filter_map(|line| {
+        let (digest, file) = line.trim().split_once(char::is_whitespace)?;
+        (file.trim().trim_start_matches('*') == name).then_some(digest)
+    });
+    let expected = entries.next().context("Release checksum is missing")?;
+    if entries.next().is_some() {
+        bail!("Release manifest contains duplicate checksums for {name}");
+    }
+    let mut archive = std::fs::File::open(path)?;
+    let mut sha = Sha256::new();
+    std::io::copy(&mut archive, &mut sha)?;
+    let actual = format!("{:x}", sha.finalize());
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("Release checksum mismatch for {name}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::release_version_from_location;
+    use super::{release_version_from_location, verify_archive_checksum};
+
+    #[test]
+    fn checksums_match_the_named_archive_and_reject_wrong_or_duplicate_entries() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"abc").unwrap();
+        let entry =
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  archive.tar.gz";
+        assert!(verify_archive_checksum(tmp.path(), "archive.tar.gz", entry).is_ok());
+        assert!(verify_archive_checksum(tmp.path(), "other.tar.gz", entry).is_err());
+        assert!(verify_archive_checksum(
+            tmp.path(),
+            "archive.tar.gz",
+            &format!("{entry}\n{entry}")
+        )
+        .is_err());
+        std::fs::write(tmp.path(), b"corrupted").unwrap();
+        assert!(verify_archive_checksum(tmp.path(), "archive.tar.gz", entry).is_err());
+    }
 
     #[test]
     fn parses_latest_release_redirect_locations() {

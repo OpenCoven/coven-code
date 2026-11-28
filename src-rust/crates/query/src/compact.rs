@@ -940,6 +940,11 @@ fn strip_images(messages: Vec<claurst_core::types::Message>) -> Vec<claurst_core
         .collect()
 }
 
+/// Number of older messages available for a reactive summary.
+pub(super) fn reactive_head_len(messages: &[Message]) -> usize {
+    messages.len().saturating_sub(KEEP_RECENT_MESSAGES)
+}
+
 /// Run reactive compact: summarise the oldest messages and return a trimmed
 /// conversation.
 ///
@@ -959,23 +964,8 @@ pub async fn reactive_compact(
         return Err(claurst_core::error::ClaudeError::Cancelled);
     }
 
-    let total = messages.len();
-    if total == 0 {
-        return Ok(CompactResult {
-            messages: vec![],
-            summary: String::new(),
-            tokens_freed: 0,
-        });
-    }
-
-    // Phase 2: strip images before the compact API call.
-    let stripped = strip_images(messages.clone());
-
-    // Phase 1 + 3: summarise the head (all but the most recent KEEP_RECENT_MESSAGES),
-    // then replace the old head with the summary message.
-    let split_at = total.saturating_sub(KEEP_RECENT_MESSAGES);
+    let split_at = reactive_head_len(&messages);
     if split_at == 0 {
-        // Too few messages; nothing to summarise.
         return Ok(CompactResult {
             messages,
             summary: String::new(),
@@ -983,6 +973,7 @@ pub async fn reactive_compact(
         });
     }
 
+    let stripped = strip_images(messages);
     let original_token_estimate = estimate_tokens_for_messages(&stripped[..split_at]) as u64;
 
     let mut new_messages = tokio::select! {

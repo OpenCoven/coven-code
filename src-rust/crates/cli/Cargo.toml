@@ -48,9 +48,11 @@ open = "5"
 urlencoding = "2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+
 [dev-dependencies]
 coven-runtime-spec = { workspace = true }
-tempfile = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }

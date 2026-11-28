@@ -32,12 +32,11 @@
 // one kills the CLI and the work the answer was waiting for.
 //
 // Session continuity: the CLI's `session_id` (from the `init` envelope) is
-// cached per process and replayed via `--resume` on follow-up turns. A fresh
+// cached per conversation and replayed via `--resume` on follow-up turns. A fresh
 // conversation (no assistant turns in the request) resets the cache. When no
 // session can be resumed (e.g. Coven Code restarted mid-conversation), the
 // prior transcript is flattened into the prompt instead.
 
-use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -128,9 +127,6 @@ const HEARTBEAT_PERIOD: std::time::Duration = std::time::Duration::from_secs(15)
 /// to exit, or to start the turn that reports on it, after a `result`. A CLI
 /// that does neither is done, and the stream ends without it.
 const EXIT_GRACE_BEATS: u32 = 2;
-
-/// The `claude` session id carried across turns within this process.
-static CLI_SESSION: Mutex<Option<String>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // Prompt assembly
@@ -693,10 +689,9 @@ impl ClaudeCliProvider {
     /// line to confirm the process came up.
     async fn spawn_turn(
         &self,
-        model: &str,
+        request: &ProviderRequest,
         content: &[ContentBlock],
         resume: Option<&str>,
-        permission: Option<&PermissionMode>,
     ) -> Result<SpawnOutcome, ProviderError> {
         // Coven's permission policy, when Coven started this engine. Without
         // it the CLI would run under whatever the operator's and the
@@ -704,6 +699,7 @@ impl ClaudeCliProvider {
         // permission mode: `build_args` passes the turn's own. A read-only
         // turn gets the policy without its allow rules, which the CLI would
         // otherwise apply in plan mode as well.
+        let permission = request.permission_mode.as_ref();
         let read_only = cli_permission_mode(permission) == READ_ONLY_CLI_MODE;
         let policy_args =
             super::claude_cli_policy::args_from_environment(read_only).map_err(|message| {
@@ -714,12 +710,24 @@ impl ClaudeCliProvider {
                     body: None,
                 }
             })?;
-        let mut command = Command::new(self.binary_or_default());
+        // Resolve relative executable paths against the launcher's cwd before
+        // selecting the conversation directory for the child.
+        let program = self.binary_or_default();
+        let executable = if program.components().count() == 1 && program.is_relative() {
+            which::which(&program)
+                .map_err(|_| self.spawn_error(std::io::ErrorKind::NotFound.into()))?
+        } else {
+            std::path::absolute(program).map_err(|error| self.spawn_error(error))?
+        };
+        let mut command = Command::new(executable);
+        if let Some(cwd) = &request.working_dir {
+            command.current_dir(cwd);
+        }
         if let Some(directory) = &self.config_dir {
             claurst_core::accounts::claude_cli::configure(&mut command, directory);
         }
         command
-            .args(build_args(model, resume, permission))
+            .args(build_args(&request.model, resume, permission))
             .args(policy_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -841,21 +849,19 @@ impl ClaudeCliProvider {
             .iter()
             .any(|message| matches!(message.role, Role::Assistant));
         let resume_session = if has_assistant_turns {
-            CLI_SESSION.lock().clone()
+            request.cli_session.resume_id.lock().clone()
         } else {
             // Fresh conversation (e.g. /clear): drop any cached session.
-            *CLI_SESSION.lock() = None;
+            *request.cli_session.resume_id.lock() = None;
             None
         };
 
-        let permission = request.permission_mode.as_ref();
         if let Some(session_id) = resume_session {
             match self
                 .spawn_turn(
-                    &request.model,
+                    request,
                     &current_turn_content(request, false),
                     Some(&session_id),
-                    permission,
                 )
                 .await?
             {
@@ -863,16 +869,13 @@ impl ClaudeCliProvider {
                 SpawnOutcome::ExitedEarly { .. } => {
                     // Stale session — start over with the transcript inlined.
                     warn!(session_id = %session_id, "claude CLI session could not be resumed; starting fresh");
-                    *CLI_SESSION.lock() = None;
+                    *request.cli_session.resume_id.lock() = None;
                 }
             }
         }
 
         let content = current_turn_content(request, has_assistant_turns);
-        match self
-            .spawn_turn(&request.model, &content, None, permission)
-            .await?
-        {
+        match self.spawn_turn(request, &content, None).await? {
             SpawnOutcome::Turn(turn) => Ok(*turn),
             SpawnOutcome::ExitedEarly { stderr: detail } => Err(ProviderError::Other {
                 provider: self.id.clone(),
@@ -973,7 +976,8 @@ impl LlmProvider for ClaudeCliProvider {
     {
         let mut turn = self.start_turn(&request).await?;
         let provider_id = self.id.clone();
-        let fallback_model = request.model.clone();
+        let fallback_model = request.model;
+        let cli_session = request.cli_session;
         let heartbeat_period = self.heartbeat;
         let quiet_limit = self.quiet_limit;
 
@@ -992,7 +996,7 @@ impl LlmProvider for ClaudeCliProvider {
             loop {
                 let outcome = mapper.map_line(&line);
                 if let Some(session_id) = mapper.session_id.as_deref() {
-                    let mut cached = CLI_SESSION.lock();
+                    let mut cached = cli_session.resume_id.lock();
                     if cached.as_deref() != Some(session_id) {
                         *cached = Some(session_id.to_string());
                     }
@@ -1254,6 +1258,8 @@ mod tests {
             stop_sequences: Vec::new(),
             thinking: None,
             provider_options: json!({}),
+            working_dir: None,
+            cli_session: Default::default(),
             permission_mode: None,
         }
     }

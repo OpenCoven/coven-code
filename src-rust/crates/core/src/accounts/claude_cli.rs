@@ -25,7 +25,7 @@ pub fn resolve_claude_binary() -> Option<PathBuf> {
         for name in names {
             let candidate = dir.join(name);
             if candidate.is_file() {
-                return Some(candidate);
+                return std::path::absolute(candidate).ok();
             }
         }
     }

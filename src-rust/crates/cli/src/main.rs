@@ -508,7 +508,10 @@ async fn run() -> anyhow::Result<()> {
                 anyhow::bail!("Workspace sandbox verification requires exactly one policy file.");
             };
             let file = Path::new(file);
-            workspace_scope::WorkspaceScope::read(file, &std::env::current_dir()?)?
+            let cwd = std::env::current_dir().with_context(|| {
+                format!("Could not locate the working folder for workspace policy {file:?}")
+            })?;
+            workspace_scope::WorkspaceScope::read(file, &cwd)?
                 .verify(file)
                 .await?
                 .write_receipt(std::io::stdout().lock())?;
@@ -3300,6 +3303,17 @@ struct LedgerRegistrations {
 /// also slow to take the request itself.
 const LEDGER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long the exit waits for the completions once they are sent (#580):
+/// the 2 s the engine gives a busy daemon elsewhere (the reachability
+/// probe, the health reads around a registration). A daemon on a local
+/// socket answers a completion in milliseconds. Past this the exit goes on
+/// without the answer; whether the daemon still records the completion
+/// depends on it finishing before the connection closes, and a row it never
+/// records stays `running`, as against a daemon that is down. A quit is
+/// therefore delayed by the daemon by at most this plus
+/// [`LEDGER_EXIT_WAIT`], however it behaves.
+const LEDGER_COMPLETION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl LedgerRegistrations {
     /// Send a registration for session `id` off the UI thread and show it
     /// as waiting for its answer. `register` is the blocking daemon call.
@@ -3314,7 +3328,10 @@ impl LedgerRegistrations {
         use claurst_tui::application::SessionOwnership;
 
         let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
-        tokio::task::spawn_blocking(move || {
+        // A thread of its own, not the runtime's blocking pool: the runtime
+        // waits for that pool when it shuts down, so a registration still
+        // waiting for a silent daemon would hold the process at exit (#580).
+        std::thread::spawn(move || {
             let _ = answer_tx.send(register().into());
         });
         self.answer = Some(answer_rx);
@@ -3369,9 +3386,9 @@ impl LedgerRegistrations {
     /// A registration still in flight gets up to `wait` to finish first;
     /// if it has not, the completions go out anyway and one may reach the
     /// daemon ahead of its registration. The completions run side by side,
-    /// so a daemon that accepts and never answers delays the exit by one
-    /// request timeout, however many ids there are. `complete` is the
-    /// blocking daemon call.
+    /// and the exit waits for them for [`LEDGER_COMPLETION_WAIT`] at most,
+    /// however many ids there are and however the daemon behaves. `complete`
+    /// is the blocking daemon call.
     async fn complete_all(
         self,
         wait: std::time::Duration,
@@ -3381,16 +3398,152 @@ impl LedgerRegistrations {
             let _ = tokio::time::timeout(wait, answer).await;
         }
         let complete = Arc::new(complete);
-        let completions: Vec<_> = self
-            .sent
-            .into_iter()
-            .map(|id| {
-                let complete = Arc::clone(&complete);
-                tokio::task::spawn_blocking(move || complete(&id))
-            })
-            .collect();
-        for completion in completions {
-            let _ = completion.await;
+        // Each completion holds a sender; once every one has returned (or
+        // given up) the channel closes.
+        let (running, mut finished) = tokio::sync::mpsc::channel::<()>(1);
+        for id in self.sent {
+            let complete = Arc::clone(&complete);
+            let running = running.clone();
+            // Threads of their own, not the runtime's blocking pool, which
+            // the runtime waits for when it shuts down.
+            std::thread::spawn(move || {
+                complete(&id);
+                drop(running);
+            });
+        }
+        drop(running);
+        let _ = tokio::time::timeout(LEDGER_COMPLETION_WAIT, finished.recv()).await;
+    }
+}
+
+/// How long a daemon listing may run before the loop says it is waiting.
+/// A daemon that answers at all answers well within this, so a healthy one
+/// shows no notice.
+const DAEMON_LISTING_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The one Coven daemon listing (`/coven sessions`, `/coven familiars`,
+/// `/familiar list`) running off the UI loop's thread (#580), until its
+/// answer lands. A second listing started meanwhile is not sent: against a
+/// daemon that never answers, every one would wait out its whole request
+/// timeout.
+#[derive(Default)]
+struct DaemonListings {
+    pending: Option<PendingListing>,
+}
+
+struct PendingListing {
+    command: &'static str,
+    started: std::time::Instant,
+    /// The waiting notice, once shown.
+    notice: Option<String>,
+    /// The notices saying a later listing was not sent because of this one.
+    refusals: Vec<String>,
+    answer: std::sync::mpsc::Receiver<Result<String, String>>,
+}
+
+impl PendingListing {
+    /// Take down the notices about this listing: once it has landed or been
+    /// forgotten, none of them is true any more.
+    fn clear_notices(self, app: &mut claurst_tui::App) {
+        app.notifications.notifications.retain(|shown| {
+            self.notice.as_deref() != Some(shown.message.as_str())
+                && !self.refusals.contains(&shown.message)
+        });
+    }
+}
+
+impl DaemonListings {
+    /// Forget a listing still waiting, and its notice, when the transcript
+    /// it was typed into is replaced: its answer would land in another one.
+    fn forget(&mut self, app: &mut claurst_tui::App) {
+        if let Some(pending) = self.pending.take() {
+            pending.clear_notices(app);
+        }
+    }
+
+    /// Run `listing`, the blocking daemon call for `command`, on a thread of
+    /// its own, unless another listing is still waiting.
+    fn start(
+        &mut self,
+        app: &mut claurst_tui::App,
+        command: &'static str,
+        listing: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) {
+        use claurst_tui::notifications::NotificationKind;
+
+        if let Some(pending) = &mut self.pending {
+            // Short enough for the toast (about 40 columns) in both renderers.
+            let refusal = format!("Not sent; waiting on {}", pending.command);
+            if !pending.refusals.contains(&refusal) {
+                pending.refusals.push(refusal.clone());
+            }
+            app.push_notification(NotificationKind::Warning, refusal, Some(5));
+            return;
+        }
+        let (answer_tx, answer) = std::sync::mpsc::channel();
+        // Not the runtime's blocking pool, which the runtime waits for at
+        // exit: a listing may still be waiting for the daemon then.
+        std::thread::spawn(move || {
+            let _ = answer_tx.send(listing());
+        });
+        self.pending = Some(PendingListing {
+            command,
+            started: std::time::Instant::now(),
+            notice: None,
+            refusals: Vec::new(),
+            answer,
+        });
+    }
+
+    /// Show the listing's outcome once it has landed, and say the daemon is
+    /// being waited for once it has taken longer than
+    /// [`DAEMON_LISTING_NOTICE_AFTER`]. While `turn_running`, an answer that
+    /// has landed waits too: slash command output never lands between a
+    /// prompt and its reply.
+    fn settle(&mut self, app: &mut claurst_tui::App, now: std::time::Instant, turn_running: bool) {
+        use claurst_tui::notifications::NotificationKind;
+        use std::sync::mpsc::TryRecvError;
+
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
+        let answer = if turn_running {
+            Err(TryRecvError::Empty)
+        } else {
+            pending.answer.try_recv()
+        };
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(TryRecvError::Disconnected) => {
+                Err(format!("{} stopped without an answer", pending.command))
+            }
+            Err(TryRecvError::Empty) => {
+                if pending.notice.is_none()
+                    && now.saturating_duration_since(pending.started) >= DAEMON_LISTING_NOTICE_AFTER
+                {
+                    // Short enough for the toast in both renderers.
+                    let notice = format!("Waiting for Coven: {}", pending.command);
+                    app.push_notification(NotificationKind::Info, notice.clone(), None);
+                    pending.notice = Some(notice);
+                }
+                return;
+            }
+        };
+        if let Some(pending) = self.pending.take() {
+            let handoff = pending.command == "/familiar handoff";
+            pending.clear_notices(app);
+            if handoff {
+                let (kind, text) = match answer {
+                    Ok(text) => (NotificationKind::Info, text),
+                    Err(text) => (NotificationKind::Warning, text),
+                };
+                app.push_notification(kind, text, Some(5));
+                return;
+            }
+        }
+        match answer {
+            Ok(message) => app.push_message(claurst_core::types::Message::assistant(message)),
+            Err(error) => app.show_command_error(format!("Error: {error}")),
         }
     }
 }
@@ -4070,10 +4223,12 @@ async fn run_interactive(
     let mut selected_account = None;
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
+    let mut daemon_listings = DaemonListings::default();
     let mut settings_screen_was_open = false;
     // When the loop last saw a permission panel open, or closed one; cleared
     // when a turn ends. See `open_permission_panel`.
     let mut panel_last_open: Option<std::time::Instant> = None;
+    let mut update_version = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -4128,6 +4283,12 @@ async fn run_interactive(
             &mut memory_poll,
             spawn_memory_read,
         );
+        let turn_running = app.is_streaming || current_query.is_some();
+        app.agents_menu.settle_badges();
+        daemon_listings.settle(&mut app, std::time::Instant::now(), turn_running);
+        if let Some(handoff) = app.pending_handoff.take() {
+            daemon_listings.start(&mut app, "/familiar handoff", move || handoff.deliver());
+        }
 
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
@@ -4207,6 +4368,7 @@ async fn run_interactive(
             None
         };
 
+        let auto_submit = synthetic_event.is_some();
         let evt_opt: Option<Event> = if let Some(e) = synthetic_event {
             Some(e)
         } else if let Some(k) = app.take_pending_key() {
@@ -4265,8 +4427,18 @@ async fn run_interactive(
                     // `any_modal_open` also counts passive banners that render
                     // as overlays but never take a keystroke, and those would
                     // silently eat Enter and strand the conversation.
-                    let any_dialog_open = app.any_blocking_modal_open();
-                    if key.code == KeyCode::Enter && app.is_streaming && !any_dialog_open {
+                    let submit_enter = key.code == KeyCode::Enter
+                        && !app.any_blocking_modal_open()
+                        && (auto_submit || !app.vim_line_open());
+                    if submit_enter && (app.is_streaming || current_query.is_some()) {
+                        let (name, args) = claurst_tui::input::parse_slash_command(&app.prompt_input.text);
+                        if args.is_empty() && (name.eq_ignore_ascii_case("update") || name.eq_ignore_ascii_case("upgrade")) {
+                            app.take_input();
+                            app.show_command_error("Wait for the current response to finish before running /update.".to_string());
+                            continue;
+                        }
+                    }
+                    if submit_enter && app.is_streaming {
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
                         let input = app.take_input();
@@ -4287,7 +4459,7 @@ async fn run_interactive(
                         }
                         continue;
                     }
-                    if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
+                    if submit_enter && !app.is_streaming {
                         // A plain Enter on an empty prompt opens the latest completed
                         // response reader. Route it through App before take_input(),
                         // which would otherwise consume the key as a no-op.
@@ -4487,7 +4659,13 @@ async fn run_interactive(
 
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
+                                Some(CommandResult::InstallUpdate(version)) => {
+                                    update_version = Some(version);
+                                    break 'main;
+                                }
                                 Some(CommandResult::ClearConversation) => {
+                                    base_query_config.cli_session = Default::default();
+                                    daemon_listings.forget(&mut app);
                                     replace_conversation(
                                         &mut session_scope,
                                         Vec::new(),
@@ -4498,6 +4676,8 @@ async fn run_interactive(
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
+                                    base_query_config.cli_session = Default::default();
+                                    daemon_listings.forget(&mut app);
                                     let removed = messages.len().saturating_sub(new_msgs.len());
                                     replace_conversation(
                                         &mut session_scope,
@@ -4534,7 +4714,9 @@ async fn run_interactive(
                                         Some("Select what to import from ~/.claude.".to_string());
                                 }
                                 Some(CommandResult::ResumeSession(resumed_session)) => {
+                                    daemon_listings.forget(&mut app);
                                     session_scope.advance();
+                                    base_query_config.cli_session = Default::default();
                                     session = resumed_session;
                                     app.enter_session_scope(&session.id);
                                     messages = session.messages.clone();
@@ -4663,6 +4845,11 @@ async fn run_interactive(
                                         "MCP OAuth — '{}' started. Complete authentication in your browser.\nURL: {}\nCallback URL: {}",
                                         server_name, auth_url, redirect_uri
                                     ));
+                                }
+                                Some(CommandResult::DaemonListing(listing)) => {
+                                    daemon_listings.start(&mut app, listing.command(), move || {
+                                        listing.run()
+                                    });
                                 }
                                 Some(CommandResult::Message(msg)) => {
                                     // Suppress text output when TUI already opened an
@@ -5339,6 +5526,10 @@ async fn run_interactive(
                             tools_arc =
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
+                    }
+                    if app.rewind_confirmed_at.is_some() {
+                        base_query_config.cli_session = Default::default();
+                        daemon_listings.forget(&mut app);
                     }
                     adopt_in_app_rewind(&mut session_scope, &mut app, &mut messages, &mut session);
                 }
@@ -6597,6 +6788,9 @@ async fn run_interactive(
         .await;
 
     terminal_result?;
+    if let Some(version) = update_version {
+        upgrade::run_upgrade(&["--version".to_string(), version]).await?;
+    }
     Ok(())
 }
 
@@ -9583,6 +9777,224 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert_eq!(*log.lock().unwrap(), ["complete session-a"]);
         drop(release);
+    }
+
+    /// #580: a daemon listing runs off the loop's thread. Starting one
+    /// returns at once and the loop's own steps keep returning while it
+    /// waits; after [`DAEMON_LISTING_NOTICE_AFTER`] a notice says what is
+    /// waited for; a second listing meanwhile is not run; the answer lands as
+    /// the command's message and takes the notice away.
+    #[test]
+    fn a_daemon_listing_waits_off_the_loop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut listings = DaemonListings::default();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        listings.start(&mut app, "/coven sessions", move || {
+            let _ = held.recv_timeout(Duration::from_secs(5));
+            Ok("the daemon's sessions".to_string())
+        });
+        listings.settle(&mut app, Instant::now(), false);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "starting and checking a listing took {:?}",
+            started.elapsed()
+        );
+        assert!(app.notifications.current().is_none(), "no notice at once");
+
+        listings.settle(
+            &mut app,
+            Instant::now() + DAEMON_LISTING_NOTICE_AFTER,
+            false,
+        );
+        let notice = app.notifications.current().expect("a waiting notice");
+        assert_eq!(
+            notice.message, "Waiting for Coven: /coven sessions",
+            "the notice fits the toast"
+        );
+
+        let second_ran = Arc::new(AtomicBool::new(false));
+        {
+            let second_ran = Arc::clone(&second_ran);
+            listings.start(&mut app, "/coven familiars", move || {
+                second_ran.store(true, Ordering::Release);
+                Ok(String::new())
+            });
+        }
+        assert_eq!(
+            app.notifications
+                .current()
+                .map(|shown| shown.message.as_str()),
+            Some("Not sent; waiting on /coven sessions"),
+            "the refusal fits the toast"
+        );
+
+        // An answer that lands while a turn runs waits for the turn to end.
+        release.send(()).unwrap();
+        let held_until = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < held_until {
+            listings.settle(&mut app, Instant::now(), true);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(listings.pending.is_some(), "the answer landed mid-turn");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while listings.pending.is_some() {
+            assert!(Instant::now() < deadline, "the listing never landed");
+            listings.settle(&mut app, Instant::now(), false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.messages.last().map(|message| message.get_all_text()),
+            Some("the daemon's sessions".to_string())
+        );
+        assert!(
+            !app.notifications
+                .notifications
+                .iter()
+                .any(|shown| shown.message.starts_with("Waiting for Coven")
+                    || shown.message.starts_with("Not sent;")),
+            "the waiting notice and the refusal are gone"
+        );
+        assert!(
+            !second_ran.load(Ordering::Acquire),
+            "the second listing ran"
+        );
+
+        // A failed listing is the command's error, and the next one runs.
+        listings.start(&mut app, "/coven familiars", || {
+            Err("Coven daemon offline. Try `/coven daemon start`.".to_string())
+        });
+        while listings.pending.is_some() {
+            assert!(Instant::now() < deadline, "the listing never landed");
+            listings.settle(&mut app, Instant::now(), false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Error: Coven daemon offline. Try `/coven daemon start`.")
+        );
+
+        // A listing still waiting when the transcript is replaced is
+        // forgotten with its notice; the next listing runs.
+        let (_release, held) = std::sync::mpsc::channel::<()>();
+        listings.start(&mut app, "/coven sessions", move || {
+            let _ = held.recv_timeout(Duration::from_secs(5));
+            Ok("late sessions".to_string())
+        });
+        listings.settle(
+            &mut app,
+            Instant::now() + DAEMON_LISTING_NOTICE_AFTER,
+            false,
+        );
+        let waiting = |app: &claurst_tui::app::App| {
+            app.notifications
+                .notifications
+                .iter()
+                .any(|shown| shown.message.starts_with("Waiting for Coven"))
+        };
+        assert!(waiting(&app), "a waiting notice");
+        listings.forget(&mut app);
+        assert!(listings.pending.is_none());
+        assert!(!waiting(&app), "the waiting notice is gone");
+        let count = app.messages.len();
+        listings.start(&mut app, "/coven familiars", || Ok("familiars".to_string()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while listings.pending.is_some() {
+            assert!(Instant::now() < deadline, "the listing never landed");
+            listings.settle(&mut app, Instant::now(), false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.messages.len(), count + 1);
+        assert_eq!(
+            app.messages.last().map(|message| message.get_all_text()),
+            Some("familiars".to_string())
+        );
+    }
+
+    /// #580: a completion the daemon never answers holds the exit only for
+    /// a short, fixed time.
+    #[tokio::test]
+    async fn exit_waits_a_bounded_time_for_an_unanswered_completion() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut ledger = LedgerRegistrations::default();
+        ledger.register(&mut app, "session-a", || Ok(None));
+        settle_ledger(&mut ledger, &mut app).await;
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Mutex::new(held);
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            ledger.complete_all(Duration::from_millis(100), move |_| {
+                let _ = held.lock().unwrap().recv();
+            }),
+        )
+        .await
+        .expect("the exit waited for a completion that never answers");
+        let elapsed = started.elapsed();
+        drop(release);
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "the exit waited {elapsed:?} for the completion"
+        );
+    }
+
+    /// #580: neither a registration still in flight nor a completion the
+    /// daemon never answers keeps the runtime, and so the process, alive
+    /// once the exit has stopped waiting for them.
+    #[test]
+    fn daemon_ledger_calls_do_not_hold_the_runtime_at_exit() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let (release_registration, registration) = std::sync::mpsc::channel::<()>();
+        let (release_completion, completion) = std::sync::mpsc::channel::<()>();
+        let completion = Mutex::new(completion);
+        runtime.block_on(async {
+            let mut ledger = LedgerRegistrations::default();
+            ledger.register(&mut app, "session-a", move || {
+                let _ = registration.recv_timeout(Duration::from_secs(8));
+                Err("no answer".to_string())
+            });
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                ledger.complete_all(Duration::from_millis(100), move |_| {
+                    let _ = completion
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(8));
+                }),
+            )
+            .await;
+        });
+        let started = Instant::now();
+        drop(runtime);
+        let elapsed = started.elapsed();
+        drop((release_registration, release_completion));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the runtime waited {elapsed:?} for daemon calls at exit"
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 pub struct SessionState {
     pub session_id: acp::SessionId,
     pub cwd: PathBuf,
+    pub cli_session: claurst_api::ClaudeCliSession,
     pub messages: parking_lot::Mutex<Vec<Message>>,
     pub cancel_token: parking_lot::Mutex<CancellationToken>,
     pub next_permission_id: Arc<std::sync::atomic::AtomicU64>,
@@ -32,6 +33,7 @@ impl SessionState {
         Arc::new(Self {
             session_id,
             cwd,
+            cli_session: Default::default(),
             messages: parking_lot::Mutex::new(Vec::new()),
             cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
             next_permission_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),

@@ -74,6 +74,7 @@ pub enum CommandResult {
     /// Trigger the OAuth login flow (handled by the REPL in main.rs).
     /// The bool indicates whether to use Claude.ai auth (true) or Console auth (false).
     StartOAuthFlow(bool),
+    InstallUpdate(String),
     /// Trigger the OAuth login flow for a specific provider with optional
     /// human-friendly label for the new account profile.
     ///
@@ -112,6 +113,272 @@ pub enum CommandResult {
         mode: Option<String>,
         level: String,
     },
+    /// A Coven daemon listing to run off the interactive loop's thread
+    /// (#580); see [`DaemonListing`].
+    DaemonListing(DaemonListing),
+}
+
+/// A Coven daemon listing a command hands back instead of waiting for the
+/// daemon on the caller's thread (#580). The interactive loop runs
+/// [`DaemonListing::run`] on a thread of its own, one listing at a time,
+/// and shows the outcome when it lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonListing {
+    Doctor {
+        report: Vec<String>,
+    },
+    Status,
+    Actions {
+        action: String,
+        args: Option<serde_json::Value>,
+    },
+    Events {
+        id: String,
+        after: Option<i64>,
+        limit: Option<u32>,
+    },
+    Capabilities,
+    Send {
+        id: String,
+        input: String,
+    },
+    Kill {
+        id: String,
+    },
+    Info {
+        id: String,
+    },
+    Log {
+        id: String,
+    },
+    /// `/coven sessions [--all]`.
+    Sessions {
+        include_archived: bool,
+    },
+    /// `/coven familiars`.
+    Familiars,
+    /// `/familiar list`: workspace agents and familiars, with the daemon's
+    /// live familiar statuses.
+    Agents {
+        working_dir: PathBuf,
+    },
+}
+
+impl DaemonListing {
+    /// The command as typed, for what the loop shows while it waits.
+    pub fn command(&self) -> &'static str {
+        match self {
+            DaemonListing::Sessions { .. } => "/coven sessions",
+            Self::Log { .. } => "/coven log",
+            Self::Info { .. } => "/coven info",
+            Self::Kill { .. } => "/coven kill",
+            Self::Send { .. } => "/coven send",
+            Self::Capabilities => "/coven capabilities",
+            Self::Events { .. } => "/coven events",
+            Self::Actions { .. } => "/coven actions",
+            Self::Status => "/coven status",
+            Self::Doctor { .. } => "/status doctor",
+            DaemonListing::Familiars => "/coven familiars",
+            DaemonListing::Agents { .. } => "/familiar list",
+        }
+    }
+
+    /// Ask the daemon and format its answer: `Ok` is the command's message,
+    /// `Err` its error. Blocks for up to the daemon client's request
+    /// timeout, so never call it on the interactive loop's thread.
+    pub fn run(&self) -> Result<String, String> {
+        use claurst_core::coven_shared::DaemonClient;
+
+        const OFFLINE: &str = "Coven daemon offline. Try `/coven daemon start`.";
+        match self {
+            DaemonListing::Sessions { include_archived } => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_string());
+                };
+                let sessions = if *include_archived {
+                    client.all_sessions()
+                } else {
+                    client.active_sessions()
+                };
+                sessions
+                    .map(|sessions| coven_format_sessions(&sessions, *include_archived))
+                    .map_err(|e| coven_render_error(&e))
+            }
+            DaemonListing::Familiars => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_string());
+                };
+                let statuses = client
+                    .familiar_statuses()
+                    .map_err(|e| coven_render_error(&e))?;
+                if statuses.is_empty() {
+                    return Ok("No familiars reported by the daemon.".to_string());
+                }
+                let mut out = String::new();
+                out.push_str(&format!(
+                    "{:<12}  {:<14}  {:<8}  active  freshness\n",
+                    "id", "display", "status"
+                ));
+                out.push_str(&format!("{}\n", "-".repeat(64)));
+                for f in &statuses {
+                    out.push_str(&format!(
+                        "{:<12}  {:<14}  {:<8}  {:>6}  {}\n",
+                        f.id, f.display_name, f.status, f.active_sessions, f.memory_freshness,
+                    ));
+                }
+                Ok(out)
+            }
+            Self::Log { id } => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_owned());
+                };
+                match client.session_log(id) {
+                    Ok(log) if !log.is_empty() => Ok(log),
+                    Ok(_) => Ok("(session log is empty)".to_string()),
+                    Err(e) => Err(coven_render_error(&e)),
+                }
+            }
+            Self::Info { id } => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_owned());
+                };
+                match client.get_session(id) {
+                    Ok(s) => {
+                        let archived = s
+                            .archived_at
+                            .as_deref()
+                            .map(|t| format!("\n  archived: {t}"))
+                            .unwrap_or_default();
+                        let title = if s.title.is_empty() {
+                            "(untitled)"
+                        } else {
+                            s.title.as_str()
+                        };
+                        Ok(format!(
+                            "Session {id}\n  harness: {h}\n  status: {st}\n  project: {root}\n  title: {t}{a}",
+                            id = s.id,
+                            h = s.harness,
+                            st = s.status,
+                            root = s.project_root,
+                            t = title,
+                            a = archived,
+                        ))
+                    }
+                    Err(e) => Err(coven_render_error(&e)),
+                }
+            }
+            Self::Kill { id } => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_owned());
+                };
+                match client.kill_session(id) {
+                    Ok(()) => Ok(format!("Killed session {id}.")),
+                    Err(e) => Err(coven_render_error(&e)),
+                }
+            }
+            Self::Send { id, input } => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_owned());
+                };
+                match client.send_input(id, input) {
+                    Ok(()) => Ok(format!("Sent input to {id}.")),
+                    Err(e) => Err(coven_render_error(&e)),
+                }
+            }
+            Self::Capabilities => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_owned());
+                };
+                match client.capabilities() {
+                    Ok(body) => {
+                        let pretty = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                            .unwrap_or(body);
+                        Ok(pretty)
+                    }
+                    Err(e) => Err(coven_render_error(&e)),
+                }
+            }
+            Self::Events { id, after, limit } => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_owned());
+                };
+                match client.session_events(id, *after, *limit) {
+                    Ok(page) => {
+                        if page.events.is_empty() {
+                            return Ok("End of events stream.".to_string());
+                        }
+                        let mut out = String::new();
+                        out.push_str(&format!(
+                            "{:<5}  {:<16}  {:<20}  {}\n",
+                            "seq", "kind", "createdAt", "payload (truncated)"
+                        ));
+                        out.push_str(&format!("{}\n", "-".repeat(78)));
+                        for ev in &page.events {
+                            let seq = ev
+                                .seq
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "?".to_string());
+                            let payload = if ev.payload_json.chars().count() > 36 {
+                                let s: String = ev.payload_json.chars().take(36).collect();
+                                format!("{s}…")
+                            } else {
+                                ev.payload_json.clone()
+                            };
+                            out.push_str(&format!(
+                                "{:<5}  {:<16}  {:<20}  {}\n",
+                                seq, ev.kind, ev.created_at, payload
+                            ));
+                        }
+                        if page.has_more {
+                            if let Some(next) = page.next_after_seq {
+                                out.push_str(&format!(
+                                    "\nMore events available — `/coven events {id} --after {next}`."
+                                ));
+                            } else {
+                                out.push_str("\nMore events available.");
+                            }
+                        } else {
+                            out.push_str("\nEnd of events stream.");
+                        }
+                        Ok(out)
+                    }
+                    Err(e) => Err(coven_render_error(&e)),
+                }
+            }
+            Self::Actions { action, args } => {
+                let Some(client) = DaemonClient::new() else {
+                    return Ok(OFFLINE.to_owned());
+                };
+                match client.control_action(action, args.clone()) {
+                    Ok(res) => {
+                        let mut out = format!(
+                            "action: {a}\nstatus: {st}\naccepted: {acc}\nok: {ok}",
+                            a = res.action,
+                            st = res.status,
+                            acc = res.accepted,
+                            ok = res.ok,
+                        );
+                        if let Some(r) = res.reason {
+                            out.push_str(&format!("\nreason: {r}"));
+                        }
+                        Ok(out)
+                    }
+                    Err(e) => Err(coven_render_error(&e)),
+                }
+            }
+            Self::Doctor { report } => {
+                Ok(finish_doctor_report(report.clone(), DaemonClient::new()))
+            }
+            Self::Status => Ok(DaemonClient::new()
+                .map(|client| coven_format_health(&client))
+                .unwrap_or_else(|| OFFLINE.to_owned())),
+            DaemonListing::Agents { working_dir } => {
+                Ok(named_commands::agents_listing(working_dir))
+            }
+        }
+    }
 }
 
 /// Every slash command implements this trait.
@@ -2882,82 +3149,96 @@ impl SlashCommand for DoctorCommand {
         // the api version + structured-error capability so users can tell
         // at a glance whether `/coven` integration is fully wired up.
         lines.push("Coven Substrate".to_string());
-        match claurst_core::coven_shared::DaemonClient::new() {
-            None => {
-                // Name the socket path the client uses, which follows
-                // COVEN_HOME. On Unix that is the file `DaemonClient::new`
-                // just looked for; elsewhere it opens no socket and always
-                // lands here.
-                lines.push(match claurst_core::coven_shared::daemon_socket_path() {
-                    Some(sock) => format!("  • Daemon not installed (no {})", sock.display()),
-                    None => "  • Daemon not installed (no socket path: COVEN_HOME is unset or \
+        if claurst_core::coven_shared::DaemonClient::new().is_some() {
+            CommandResult::DaemonListing(DaemonListing::Doctor { report: lines })
+        } else {
+            CommandResult::Message(finish_doctor_report(lines, None))
+        }
+    }
+}
+
+fn finish_doctor_report(
+    mut lines: Vec<String>,
+    client: Option<claurst_core::coven_shared::DaemonClient>,
+) -> String {
+    match client {
+        #[cfg(not(unix))]
+        None => {
+            lines.push("  • The Coven daemon client is unsupported on this platform.".to_string())
+        }
+        #[cfg(unix)]
+        None => {
+            // Name the socket path the client uses, which follows
+            // COVEN_HOME. On Unix that is the file `DaemonClient::new`
+            // just looked for.
+            lines.push(match claurst_core::coven_shared::daemon_socket_path() {
+                Some(sock) => format!("  • Daemon not installed (no {})", sock.display()),
+                None => "  • Daemon not installed (no socket path: COVEN_HOME is unset or \
                              empty and no home directory was found)"
-                        .to_string(),
-                });
-                lines.push(
-                    "    Install: npm install -g @opencoven/coven  →  coven daemon start"
-                        .to_string(),
-                );
-            }
-            Some(client) => {
-                if !client.is_online() {
-                    lines.push("  ✗ Daemon socket present but not responding".to_string());
-                    lines.push("    Try: coven daemon restart".to_string());
-                } else {
-                    match client.health() {
-                        Ok(h) => {
-                            let api_ok = h.api_version == COVEN_DAEMON_EXPECTED_API;
-                            let marker = if api_ok { "✓" } else { "⚠" };
+                    .to_string(),
+            });
+            lines.push(
+                "    Install: npm install -g @opencoven/coven  →  coven daemon start".to_string(),
+            );
+        }
+        Some(client) => {
+            if !client.is_online() {
+                lines.push("  ✗ Daemon socket present but not responding".to_string());
+                lines.push("    Try: coven daemon restart".to_string());
+            } else {
+                match client.health() {
+                    Ok(h) => {
+                        let api_ok = h.api_version == COVEN_DAEMON_EXPECTED_API;
+                        let marker = if api_ok { "✓" } else { "⚠" };
+                        lines.push(format!(
+                            "  {} Daemon online ({}, coven {})",
+                            marker,
+                            if h.api_version.is_empty() {
+                                "unknown api"
+                            } else {
+                                h.api_version.as_str()
+                            },
+                            if h.coven_version.is_empty() {
+                                "?"
+                            } else {
+                                h.coven_version.as_str()
+                            },
+                        ));
+                        if !api_ok && !h.api_version.is_empty() {
                             lines.push(format!(
-                                "  {} Daemon online ({}, coven {})",
-                                marker,
-                                if h.api_version.is_empty() {
-                                    "unknown api"
-                                } else {
-                                    h.api_version.as_str()
-                                },
-                                if h.coven_version.is_empty() {
-                                    "?"
-                                } else {
-                                    h.coven_version.as_str()
-                                },
-                            ));
-                            if !api_ok && !h.api_version.is_empty() {
-                                lines.push(format!(
-                                    "    Expected {COVEN_DAEMON_EXPECTED_API}; \
+                                "    Expected {COVEN_DAEMON_EXPECTED_API}; \
                                      `/coven` features may not work."
+                            ));
+                        }
+                        match client.active_sessions() {
+                            Ok(sessions) => {
+                                lines.push(format!(
+                                    "  • Active daemon sessions: {}",
+                                    sessions.iter().filter(|s| s.is_live()).count()
                                 ));
                             }
-                            match client.active_sessions() {
-                                Ok(sessions) => {
-                                    lines.push(format!(
-                                        "  • Active daemon sessions: {}",
-                                        sessions.iter().filter(|s| s.is_live()).count()
-                                    ));
-                                }
-                                Err(e) => {
-                                    lines.push(format!("  ⚠ Could not list sessions: {e}"));
-                                }
-                            }
-                            match client.familiar_statuses() {
-                                Ok(fams) => {
-                                    lines.push(format!("  • Familiars registered: {}", fams.len()));
-                                }
-                                Err(_) => {
-                                    // Familiar listing is best-effort.
-                                }
+                            Err(e) => {
+                                lines.push(format!("  ⚠ Could not list sessions: {e}"));
                             }
                         }
-                        Err(e) => {
-                            lines.push(format!("  ⚠ Health check failed: {e}"));
+                        match client.familiar_statuses() {
+                            Ok(fams) => {
+                                lines.push(format!("  • Familiars registered: {}", fams.len()));
+                            }
+                            Err(_) => {
+                                // Familiar listing is best-effort.
+                            }
                         }
+                    }
+                    Err(e) => {
+                        lines.push(format!("  ⚠ Health check failed: {e}"));
                     }
                 }
             }
         }
-
-        CommandResult::Message(lines.join("\n"))
     }
+
+    lines.join("\n")
 }
 
 // ---- /login --------------------------------------------------------------
@@ -3826,6 +4107,8 @@ impl SlashCommand for ReviewCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            working_dir: Some(ctx.working_dir.clone()),
+            cli_session: Default::default(),
             permission_mode: None,
         };
 
@@ -6082,6 +6365,8 @@ impl SlashCommand for RenameCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            working_dir: Some(ctx.working_dir.clone()),
+            cli_session: Default::default(),
             permission_mode: None,
         };
 
@@ -7318,8 +7603,7 @@ impl SlashCommand for UpgradeCommand {
     }
     fn help(&self) -> &str {
         "Usage: /update [version|notes]\n\n\
-         Checks GitHub releases for the latest version of Coven.\n\
-         If a newer version is available, shows where to download it.\n\
+         Installs the latest release and exits so you can restart Coven Code.\n\
          Use /update version to show the installed version or /update notes for highlights."
     }
 
@@ -7330,30 +7614,21 @@ impl SlashCommand for UpgradeCommand {
             "notes" | "release-notes" => {
                 return ReleaseNotesCommand.execute(remaining_args, ctx).await
             }
-            _ => {}
+            "" => {}
+            _ => return CommandResult::Error(self.help().to_string()),
         }
         let current = claurst_core::constants::APP_VERSION;
 
         match fetch_latest_release(current).await {
             Ok(latest) => {
-                if latest.version == current {
+                if !claurst_core::update_check::is_newer(&latest.version, current) {
                     CommandResult::Message(format!(
                         "Coven v{current} - you are up to date.\n\
                          Release page: {}",
                         latest.url
                     ))
                 } else {
-                    CommandResult::Message(format!(
-                        "Update available!\n\
-                         Current version:  v{current}\n\
-                         Latest version:   v{}\n\
-                         Release page:     {}\n\n\
-                         Upgrade in place (recommended):\n\
-                           coven-code upgrade\n\n\
-                         Or build from source:\n\
-                           cargo install coven-code --force",
-                        latest.version, latest.url
-                    ))
+                    CommandResult::InstallUpdate(latest.version)
                 }
             }
             Err(e) => CommandResult::Message(format!(
@@ -9219,7 +9494,14 @@ impl SlashCommand for FamiliarCommand {
             "whisper" => return BtwCommand.execute(rest, ctx).await,
             "handoff" => return CommandResult::Silent,
             // Workspace agent management (absorbed from /agents via /agent).
-            "list" | "create" | "edit" | "delete" => {
+            // The list reads live familiar statuses from the daemon, off the
+            // loop's thread (#580).
+            "list" => {
+                return CommandResult::DaemonListing(DaemonListing::Agents {
+                    working_dir: ctx.working_dir.clone(),
+                })
+            }
+            "create" | "edit" | "delete" => {
                 return execute_named_command_from_slash("agents", trimmed, ctx);
             }
             // Manager-executor architecture (absorbed from /managed-agents).
@@ -10395,7 +10677,7 @@ impl SlashCommand for CovenCommand {
         // No subcommand → status. Matches `coven` (default) UX in coven-cli.
         if sub.is_empty() || sub == "status" {
             match DaemonClient::new() {
-                Some(client) => return CommandResult::Message(coven_format_health(&client)),
+                Some(_) => return CommandResult::DaemonListing(DaemonListing::Status),
                 None => {
                     let not_found = match claurst_core::coven_shared::daemon_socket_path() {
                         Some(sock) => {
@@ -10419,72 +10701,40 @@ impl SlashCommand for CovenCommand {
 
         match sub {
             // Read-only listings — use the in-process client.
+            // The daemon is asked off the loop's thread (#580).
             "sessions" => {
                 let include_archived = rest.split_whitespace().any(|t| t == "--all" || t == "-a");
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                let result = if include_archived {
-                    client.all_sessions()
-                } else {
-                    client.active_sessions()
-                };
-                match result {
-                    Ok(sessions) => {
-                        CommandResult::Message(coven_format_sessions(&sessions, include_archived))
-                    }
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Sessions { include_archived })
             }
 
             // Native-API verbs. The daemon's HTTP contract exposes these
             // directly, so we hit it in-process and bypass the shell-out
             // path entirely.
             "familiars" => {
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                let statuses = match client.familiar_statuses() {
-                    Ok(s) => s,
-                    Err(e) => return CommandResult::Error(coven_render_error(&e)),
-                };
-                if statuses.is_empty() {
-                    return CommandResult::Message(
-                        "No familiars reported by the daemon.".to_string(),
-                    );
                 }
-                let mut out = String::new();
-                out.push_str(&format!(
-                    "{:<12}  {:<14}  {:<8}  active  freshness\n",
-                    "id", "display", "status"
-                ));
-                out.push_str(&format!("{}\n", "-".repeat(64)));
-                for f in &statuses {
-                    out.push_str(&format!(
-                        "{:<12}  {:<14}  {:<8}  {:>6}  {}\n",
-                        f.id, f.display_name, f.status, f.active_sessions, f.memory_freshness,
-                    ));
-                }
-                CommandResult::Message(out)
+                CommandResult::DaemonListing(DaemonListing::Familiars)
             }
             "log" => {
                 if rest.is_empty() {
                     return CommandResult::Error("Usage: /coven log <session-id>".to_string());
                 }
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                match client.session_log(rest) {
-                    Ok(log) if !log.is_empty() => CommandResult::Message(log),
-                    Ok(_) => CommandResult::Message("(session log is empty)".to_string()),
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Log {
+                    id: rest.to_owned(),
+                })
             }
             "send" => {
                 let mut split = rest.splitn(2, char::is_whitespace);
@@ -10495,46 +10745,36 @@ impl SlashCommand for CovenCommand {
                         "Usage: /coven send <session-id> <text>".to_string(),
                     );
                 }
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                match client.send_input(id, input) {
-                    Ok(()) => CommandResult::Message(format!("Sent input to {id}.")),
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Send {
+                    id: id.to_owned(),
+                    input: input.to_owned(),
+                })
             }
             "kill" => {
                 if rest.is_empty() {
                     return CommandResult::Error("Usage: /coven kill <session-id>".to_string());
                 }
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                match client.kill_session(rest) {
-                    Ok(()) => CommandResult::Message(format!("Killed session {rest}.")),
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Kill {
+                    id: rest.to_owned(),
+                })
             }
             "capabilities" => {
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                match client.capabilities() {
-                    Ok(body) => {
-                        let pretty = serde_json::from_str::<serde_json::Value>(&body)
-                            .ok()
-                            .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                            .unwrap_or(body);
-                        CommandResult::Message(pretty)
-                    }
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Capabilities)
             }
             "runtimes" => {
                 let mut json = false;
@@ -10551,35 +10791,14 @@ impl SlashCommand for CovenCommand {
                 if rest.is_empty() {
                     return CommandResult::Error("Usage: /coven info <session-id>".to_string());
                 }
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                match client.get_session(rest) {
-                    Ok(s) => {
-                        let archived = s
-                            .archived_at
-                            .as_deref()
-                            .map(|t| format!("\n  archived: {t}"))
-                            .unwrap_or_default();
-                        let title = if s.title.is_empty() {
-                            "(untitled)"
-                        } else {
-                            s.title.as_str()
-                        };
-                        CommandResult::Message(format!(
-                            "Session {id}\n  harness: {h}\n  status: {st}\n  project: {root}\n  title: {t}{a}",
-                            id = s.id,
-                            h = s.harness,
-                            st = s.status,
-                            root = s.project_root,
-                            t = title,
-                            a = archived,
-                        ))
-                    }
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Info {
+                    id: rest.to_owned(),
+                })
             }
             "events" => {
                 if rest.is_empty() {
@@ -10617,53 +10836,16 @@ impl SlashCommand for CovenCommand {
                         }
                     }
                 }
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                match client.session_events(id, after, limit) {
-                    Ok(page) => {
-                        if page.events.is_empty() {
-                            return CommandResult::Message("End of events stream.".to_string());
-                        }
-                        let mut out = String::new();
-                        out.push_str(&format!(
-                            "{:<5}  {:<16}  {:<20}  {}\n",
-                            "seq", "kind", "createdAt", "payload (truncated)"
-                        ));
-                        out.push_str(&format!("{}\n", "-".repeat(78)));
-                        for ev in &page.events {
-                            let seq = ev
-                                .seq
-                                .map(|n| n.to_string())
-                                .unwrap_or_else(|| "?".to_string());
-                            let payload = if ev.payload_json.chars().count() > 36 {
-                                let s: String = ev.payload_json.chars().take(36).collect();
-                                format!("{s}…")
-                            } else {
-                                ev.payload_json.clone()
-                            };
-                            out.push_str(&format!(
-                                "{:<5}  {:<16}  {:<20}  {}\n",
-                                seq, ev.kind, ev.created_at, payload
-                            ));
-                        }
-                        if page.has_more {
-                            if let Some(next) = page.next_after_seq {
-                                out.push_str(&format!(
-                                    "\nMore events available — `/coven events {id} --after {next}`."
-                                ));
-                            } else {
-                                out.push_str("\nMore events available.");
-                            }
-                        } else {
-                            out.push_str("\nEnd of events stream.");
-                        }
-                        CommandResult::Message(out)
-                    }
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Events {
+                    id: id.to_owned(),
+                    after,
+                    limit,
+                })
             }
             "actions" => {
                 if rest.is_empty() {
@@ -10686,27 +10868,15 @@ impl SlashCommand for CovenCommand {
                         }
                     }
                 };
-                let Some(client) = DaemonClient::new() else {
+                if DaemonClient::new().is_none() {
                     return CommandResult::Message(
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
-                };
-                match client.control_action(action, args) {
-                    Ok(res) => {
-                        let mut out = format!(
-                            "action: {a}\nstatus: {st}\naccepted: {acc}\nok: {ok}",
-                            a = res.action,
-                            st = res.status,
-                            acc = res.accepted,
-                            ok = res.ok,
-                        );
-                        if let Some(r) = res.reason {
-                            out.push_str(&format!("\nreason: {r}"));
-                        }
-                        CommandResult::Message(out)
-                    }
-                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+                CommandResult::DaemonListing(DaemonListing::Actions {
+                    action: action.to_owned(),
+                    args,
+                })
             }
 
             // Verbs that shell out — the daemon's HTTP API does not expose
@@ -13153,12 +13323,16 @@ mod tests {
         let mut ctx = make_ctx();
         let command = find_command("agent").unwrap();
 
-        // /agent list routes to the named agents command.
+        // /agent list routes to the named agents command's listing, read
+        // off the loop's thread.
         let result = command.execute("list", &mut ctx).await;
-        assert!(
-            matches!(result, CommandResult::Message(_)),
-            "/agent list should route to the named agents command"
-        );
+        let CommandResult::DaemonListing(listing) = result else {
+            panic!("/agent list should route to the agents listing, got {result:?}");
+        };
+        assert_eq!(listing.command(), "/familiar list");
+        assert!(listing
+            .run()
+            .is_ok_and(|text| text.starts_with("Available Agents")));
 
         // /agent managed routes to the managed-agents surface.
         let result = command.execute("managed", &mut ctx).await;
@@ -13424,9 +13598,15 @@ mod tests {
                 // Either the daemon is installed and we report status/version,
                 // or it isn't and we point at the install hint. Both paths
                 // must produce a non-empty section.
+                #[cfg(unix)]
                 let has_status = msg.contains("Daemon online")
                     || msg.contains("Daemon socket present")
                     || msg.contains("Daemon not installed");
+                #[cfg(not(unix))]
+                let has_status = msg
+                    .contains("The Coven daemon client is unsupported on this platform.")
+                    && !msg.contains("Daemon not installed")
+                    && !msg.contains("npm install -g @opencoven/coven");
                 assert!(
                     has_status,
                     "/doctor substrate section is empty, got:\n{msg}"
@@ -14194,6 +14374,7 @@ mod tests {
     /// (`$COVEN_HOME/coven.sock`), not a fixed `~/.coven` path. The guard
     /// points HOME and COVEN_HOME at a fresh tempdir with no socket, so this
     /// never reads the real `~/.coven` or reaches a running daemon.
+    #[cfg(unix)]
     #[test]
     fn doctor_names_the_socket_under_coven_home() {
         let guard = CommandEnvGuard::with_coven_home(None);
@@ -14330,10 +14511,15 @@ mod tests {
                 ],
             );
             let mut ctx = make_ctx();
-            let result = coven.execute("send dead-session hello", &mut ctx).await;
+            let CommandResult::DaemonListing(request) =
+                coven.execute("send dead-session hello", &mut ctx).await
+            else {
+                panic!("command should defer its daemon request");
+            };
+            let result = request.run();
             let _ = server.join();
             match result {
-                CommandResult::Error(msg) => {
+                Err(msg) => {
                     assert!(
                         msg.contains("session_not_live"),
                         "expected session_not_live code, got: {msg}"
@@ -14361,10 +14547,14 @@ mod tests {
                 ],
             );
             let mut ctx = make_ctx();
-            let result = coven.execute("info ghost", &mut ctx).await;
+            let CommandResult::DaemonListing(request) = coven.execute("info ghost", &mut ctx).await
+            else {
+                panic!("command should defer its daemon request");
+            };
+            let result = request.run();
             let _ = server.join();
             match result {
-                CommandResult::Error(msg) => {
+                Err(msg) => {
                     assert!(
                         msg.contains("session_not_found"),
                         "expected session_not_found code, got: {msg}"
@@ -14390,20 +14580,147 @@ mod tests {
             );
             let mut ctx = make_ctx();
             let result = coven.execute("sessions", &mut ctx).await;
-            let _ = server.join();
-            match result {
-                CommandResult::Message(msg) => {
-                    assert!(
-                        msg.contains("abc-123"),
-                        "expected session id in list, got: {msg}"
-                    );
-                    assert!(msg.contains("openclaw"), "expected harness, got: {msg}");
-                    assert!(msg.contains("hello world"), "expected title, got: {msg}");
+            let CommandResult::DaemonListing(listing) = result else {
+                panic!("expected a daemon listing from /coven sessions, got {result:?}");
+            };
+            assert_eq!(
+                listing,
+                DaemonListing::Sessions {
+                    include_archived: false
                 }
-                other => panic!("expected Message from /coven sessions, got {other:?}"),
-            }
+            );
+            let msg = listing.run().expect("the daemon answered");
+            let _ = server.join();
+            assert!(
+                msg.contains("abc-123"),
+                "expected session id in list, got: {msg}"
+            );
+            assert!(msg.contains("openclaw"), "expected harness, got: {msg}");
+            assert!(msg.contains("hello world"), "expected title, got: {msg}");
             std::fs::remove_file(&sock_path).ok();
         }
+    }
+
+    /// #580: the three daemon listings return to the event loop at once. A
+    /// daemon that accepts every connection and never answers used to hold
+    /// each of them for the whole request timeout, with nothing drawn or
+    /// read meanwhile.
+    //
+    // The env guard is held across `.await` on purpose, as in
+    // `coven_command_integrates_with_daemon_mock`: `COVEN_HOME` must stay
+    // pinned to this test's directory throughout, and the lock only
+    // serializes tests in this file.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn the_daemon_listings_do_not_wait_for_the_daemon() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let coven_home = guard.coven_home().to_path_buf();
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            "[[familiar]]\nid = \"wisp\"\n",
+        )
+        .unwrap();
+        // Accepts every connection and holds it open, silent.
+        let listener =
+            std::os::unix::net::UnixListener::bind(coven_home.join("coven.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let silent = {
+            let stop = Arc::clone(&stop);
+            let accepted = Arc::clone(&accepted);
+            std::thread::spawn(move || {
+                let mut held = Vec::new();
+                while !stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            accepted.fetch_add(1, Ordering::AcqRel);
+                            held.push(stream);
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            })
+        };
+
+        for (input, command) in [
+            ("/coven sessions", "/coven sessions"),
+            ("/coven familiars", "/coven familiars"),
+            ("/familiar list", "/familiar list"),
+            ("/coven info abc", "/coven info"),
+            ("/coven events abc", "/coven events"),
+            ("/coven log abc", "/coven log"),
+            ("/coven kill abc", "/coven kill"),
+            ("/coven send abc text", "/coven send"),
+            ("/coven actions ping", "/coven actions"),
+            ("/coven capabilities", "/coven capabilities"),
+            ("/coven status", "/coven status"),
+        ] {
+            let mut ctx = make_ctx();
+            let started = std::time::Instant::now();
+            let result = execute_command(input, &mut ctx).await;
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "{input} held the event loop for {elapsed:?}: {result:?}"
+            );
+            // The daemon is asked only when the loop runs the listing.
+            let Some(CommandResult::DaemonListing(listing)) = result else {
+                panic!("{input} did not hand back a daemon listing: {result:?}");
+            };
+            assert_eq!(listing.command(), command);
+            assert_eq!(
+                accepted.load(Ordering::Acquire),
+                0,
+                "{input} asked the daemon"
+            );
+        }
+        stop.store(true, Ordering::Release);
+        silent.join().unwrap();
+    }
+
+    /// The listings' answers once the daemon gives them: `/coven familiars`
+    /// formats the statuses, and a daemon error is the listing's error.
+    /// (`/familiar list` reads statuses through a process-wide cache, so its
+    /// badge is covered by the agents view's own tests.)
+    #[cfg(unix)]
+    #[test]
+    fn daemon_listings_format_the_daemon_answer() {
+        use std::io::{Read, Write};
+
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let coven_home = guard.coven_home().to_path_buf();
+        let listener =
+            std::os::unix::net::UnixListener::bind(coven_home.join("coven.sock")).unwrap();
+        let answers = [
+            "HTTP/1.0 200 OK\r\n\r\n[{\"id\":\"wisp\",\"display_name\":\"Wisp\",\"status\":\"online\",\"active_sessions\":2}]",
+            "HTTP/1.0 500 Internal Server Error\r\n\r\n{\"error\":{\"code\":\"store_unavailable\",\"message\":\"Store is down.\"}}",
+        ];
+        let server = std::thread::spawn(move || {
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+
+        let familiars = DaemonListing::Familiars.run().expect("the daemon answered");
+        assert!(
+            familiars.contains("wisp") && familiars.contains("Wisp"),
+            "{familiars}"
+        );
+        let error = DaemonListing::Sessions {
+            include_archived: true,
+        }
+        .run()
+        .expect_err("the daemon refused");
+        assert!(error.contains("store_unavailable"), "{error}");
+        server.join().unwrap();
     }
 
     /// `/coven status` and `/status doctor` count only live sessions as
@@ -14471,24 +14788,21 @@ mod tests {
 
         let mut ctx = make_ctx();
         let coven = find_command("coven").expect("/coven command must be registered");
-        let status = coven.execute("status", &mut ctx).await;
+        let CommandResult::DaemonListing(status) = coven.execute("status", &mut ctx).await else {
+            panic!("daemon status must run on the worker");
+        };
+        let status = status.run().unwrap();
         let status_cmd = find_command("status").expect("/status must be registered");
-        let doctor = status_cmd.execute("doctor", &mut ctx).await;
+        let CommandResult::DaemonListing(doctor) = status_cmd.execute("doctor", &mut ctx).await
+        else {
+            panic!("daemon diagnostics must run on the worker");
+        };
+        let doctor = doctor.run().unwrap();
         stop.store(true, Ordering::SeqCst);
         let _ = server.join();
 
-        match status {
-            CommandResult::Message(msg) => {
-                assert!(msg.contains("active sessions: 2\n"), "{msg}");
-            }
-            other => panic!("expected Message from /coven status, got {other:?}"),
-        }
-        match doctor {
-            CommandResult::Message(msg) => {
-                assert!(msg.contains("Active daemon sessions: 2\n"), "{msg}");
-            }
-            other => panic!("expected Message from /status doctor, got {other:?}"),
-        }
+        assert!(status.contains("active sessions: 2\n"), "{status}");
+        assert!(doctor.contains("Active daemon sessions: 2\n"), "{doctor}");
     }
 
     #[test]

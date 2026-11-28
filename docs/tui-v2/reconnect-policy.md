@@ -299,11 +299,11 @@ a start time is not an instance: it could not be told from its successor.
 The background reachability probe behind the daemon indicator (at most one
 every 10 s, as before) now reads `GET /api/v1/health` to the end instead of
 the first byte of `GET /api/v1/familiars`. Its 2 s budget now covers the whole
-read once connected, so a peer that keeps sending bytes cannot hold it. The
-connect itself is not timed (it never was): on a Unix socket it returns at
-once unless the daemon's listen queue is full, which on Linux blocks it and on
-macOS refuses it. "Online" still means anything but gone, so a busy daemon is
-not shown as offline.
+read once connected, so a peer that keeps sending bytes cannot hold it. Since
+#580 the connect shares that budget: on a Unix socket it returns at once
+unless the daemon's listen queue is full, which on Linux waits for room (now
+until the budget ends) and on macOS refuses it. "Online" still means anything
+but gone, so a busy daemon is not shown as offline.
 
 **Registration is tied to an instance.** With `daemonLedger` on, the
 registration reads health before and after its `POST /api/v1/sessions/external`
@@ -363,6 +363,20 @@ registration for, to whichever daemon answers then, including after the state
 became unknown. A registration still in flight gets up to 2 s to finish
 first. That is best effort: against a daemon slower than that, a completion
 can still arrive ahead of its registration and leave the row `running`.
+Since #580 the exit then waits at most 2 s for the completions, which run
+side by side on threads of their own. Past that the exit goes on without the
+answer: whether the daemon still records a completion depends on it
+finishing before the connection closes, and a row it never records stays
+`running`, as against a daemon that is down. Neither a registration nor a
+completion still waiting keeps the process alive after that.
+
+Until #580 the registration and completion requests had no total deadline:
+each read waited up to 5 s and that timer restarted with every byte, and the
+connect was not timed. Every request now has one 5 s deadline over the
+connect, the request and the whole answer. A registration therefore gives up
+within 9 s at worst (2 s health, 5 s request, 2 s health); against a daemon
+that never answers it takes 7 s, because the second health read is skipped
+once the request has failed.
 
 **Sessions that never registered** (`daemonLedger` off, the default) remember
 no instance. Their indicator reads online or offline as before, and nothing
@@ -407,10 +421,6 @@ daemon.
   for its answer sends nothing: once that answer lands the state reads
   registered for the session sent first, and the session bound last is not
   registered until a later session start finds the state unknown.
-- The registration and completion requests keep their old transport: each read
-  waits up to 5 s, and that timer restarts with every byte, so a peer that
-  trickles bytes can hold them longer, and the connect is not timed (see the
-  probe above). Only the probe's whole read has a deadline.
 
 **Observed on 2026-11-18** with Coven v0.5.0 in a disposable `HOME` and
 `COVEN_HOME`, `daemonLedger` on, Classic and Next at 120x40:
@@ -446,6 +456,16 @@ quit within the first seconds after a launch or a `/session resume` waits up
 to 2 s for the registration still in flight before it sends the completions,
 and the process then still waits for that registration's own task to end
 (at most its 7 s against a silent daemon).
+
+Since #580 (tmux case `37_silent_daemon_keeps_input.sh`): the three listings
+ask the daemon on a thread of their own, one at a time. Input and drawing go
+on; after 300 ms a notice says the daemon is being waited for, and the
+listing's result (here, the 5 s deadline's error) lands when it arrives; one
+that arrives during a turn waits for the turn to end. A second listing typed
+meanwhile is not sent, and a toast says `Not sent; waiting on` the listing
+still waiting. Quitting
+waits at most 2 s for the completion, plus up to 2 s for a registration still
+in flight, and the process then ends at once.
 
 ## Deferred
 
@@ -501,6 +521,23 @@ and the process then still waits for that registration's own task to end
   from the ledger, so a revoked or superseded revision invalidates bound views
   and pending actions (#411's protected actions stay unavailable until their
   producer contracts exist).
+
+## Daemon responsiveness qualification
+
+Local tmux runs exercised Classic and Next with the daemon ledger enabled. Each range below covers both renderers against a listener that accepts a request and stays silent or sends one byte every half second. The baseline was #601 at `4632fd9d`. The follow-up used the same commands, fixture, and terminal size.
+
+| Observation | Baseline | Follow-up |
+| --- | --- | --- |
+| Handoff keypress to redraw | 5.022–5.056 s | 0.015–0.021 s |
+| Events keypress to redraw | 5.030–5.060 s | 0.014–0.103 s |
+| Open the familiar menu | 5.023–5.066 s | 0.011–0.085 s |
+| Quit following a handoff | 2.915–3.025 s | 4.190–4.283 s |
+
+The healthy control returned one new session for each handoff with the expected familiar, project, harness, and context. Both renderers showed success. A repeated handoff while the first was pending sent one create request in total. A successful reply released after a clear or confirmed rewind reached neither replacement conversation.
+
+Quit was timed from the first Ctrl+C until the process exited. In the baseline the composer accepted the marker after the request had timed out, so the registration had a head start by the time quit was tested. In the follow-up quit began while the request and launch registration were pending. That path has two separate two-second ledger waits. In the settled-registration fixture, exit took about two seconds. Connect, write, and read share one five-second request deadline, including when a peer trickles bytes.
+
+Hosted Rust CI and TUI Tests check the PR heads independently. The response times above come from the local fixtures. Reconnect epoch handling and release acceptance remain separate checks.
 
 ## Real-daemon recovery journey
 
