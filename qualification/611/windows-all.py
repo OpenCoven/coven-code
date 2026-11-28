@@ -24,7 +24,7 @@ def run(ui, mode):
  threading.Thread(target=server.serve_forever,daemon=True).start()
  env={k:v for k,v in os.environ.items() if k.upper() in ('PATH','SYSTEMROOT','WINDIR','TEMP','TMP','COMSPEC','PATHEXT','PROCESSOR_ARCHITECTURE')}
  env.update(HOME=str(p),USERPROFILE=str(p),APPDATA=str(p/'roaming'),LOCALAPPDATA=str(p/'local'),COVEN_CODE_HOME=str(config),COVEN_CODE_UI=ui,COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',TERM='xterm-256color')
- if mode=='active':env['COVEN_CODE_CLAUDE_BIN']=str((binaries/'claude-stub.exe').resolve())
+ env['COVEN_CODE_CLAUDE_BIN']=str((binaries/'claude-stub.exe').resolve())
  proc=PtyProcess.spawn([str(exe)],cwd=str(p),env=env,dimensions=(40,120))
  chunks=[]
  def read():
@@ -40,9 +40,9 @@ def run(ui, mode):
   while time.monotonic()<deadline:
    if pred():return
    time.sleep(.1)
-  raise AssertionError((ui,mode,requests,''.join(chunks)[-3000:]))
+  plain=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', ''.join(chunks)); raise AssertionError((ui,mode,requests,plain[:3000],plain[-1600:]))
  try:
-  wait(lambda:any(w in ''.join(chunks) for w in ['shortcuts','preview','Coven v']))
+  wait(lambda:any(w in re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', ''.join(chunks)) for w in ['shortcuts','preview','Coven v','BUILD']))
   if mode=='active':
    time.sleep(.6);proc.write('hold611');time.sleep(.4);proc.write('\r')
    wait(lambda:(p/'active').exists())
